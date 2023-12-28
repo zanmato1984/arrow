@@ -576,24 +576,25 @@ Status ExecBatchBuilder::AppendSelected(const std::shared_ptr<ArrayData>& source
     // Step 1: calculate target offsets
     //
     int32_t* offsets = reinterpret_cast<int32_t*>(target->mutable_data(1));
-    int32_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
-    Visit(source, num_rows_to_append, row_ids,
-          [&](int i, const uint8_t* ptr, int32_t num_bytes) {
-            offsets[num_rows_before + i] = num_bytes;
-          });
-    for (int i = 0; i < num_rows_to_append; ++i) {
-      int32_t length = offsets[num_rows_before + i];
-      offsets[num_rows_before + i] = sum;
-      int32_t new_sum_maybe_overflow = 0;
-      if (ARROW_PREDICT_FALSE(
-              arrow::internal::AddWithOverflow(sum, length, &new_sum_maybe_overflow))) {
-        return Status::Invalid("Overflow detected in ExecBatchBuilder when appending ",
-                               num_rows_before + i + 1, "-th element of length ", length,
-                               " bytes to current length ", sum, " bytes");
+    {
+      int32_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
+      Visit(source, num_rows_to_append, row_ids,
+            [&](int i, const uint8_t* ptr, uint32_t num_bytes) {
+              offsets[num_rows_before + i] = num_bytes;
+            });
+      for (int i = 0; i < num_rows_to_append; ++i) {
+        int32_t length = offsets[num_rows_before + i];
+        offsets[num_rows_before + i] = sum;
+        if (ARROW_PREDICT_FALSE(static_cast<size_t>(sum) + length >
+                                std::numeric_limits<int32_t>::max())) {
+          return Status::Invalid("ExecBatchBuilder offset overflow detected for the ",
+                                 i + 1, "-th element, last offset ", sum, ", length ",
+                                 length);
+        }
+        sum += length;
       }
-      sum = new_sum_maybe_overflow;
+      offsets[num_rows_before + num_rows_to_append] = sum;
     }
-    offsets[num_rows_before + num_rows_to_append] = sum;
 
     // Step 2: resize output buffers
     //
