@@ -19,6 +19,7 @@
 
 #include <type_traits>
 
+#include "arrow/array/builder_binary.h"
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/int_util_overflow.h"
 #include "arrow/util/macros.h"
@@ -577,23 +578,23 @@ Status ExecBatchBuilder::AppendSelected(const std::shared_ptr<ArrayData>& source
     //
     int32_t* offsets = reinterpret_cast<int32_t*>(target->mutable_data(1));
     {
-      int32_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
+      int64_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
       Visit(source, num_rows_to_append, row_ids,
             [&](int i, const uint8_t* ptr, uint32_t num_bytes) {
               offsets[num_rows_before + i] = num_bytes;
             });
       for (int i = 0; i < num_rows_to_append; ++i) {
         int32_t length = offsets[num_rows_before + i];
-        offsets[num_rows_before + i] = sum;
-        if (ARROW_PREDICT_FALSE(static_cast<size_t>(sum) + length >
-                                std::numeric_limits<int32_t>::max())) {
-          return Status::Invalid("ExecBatchBuilder offset overflow detected for the ",
-                                 i + 1, "-th element, last offset ", sum, ", length ",
-                                 length);
+        offsets[num_rows_before + i] = static_cast<int32_t>(sum);
+        if (ARROW_PREDICT_FALSE(sum + length > BinaryBuilder::memory_limit())) {
+          return Status::Invalid("ExecBatchBuilder cannot contain more than ",
+                                 BinaryBuilder::memory_limit(), " bytes, current ", sum,
+                                 ", appending ", num_rows_before + i + 1,
+                                 "-th element of length ", length);
         }
         sum += length;
       }
-      offsets[num_rows_before + num_rows_to_append] = sum;
+      offsets[num_rows_before + num_rows_to_append] = static_cast<int32_t>(sum);
     }
 
     // Step 2: resize output buffers
