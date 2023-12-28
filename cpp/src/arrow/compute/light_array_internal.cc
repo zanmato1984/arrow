@@ -19,6 +19,7 @@
 
 #include <type_traits>
 
+#include "arrow/array/builder_binary.h"
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/int_util_overflow.h"
 #include "arrow/util/macros.h"
