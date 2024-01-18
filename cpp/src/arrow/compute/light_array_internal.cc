@@ -577,7 +577,7 @@ Status ExecBatchBuilder::AppendSelected(const std::shared_ptr<ArrayData>& source
     // Step 1: calculate target offsets
     //
     int32_t* offsets = reinterpret_cast<int32_t*>(target->mutable_data(1));
-    int32_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
+    int64_t sum = num_rows_before == 0 ? 0 : offsets[num_rows_before];
     Visit(source, num_rows_to_append, row_ids,
           [&](int i, const uint8_t* ptr, int32_t num_bytes) {
             offsets[num_rows_before + i] = num_bytes;
@@ -594,6 +594,7 @@ Status ExecBatchBuilder::AppendSelected(const std::shared_ptr<ArrayData>& source
       }
       sum = new_sum_maybe_overflow;
     }
+    offsets[num_rows_before + num_rows_to_append] = static_cast<int32_t>(sum);
 
     // Step 2: resize output buffers
     //
