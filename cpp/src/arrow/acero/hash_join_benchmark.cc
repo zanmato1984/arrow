@@ -353,8 +353,8 @@ static void BM_HashJoinBasic_ComplexResidualFilter(benchmark::State& st,
   settings.var_length_min = 1;
   settings.var_length_max = 100;
 
-  // Create filter (binary_length(probe_payload) + binary_length(build_payload) <= 2 *
-  // selectivity).
+  // Create filter referring payload columns from both sides.
+  // binary_length(probe_payload) + binary_length(build_payload) <= 2 * selectivity
   settings.selectivity = static_cast<double>(st.range(1)) / 100.0;
   using arrow::compute::call;
   using arrow::compute::field_ref;
