@@ -318,9 +318,7 @@ static void BM_HashJoinBasic_TrivialResidualFilter(benchmark::State& st,
                                                    Expression residual_filter,
                                                    Args&&...) {
   BenchmarkSettings settings;
-  settings.num_threads = 8;
   settings.join_type = join_type;
-  settings.residual_filter = std::move(residual_filter);
   settings.build_payload_types = {binary()};
   settings.probe_payload_types = {binary()};
 
@@ -329,6 +327,12 @@ static void BM_HashJoinBasic_TrivialResidualFilter(benchmark::State& st,
   settings.num_build_batches = 1024;
   settings.num_probe_batches = 1024;
 
+  // Let payload column length from 1 to 100.
+  settings.var_length_min = 1;
+  settings.var_length_max = 100;
+
+  settings.residual_filter = std::move(residual_filter);
+
   HashJoinBasicBenchmarkImpl(st, settings);
 }
 
@@ -336,23 +340,22 @@ template <typename... Args>
 static void BM_HashJoinBasic_ComplexResidualFilter(benchmark::State& st,
                                                    JoinType join_type, Args&&...) {
   BenchmarkSettings settings;
-  settings.num_threads = 8;
   settings.join_type = join_type;
   settings.build_payload_types = {binary()};
   settings.probe_payload_types = {binary()};
 
   settings.use_basic_implementation = st.range(0);
 
-  settings.num_build_batches = 128;
+  settings.num_build_batches = 1024;
   settings.num_probe_batches = 1024;
 
   // Let payload column length from 1 to 100.
-  settings.use_basic_implementation = st.range(1);
   settings.var_length_min = 1;
   settings.var_length_max = 100;
 
   // Create filter (binary_length(probe_payload) + binary_length(build_payload) <= 2 *
   // selectivity).
+  settings.selectivity = static_cast<double>(st.range(1)) / 100.0;
   using arrow::compute::call;
   using arrow::compute::field_ref;
   settings.residual_filter =
