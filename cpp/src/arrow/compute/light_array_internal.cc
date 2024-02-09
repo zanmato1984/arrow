@@ -590,7 +590,7 @@ Status ExecBatchBuilder::AppendSelected(const std::shared_ptr<ArrayData>& source
                                " bytes to current length ", sum, " bytes");
       }
     }
-    offsets[num_rows_before + num_rows_to_append] = static_cast<int32_t>(sum);
+    offsets[num_rows_before + num_rows_to_append] = sum;
 
     // Step 2: resize output buffers
     //
