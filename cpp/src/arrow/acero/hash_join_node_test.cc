@@ -2143,5 +2143,30 @@ TEST(HashJoin, ChainedIntegerHashJoins) {
   }
 }
 
+TEST(Filter, WithScalar) {
+  BatchesWithSchema input;
+  // More than one batch so the parallel execution takes place, which increases the chance
+  // of racing.
+  input.batches = {
+      ExecBatchFromJSON({int32()}, R"([[1]])"), ExecBatchFromJSON({int32()}, R"([[1]])"),
+      ExecBatchFromJSON({int32()}, R"([[1]])"), ExecBatchFromJSON({int32()}, R"([[1]])")};
+  input.schema = schema({field("c", int32())});
+  Declaration source{
+      "source",
+      SourceNodeOptions{input.schema, input.gen(/*parallel=*/true, /*slow=*/false)}};
+
+  // The scalar whose scratch space is racing.
+  auto scalar = ScalarFromJSON(utf8(), R"("test data")");
+  Expression condition = call("is_null", {literal(scalar)});
+  Declaration filter("filter", {std::move(source)}, FilterNodeOptions{condition});
+
+  ASSERT_OK_AND_ASSIGN(auto result,
+                       DeclarationToExecBatches(std::move(filter), /*use_threads=*/true));
+
+  std::vector<ExecBatch> expected = {ExecBatchFromJSON({int32()}, R"([])")};
+
+  AssertExecBatchesEqualIgnoringOrder(result.schema, result.batches, expected);
+}
+
 }  // namespace acero
 }  // namespace arrow
