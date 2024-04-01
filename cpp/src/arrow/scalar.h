@@ -177,7 +177,7 @@ struct ARROW_EXPORT PrimitiveScalar : public PrimitiveScalarBase {
   explicit PrimitiveScalar(std::shared_ptr<DataType> type)
       : PrimitiveScalarBase(std::move(type), false) {}
 
-  ValueType value{};
+  const ValueType value{};
 
   const void* data() const override { return &value; }
   // void* mutable_data() override { return &value; }
@@ -597,7 +597,7 @@ struct ARROW_EXPORT BaseListScalar
       private internal::ArraySpanFillFromScalarScratchSpace {
   using ValueType = std::shared_ptr<Array>;
 
-  std::shared_ptr<Array> value;
+  const std::shared_ptr<Array> value;
 
   template <typename FillScalarScratchSpaceFactoryT>
   BaseListScalar(std::shared_ptr<Array> value, std::shared_ptr<DataType> type,
@@ -723,7 +723,7 @@ struct ARROW_EXPORT StructScalar : public Scalar {
   using TypeClass = StructType;
   using ValueType = std::vector<std::shared_ptr<Scalar>>;
 
-  ScalarVector value;
+  const ScalarVector value;
 
   Result<std::shared_ptr<Scalar>> field(FieldRef ref) const;
 
@@ -736,7 +736,7 @@ struct ARROW_EXPORT StructScalar : public Scalar {
 
 struct ARROW_EXPORT UnionScalar : public Scalar,
                                   private internal::ArraySpanFillFromScalarScratchSpace {
-  int8_t type_code;
+  const int8_t type_code;
 
   virtual const std::shared_ptr<Scalar>& child_value() const = 0;
 
@@ -745,7 +745,7 @@ struct ARROW_EXPORT UnionScalar : public Scalar,
     explicit FillScalarScratchSpace(int8_t type_code) : type_code_(type_code) {}
 
    protected:
-    int8_t type_code_;
+    const int8_t type_code_;
   };
 
   UnionScalar(std::shared_ptr<DataType> type, int8_t type_code, bool is_valid,
@@ -764,10 +764,10 @@ struct ARROW_EXPORT SparseUnionScalar : public UnionScalar {
   // nonetheless construct a vector of scalars, one per union value, to have
   // enough data to reconstruct a valid ArraySpan of length 1 from this scalar
   using ValueType = std::vector<std::shared_ptr<Scalar>>;
-  ValueType value;
+  const ValueType value;
 
   // The value index corresponding to the active type code
-  int child_id;
+  const int child_id;
 
   SparseUnionScalar(ValueType value, int8_t type_code, std::shared_ptr<DataType> type);
 
@@ -795,7 +795,7 @@ struct ARROW_EXPORT DenseUnionScalar : public UnionScalar {
   // For DenseUnionScalar, we can make a valid ArraySpan of length 1 from this
   // scalar
   using ValueType = std::shared_ptr<Scalar>;
-  ValueType value;
+  const ValueType value;
 
   const std::shared_ptr<Scalar>& child_value() const override { return this->value; }
 
@@ -819,7 +819,7 @@ struct ARROW_EXPORT RunEndEncodedScalar
   using TypeClass = RunEndEncodedType;
   using ValueType = std::shared_ptr<Scalar>;
 
-  ValueType value;
+  const ValueType value;
 
   RunEndEncodedScalar(std::shared_ptr<Scalar> value, std::shared_ptr<DataType> type);
 
@@ -864,7 +864,7 @@ struct ARROW_EXPORT DictionaryScalar : public internal::PrimitiveScalarBase {
   struct ValueType {
     std::shared_ptr<Scalar> index;
     std::shared_ptr<Array> dictionary;
-  } value;
+  } const value;
 
   explicit DictionaryScalar(std::shared_ptr<DataType> type);
 
@@ -908,7 +908,7 @@ struct ARROW_EXPORT ExtensionScalar : public Scalar {
       : ExtensionScalar(std::make_shared<Storage>(std::move(storage)), std::move(type),
                         is_valid) {}
 
-  std::shared_ptr<Scalar> value;
+  const std::shared_ptr<Scalar> value;
 };
 
 /// @}

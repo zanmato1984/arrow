@@ -145,9 +145,8 @@ TYPED_TEST(TestNumericScalar, Basics) {
   auto scalar_other = std::make_shared<ScalarType>(other_value);
   ASSERT_NE(*scalar_other, *scalar_val);
 
-  scalar_val->value = other_value;
-  ASSERT_EQ(other_value, scalar_val->value);
-  ASSERT_EQ(*scalar_other, *scalar_val);
+  auto scalar_other_eq = std::make_shared<ScalarType>(other_value);
+  ASSERT_EQ(*scalar_other_eq, *scalar_other);
 
   ScalarType stack_val;
   ASSERT_FALSE(stack_val.is_valid);
@@ -1167,24 +1166,25 @@ class TestListLikeScalar : public ::testing::Test {
   }
 
   void TestValidateErrors() {
-    ScalarType scalar(value_);
-    scalar.is_valid = false;
-    ASSERT_OK(scalar.ValidateFull());
+    {
+      ScalarType scalar(value_);
+      scalar.is_valid = false;
+      ASSERT_OK(scalar.ValidateFull());
+    }
 
-    // Value must be defined
-    scalar = ScalarType(value_);
-    scalar.value = nullptr;
-    AssertValidationFails(scalar);
+    // {
+    //   // Inconsistent child type
+    //   ScalarType scalar(ArrayFromJSON(int32(), "[1, 2, null]"));
+    //   ASSERT_OK(scalar.Validate());
+    //   ASSERT_RAISES(Invalid, scalar.ValidateFull());
+    // }
 
-    // Inconsistent child type
-    scalar = ScalarType(value_);
-    scalar.value = ArrayFromJSON(int32(), "[1, 2, null]");
-    AssertValidationFails(scalar);
-
-    // Invalid UTF8 in child data
-    scalar = ScalarType(ArrayFromJSON(utf8(), "[null, null, \"\xff\"]"));
-    ASSERT_OK(scalar.Validate());
-    ASSERT_RAISES(Invalid, scalar.ValidateFull());
+    {
+      // Invalid UTF8 in child data
+      ScalarType scalar(ArrayFromJSON(utf8(), "[null, null, \"\xff\"]"));
+      ASSERT_OK(scalar.Validate());
+      ASSERT_RAISES(Invalid, scalar.ValidateFull());
+    }
   }
 
   void TestHashing() {
@@ -1350,30 +1350,42 @@ TEST(TestStructScalar, EmptyStruct) {
 TEST(TestStructScalar, ValidateErrors) {
   auto ty = struct_({field("a", utf8())});
 
-  // Values must always be defined
-  StructScalar scalar({MakeScalar("hello")}, ty);
-  scalar.is_valid = false;
-  ASSERT_OK(scalar.ValidateFull());
+  {
+    // Values must always be defined
+    StructScalar scalar({MakeScalar("hello")}, ty);
+    scalar.is_valid = false;
+    ASSERT_OK(scalar.ValidateFull());
+  }
 
-  scalar = StructScalar({}, ty, /*is_valid=*/false);
-  scalar.is_valid = true;
-  AssertValidationFails(scalar);
+  {
+    StructScalar scalar({}, ty, /*is_valid=*/false);
+    scalar.is_valid = true;
+    AssertValidationFails(scalar);
+  }
 
-  // Inconsistent number of fields
-  scalar = StructScalar({}, ty);
-  AssertValidationFails(scalar);
+  {
+    // Inconsistent number of fields
+    StructScalar scalar({}, ty);
+    AssertValidationFails(scalar);
+  }
 
-  scalar = StructScalar({MakeScalar("foo"), MakeScalar("bar")}, ty);
-  AssertValidationFails(scalar);
+  {
+    StructScalar scalar({MakeScalar("foo"), MakeScalar("bar")}, ty);
+    AssertValidationFails(scalar);
+  }
 
-  // Inconsistent child value type
-  scalar = StructScalar({MakeScalar(42)}, ty);
-  AssertValidationFails(scalar);
+  {
+    // Inconsistent child value type
+    StructScalar scalar({MakeScalar(42)}, ty);
+    AssertValidationFails(scalar);
+  }
 
-  // Child value has invalid UTF8 data
-  scalar = StructScalar({MakeScalar("\xff")}, ty);
-  ASSERT_OK(scalar.Validate());
-  ASSERT_RAISES(Invalid, scalar.ValidateFull());
+  {
+    // Child value has invalid UTF8 data
+    StructScalar scalar({MakeScalar("\xff")}, ty);
+    ASSERT_OK(scalar.Validate());
+    ASSERT_RAISES(Invalid, scalar.ValidateFull());
+  }
 }
 
 TEST(TestDictionaryScalar, Basics) {

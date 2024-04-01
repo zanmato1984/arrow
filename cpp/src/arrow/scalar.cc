@@ -878,10 +878,8 @@ SparseUnionScalar::SparseUnionScalar(ValueType value, int8_t type_code,
                                      std::shared_ptr<DataType> type)
     : UnionScalar(std::move(type), type_code, /*is_valid=*/true,
                   FillScalarScratchSpace(type_code)),
-      value(std::move(value)) {
-  this->child_id =
-      checked_cast<const SparseUnionType&>(*this->type).child_ids()[type_code];
-
+      value(std::move(value)),
+      child_id(checked_cast<const SparseUnionType&>(*this->type).child_ids()[type_code]) {
   // Fix nullness based on whether the selected child is null
   this->is_valid = this->value[this->child_id]->is_valid;
 }

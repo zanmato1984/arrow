@@ -137,16 +137,16 @@ struct ScalarFromArraySlotImpl {
   Status Visit(const DictionaryArray& a) {
     auto ty = a.type();
 
-    ARROW_ASSIGN_OR_RAISE(
-        auto index, MakeScalar(checked_cast<const DictionaryType&>(*ty).index_type(),
-                               a.GetValueIndex(index_)));
+    std::shared_ptr<Scalar> index = nullptr;
+    if (a.IsValid(index_)) {
+      ARROW_ASSIGN_OR_RAISE(
+          index, MakeScalar(checked_cast<const DictionaryType&>(*ty).index_type(),
+                            a.GetValueIndex(index_)));
+    } else {
+      index = MakeNullScalar(checked_cast<const DictionaryType&>(*ty).index_type());
+    }
 
-    auto scalar = DictionaryScalar(ty);
-    scalar.is_valid = a.IsValid(index_);
-    scalar.value.index = index;
-    scalar.value.dictionary = a.dictionary();
-
-    out_ = std::make_shared<DictionaryScalar>(std::move(scalar));
+    out_ = DictionaryScalar::Make(std::move(index), a.dictionary());
     return Status::OK();
   }
 
@@ -186,13 +186,16 @@ struct ScalarFromArraySlotImpl {
     // here and another in Visit(const RunEndEncodedArray&) in case the values
     // is not null.
     if (array_.type()->id() != Type::RUN_END_ENCODED && array_.IsNull(index_)) {
-      auto null = MakeNullScalar(array_.type());
       if (is_dictionary(array_.type()->id())) {
-        auto& dict_null = checked_cast<DictionaryScalar&>(*null);
+        const auto& dict_type = checked_cast<const DictionaryType&>(*array_.type());
         const auto& dict_array = checked_cast<const DictionaryArray&>(array_);
-        dict_null.value.dictionary = dict_array.dictionary();
+        auto index = MakeNullScalar(dict_type.index_type());
+        auto dictionary = dict_array.dictionary();
+
+        return DictionaryScalar::Make(std::move(index), std::move(dictionary));
+      } else {
+        return MakeNullScalar(array_.type());
       }
-      return null;
     }
 
     RETURN_NOT_OK(VisitArrayInline(array_, this));
