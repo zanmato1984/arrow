@@ -340,6 +340,11 @@ void TestSession() {
   FixedSizeBinaryScalar fixed_size_binary_scalar_null{
       Buffer::FromString("   "), fixed_size_binary(3), /*is_valid=*/false};
 
+  auto heap_fixed_size_binary_scalar =
+      MakeScalar(fixed_size_binary(3), Buffer::FromString("abc"));
+  auto heap_string_scalar_empty = MakeScalar(utf8(), Buffer::FromString(""));
+  auto binary_scalar_empty = MakeScalar(binary(), Buffer::FromString(""));
+
   std::shared_ptr<Array> dict_array;
   dict_array = *ArrayFromJSON(utf8(), R"(["foo", "bar", "quux"])");
   DictionaryScalar dict_scalar{{std::make_shared<Int8Scalar>(42), dict_array},

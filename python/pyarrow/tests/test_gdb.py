@@ -606,23 +606,11 @@ def test_scalars_stack(gdb_arrow):
          "[precision=50, scale=-4]"))
 
     check_stack_repr(
-        gdb_arrow, "binary_scalar_null",
-        "arrow::BinaryScalar of null value")
+        gdb_arrow, "fixed_size_binary_scalar",
+        'arrow::FixedSizeBinaryScalar of size 3, value "abc"')
     check_stack_repr(
-        gdb_arrow, "binary_scalar_unallocated",
-        "arrow::BinaryScalar of value <unallocated>")
-    check_stack_repr(
-        gdb_arrow, "binary_scalar_empty",
-        'arrow::BinaryScalar of size 0, value ""')
-    check_stack_repr(
-        gdb_arrow, "binary_scalar_abc",
-        'arrow::BinaryScalar of size 3, value "abc"')
-    check_stack_repr(
-        gdb_arrow, "binary_scalar_bytes",
-        r'arrow::BinaryScalar of size 3, value "\000\037\377"')
-    check_stack_repr(
-        gdb_arrow, "large_binary_scalar_abc",
-        'arrow::LargeBinaryScalar of size 3, value "abc"')
+        gdb_arrow, "fixed_size_binary_scalar_null",
+        'arrow::FixedSizeBinaryScalar of size 3, null with value "   "')
 
     check_stack_repr(
         gdb_arrow, "string_scalar_null",
@@ -631,11 +619,11 @@ def test_scalars_stack(gdb_arrow):
         gdb_arrow, "string_scalar_unallocated",
         "arrow::StringScalar of value <unallocated>")
     check_stack_repr(
-        gdb_arrow, "string_scalar_empty",
-        'arrow::StringScalar of size 0, value ""')
-    check_stack_repr(
         gdb_arrow, "string_scalar_hehe",
         'arrow::StringScalar of size 6, value "héhé"')
+    check_stack_repr(
+        gdb_arrow, "string_scalar_empty",
+        'arrow::StringScalar of size 0, value ""')
     # FIXME: excessive escaping ('\\xff' vs. '\x00')
     check_stack_repr(
         gdb_arrow, "string_scalar_invalid_chars",
@@ -645,11 +633,23 @@ def test_scalars_stack(gdb_arrow):
         'arrow::LargeStringScalar of size 6, value "héhé"')
 
     check_stack_repr(
-        gdb_arrow, "fixed_size_binary_scalar",
-        'arrow::FixedSizeBinaryScalar of size 3, value "abc"')
+        gdb_arrow, "binary_scalar_null",
+        "arrow::BinaryScalar of null value")
     check_stack_repr(
-        gdb_arrow, "fixed_size_binary_scalar_null",
-        'arrow::FixedSizeBinaryScalar of size 3, null with value "   "')
+        gdb_arrow, "binary_scalar_unallocated",
+        "arrow::BinaryScalar of value <unallocated>")
+    check_stack_repr(
+        gdb_arrow, "binary_scalar_abc",
+        'arrow::BinaryScalar of size 3, value "abc"')
+    check_stack_repr(
+        gdb_arrow, "binary_scalar_bytes",
+        r'arrow::BinaryScalar of size 3, value "\000\037\377"')
+    check_stack_repr(
+        gdb_arrow, "binary_scalar_empty",
+        'arrow::BinaryScalar of size 0, value ""')
+    check_stack_repr(
+        gdb_arrow, "large_binary_scalar_abc",
+        'arrow::LargeBinaryScalar of size 3, value "abc"')
 
     check_stack_repr(
         gdb_arrow, "dict_scalar",
@@ -736,6 +736,16 @@ def test_scalars_heap(gdb_arrow):
         ("arrow::Decimal256Scalar of value "
          "123456789012345678901234567890123456789012.3456 "
          "[precision=50, scale=4]"))
+
+    check_heap_repr(
+        gdb_arrow, "heap_fixed_size_binary_scalar",
+        'arrow::FixedSizeBinaryScalar of size 3, value "abc"')
+    check_heap_stack_repr(
+        gdb_arrow, "heap_string_scalar_empty",
+        'arrow::StringScalar of size 0, value ""')
+    check_stack_repr(
+        gdb_arrow, "heap_binary_scalar_empty",
+        'arrow::BinaryScalar of size 0, value ""')
 
     check_heap_repr(
         gdb_arrow, "heap_map_scalar",

@@ -1235,6 +1235,7 @@ class ScalarPrinter:
     """
 
     def __new__(cls, val):
+        sys.stderr.write(f"scalar: {val}\n")
         # Lookup actual (derived) class to instantiate
         type_id = int(deref(val['type'])['id_'])
         type_class = lookup_type_class(type_id)
@@ -1397,9 +1398,17 @@ class BaseBinaryScalarPrinter(ScalarPrinter):
             return bufptr.bytes_literal()
 
     def to_string(self):
+        sys.stderr.write(f"self: {self}\n")
         if not self.is_valid:
             return self._format_null()
-        bufptr = BufferPtr(SharedPtr(self.val['value']).get())
+        val = self.val['value']
+        sys.stderr.write(f"raw_val: {val}\n")
+        shared_ptr = SharedPtr(val)
+        sys.stderr.write(f"shared_ptr: {shared_ptr}\n")
+        shared_ptr_val = shared_ptr.get()
+        sys.stderr.write(f"shared_ptr_val: {shared_ptr}\n")
+        bufptr = BufferPtr(shared_ptr_val)
+        sys.stderr.write(f"buf_ptr: {bufptr}\n")
         size = bufptr.size
         if size is None:
             return f"{self._format_type()} of value <unallocated>"
