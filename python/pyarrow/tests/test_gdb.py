@@ -740,7 +740,7 @@ def test_scalars_heap(gdb_arrow):
     check_heap_repr(
         gdb_arrow, "heap_fixed_size_binary_scalar",
         'arrow::FixedSizeBinaryScalar of size 3, value "abc"')
-    check_heap_stack_repr(
+    check_heap_repr(
         gdb_arrow, "heap_string_scalar_empty",
         'arrow::StringScalar of size 0, value ""')
     check_stack_repr(
