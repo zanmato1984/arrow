@@ -343,7 +343,7 @@ void TestSession() {
   auto heap_fixed_size_binary_scalar =
       MakeScalar(fixed_size_binary(3), Buffer::FromString("abc"));
   auto heap_string_scalar_empty = MakeScalar(utf8(), Buffer::FromString(""));
-  auto binary_scalar_empty = MakeScalar(binary(), Buffer::FromString(""));
+  auto heap_binary_scalar_empty = MakeScalar(binary(), Buffer::FromString(""));
 
   std::shared_ptr<Array> dict_array;
   dict_array = *ArrayFromJSON(utf8(), R"(["foo", "bar", "quux"])");
