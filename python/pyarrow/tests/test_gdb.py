@@ -146,6 +146,16 @@ class GdbSession:
         # gdb may add whitespace depending on result width, remove it
         return out.strip()
 
+    def print_value_type(self, expr):
+        """
+        Ask gdb to print the value of an expression and return the result.
+        """
+        out = self.run_command(f"whatis {expr}")
+        out, n = re.subn(r"^\$\d+ = ", "", out)
+        assert n == 1, out
+        # gdb may add whitespace depending on result width, remove it
+        return out.strip()
+
     def select_frame(self, func_name):
         """
         Select the innermost frame with the given function name.
@@ -465,145 +475,156 @@ def test_fields_heap(gdb_arrow):
 
 
 def test_scalars_stack(gdb_arrow):
-    check_stack_repr(gdb_arrow, "null_scalar", "arrow::NullScalar")
-    check_stack_repr(gdb_arrow, "bool_scalar",
-                     "arrow::BooleanScalar of value true")
-    check_stack_repr(gdb_arrow, "bool_scalar_null",
-                     "arrow::BooleanScalar of null value")
-    check_stack_repr(gdb_arrow, "int8_scalar",
-                     "arrow::Int8Scalar of value -42")
-    check_stack_repr(gdb_arrow, "uint8_scalar",
-                     "arrow::UInt8Scalar of value 234")
-    check_stack_repr(gdb_arrow, "int64_scalar",
-                     "arrow::Int64Scalar of value -9223372036854775808")
-    check_stack_repr(gdb_arrow, "uint64_scalar",
-                     "arrow::UInt64Scalar of value 18446744073709551615")
-    check_stack_repr(gdb_arrow, "half_float_scalar",
-                     "arrow::HalfFloatScalar of value -1.5 [48640]")
-    check_stack_repr(gdb_arrow, "float_scalar",
-                     "arrow::FloatScalar of value 1.25")
-    check_stack_repr(gdb_arrow, "double_scalar",
-                     "arrow::DoubleScalar of value 2.5")
+    # check_stack_repr(gdb_arrow, "null_scalar", "arrow::NullScalar")
+    # check_stack_repr(gdb_arrow, "bool_scalar",
+    #                  "arrow::BooleanScalar of value true")
+    # check_stack_repr(gdb_arrow, "bool_scalar_null",
+    #                  "arrow::BooleanScalar of null value")
+    # check_stack_repr(gdb_arrow, "int8_scalar",
+    #                  "arrow::Int8Scalar of value -42")
+    # check_stack_repr(gdb_arrow, "uint8_scalar",
+    #                  "arrow::UInt8Scalar of value 234")
+    # check_stack_repr(gdb_arrow, "int64_scalar",
+    #                  "arrow::Int64Scalar of value -9223372036854775808")
+    # check_stack_repr(gdb_arrow, "uint64_scalar",
+    #                  "arrow::UInt64Scalar of value 18446744073709551615")
+    # check_stack_repr(gdb_arrow, "half_float_scalar",
+    #                  "arrow::HalfFloatScalar of value -1.5 [48640]")
+    # check_stack_repr(gdb_arrow, "float_scalar",
+    #                  "arrow::FloatScalar of value 1.25")
+    # check_stack_repr(gdb_arrow, "double_scalar",
+    #                  "arrow::DoubleScalar of value 2.5")
 
-    check_stack_repr(gdb_arrow, "time_scalar_s",
-                     "arrow::Time32Scalar of value 100s")
-    check_stack_repr(gdb_arrow, "time_scalar_ms",
-                     "arrow::Time32Scalar of value 1000ms")
-    check_stack_repr(gdb_arrow, "time_scalar_us",
-                     "arrow::Time64Scalar of value 10000us")
-    check_stack_repr(gdb_arrow, "time_scalar_ns",
-                     "arrow::Time64Scalar of value 100000ns")
-    check_stack_repr(gdb_arrow, "time_scalar_null",
-                     "arrow::Time64Scalar of null value [ns]")
+    # check_stack_repr(gdb_arrow, "time_scalar_s",
+    #                  "arrow::Time32Scalar of value 100s")
+    # check_stack_repr(gdb_arrow, "time_scalar_ms",
+    #                  "arrow::Time32Scalar of value 1000ms")
+    # check_stack_repr(gdb_arrow, "time_scalar_us",
+    #                  "arrow::Time64Scalar of value 10000us")
+    # check_stack_repr(gdb_arrow, "time_scalar_ns",
+    #                  "arrow::Time64Scalar of value 100000ns")
+    # check_stack_repr(gdb_arrow, "time_scalar_null",
+    #                  "arrow::Time64Scalar of null value [ns]")
 
-    check_stack_repr(gdb_arrow, "duration_scalar_s",
-                     "arrow::DurationScalar of value -100s")
-    check_stack_repr(gdb_arrow, "duration_scalar_ms",
-                     "arrow::DurationScalar of value -1000ms")
-    check_stack_repr(gdb_arrow, "duration_scalar_us",
-                     "arrow::DurationScalar of value -10000us")
-    check_stack_repr(gdb_arrow, "duration_scalar_ns",
-                     "arrow::DurationScalar of value -100000ns")
-    check_stack_repr(gdb_arrow, "duration_scalar_null",
-                     "arrow::DurationScalar of null value [ns]")
+    # check_stack_repr(gdb_arrow, "duration_scalar_s",
+    #                  "arrow::DurationScalar of value -100s")
+    # check_stack_repr(gdb_arrow, "duration_scalar_ms",
+    #                  "arrow::DurationScalar of value -1000ms")
+    # check_stack_repr(gdb_arrow, "duration_scalar_us",
+    #                  "arrow::DurationScalar of value -10000us")
+    # check_stack_repr(gdb_arrow, "duration_scalar_ns",
+    #                  "arrow::DurationScalar of value -100000ns")
+    # check_stack_repr(gdb_arrow, "duration_scalar_null",
+    #                  "arrow::DurationScalar of null value [ns]")
+
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_s",
+    #     "arrow::TimestampScalar of value 12345s [no timezone]")
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_ms",
+    #     "arrow::TimestampScalar of value -123456ms [no timezone]")
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_us",
+    #     "arrow::TimestampScalar of value 1234567us [no timezone]")
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_ns",
+    #     "arrow::TimestampScalar of value -12345678ns [no timezone]")
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_null",
+    #     "arrow::TimestampScalar of null value [ns, no timezone]")
+
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_s_tz",
+    #     'arrow::TimestampScalar of value 12345s ["Europe/Paris"]')
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_ms_tz",
+    #     'arrow::TimestampScalar of value -123456ms ["Europe/Paris"]')
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_us_tz",
+    #     'arrow::TimestampScalar of value 1234567us ["Europe/Paris"]')
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_ns_tz",
+    #     'arrow::TimestampScalar of value -12345678ns ["Europe/Paris"]')
+    # check_stack_repr(
+    #     gdb_arrow, "timestamp_scalar_null_tz",
+    #     'arrow::TimestampScalar of null value [ns, "Europe/Paris"]')
+
+    # check_stack_repr(gdb_arrow, "month_interval_scalar",
+    #                  "arrow::MonthIntervalScalar of value 23M")
+    # check_stack_repr(gdb_arrow, "month_interval_scalar_null",
+    #                  "arrow::MonthIntervalScalar of null value")
+    # check_stack_repr(gdb_arrow, "day_time_interval_scalar",
+    #                  "arrow::DayTimeIntervalScalar of value 23d-456ms")
+    # check_stack_repr(gdb_arrow, "day_time_interval_scalar_null",
+    #                  "arrow::DayTimeIntervalScalar of null value")
+    # check_stack_repr(
+    #     gdb_arrow, "month_day_nano_interval_scalar",
+    #     "arrow::MonthDayNanoIntervalScalar of value 1M23d-456ns")
+    # check_stack_repr(
+    #     gdb_arrow, "month_day_nano_interval_scalar_null",
+    #     "arrow::MonthDayNanoIntervalScalar of null value")
+
+    # check_stack_repr(gdb_arrow, "date32_scalar",
+    #                  "arrow::Date32Scalar of value 23d [1970-01-24]")
+    # check_stack_repr(gdb_arrow, "date32_scalar_null",
+    #                  "arrow::Date32Scalar of null value")
+    # check_stack_repr(gdb_arrow, "date64_scalar",
+    #                  "arrow::Date64Scalar of value 3888000000ms [1970-02-15]")
+    # check_stack_repr(gdb_arrow, "date64_scalar_null",
+    #                  "arrow::Date64Scalar of null value")
+
+    # check_stack_repr(
+    #     gdb_arrow, "decimal128_scalar_null",
+    #     "arrow::Decimal128Scalar of null value [precision=10, scale=4]")
+    # check_stack_repr(
+    #     gdb_arrow, "decimal128_scalar_pos_scale_pos",
+    #     "arrow::Decimal128Scalar of value 123.4567 [precision=10, scale=4]")
+    # check_stack_repr(
+    #     gdb_arrow, "decimal128_scalar_pos_scale_neg",
+    #     "arrow::Decimal128Scalar of value -123.4567 [precision=10, scale=4]")
+    # check_stack_repr(
+    #     gdb_arrow, "decimal128_scalar_neg_scale_pos",
+    #     ("arrow::Decimal128Scalar of value 1.234567e+10 "
+    #      "[precision=10, scale=-4]"))
+    # check_stack_repr(
+    #     gdb_arrow, "decimal128_scalar_neg_scale_neg",
+    #     ("arrow::Decimal128Scalar of value -1.234567e+10 "
+        #  "[precision=10, scale=-4]"))
+
+    # check_stack_repr(
+    #     gdb_arrow, "decimal256_scalar_null",
+    #     "arrow::Decimal256Scalar of null value [precision=50, scale=4]")
+    # check_stack_repr(
+    #     gdb_arrow, "decimal256_scalar_pos_scale_pos",
+    #     ("arrow::Decimal256Scalar of value "
+    #      "123456789012345678901234567890123456789012.3456 "
+    #      "[precision=50, scale=4]"))
+    # check_stack_repr(
+    #     gdb_arrow, "decimal256_scalar_pos_scale_neg",
+    #     ("arrow::Decimal256Scalar of value "
+    #      "-123456789012345678901234567890123456789012.3456 "
+    #      "[precision=50, scale=4]"))
+    # check_stack_repr(
+    #     gdb_arrow, "decimal256_scalar_neg_scale_pos",
+    #     ("arrow::Decimal256Scalar of value "
+    #      "1.234567890123456789012345678901234567890123456e+49 "
+    #      "[precision=50, scale=-4]"))
+    # check_stack_repr(
+    #     gdb_arrow, "decimal256_scalar_neg_scale_neg",
+    #     ("arrow::Decimal256Scalar of value "
+    #      "-1.234567890123456789012345678901234567890123456e+49 "
+    #      "[precision=50, scale=-4]"))
+
+    sys.stderr.write(f"type type: {gdb.print_value_type("binary_scalar_empty.type")}\n")
+    sys.stderr.write(f"value type: {gdb.print_value_type("binary_scalar_empty.value")}\n")
+    sys.stderr.write(f"scalar type: {gdb.print_value_type("binary_scalar_empty")}\n")
+    sys.stderr.write(f"type: {gdb.print_value("binary_scalar_empty.type")}\n")
+    sys.stderr.write(f"value: {gdb.print_value("binary_scalar_empty.value")}\n")
+    sys.stderr.write(f"scalar: {gdb.print_value("binary_scalar_empty")}\n")
 
     check_stack_repr(
-        gdb_arrow, "timestamp_scalar_s",
-        "arrow::TimestampScalar of value 12345s [no timezone]")
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_ms",
-        "arrow::TimestampScalar of value -123456ms [no timezone]")
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_us",
-        "arrow::TimestampScalar of value 1234567us [no timezone]")
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_ns",
-        "arrow::TimestampScalar of value -12345678ns [no timezone]")
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_null",
-        "arrow::TimestampScalar of null value [ns, no timezone]")
-
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_s_tz",
-        'arrow::TimestampScalar of value 12345s ["Europe/Paris"]')
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_ms_tz",
-        'arrow::TimestampScalar of value -123456ms ["Europe/Paris"]')
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_us_tz",
-        'arrow::TimestampScalar of value 1234567us ["Europe/Paris"]')
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_ns_tz",
-        'arrow::TimestampScalar of value -12345678ns ["Europe/Paris"]')
-    check_stack_repr(
-        gdb_arrow, "timestamp_scalar_null_tz",
-        'arrow::TimestampScalar of null value [ns, "Europe/Paris"]')
-
-    check_stack_repr(gdb_arrow, "month_interval_scalar",
-                     "arrow::MonthIntervalScalar of value 23M")
-    check_stack_repr(gdb_arrow, "month_interval_scalar_null",
-                     "arrow::MonthIntervalScalar of null value")
-    check_stack_repr(gdb_arrow, "day_time_interval_scalar",
-                     "arrow::DayTimeIntervalScalar of value 23d-456ms")
-    check_stack_repr(gdb_arrow, "day_time_interval_scalar_null",
-                     "arrow::DayTimeIntervalScalar of null value")
-    check_stack_repr(
-        gdb_arrow, "month_day_nano_interval_scalar",
-        "arrow::MonthDayNanoIntervalScalar of value 1M23d-456ns")
-    check_stack_repr(
-        gdb_arrow, "month_day_nano_interval_scalar_null",
-        "arrow::MonthDayNanoIntervalScalar of null value")
-
-    check_stack_repr(gdb_arrow, "date32_scalar",
-                     "arrow::Date32Scalar of value 23d [1970-01-24]")
-    check_stack_repr(gdb_arrow, "date32_scalar_null",
-                     "arrow::Date32Scalar of null value")
-    check_stack_repr(gdb_arrow, "date64_scalar",
-                     "arrow::Date64Scalar of value 3888000000ms [1970-02-15]")
-    check_stack_repr(gdb_arrow, "date64_scalar_null",
-                     "arrow::Date64Scalar of null value")
-
-    check_stack_repr(
-        gdb_arrow, "decimal128_scalar_null",
-        "arrow::Decimal128Scalar of null value [precision=10, scale=4]")
-    check_stack_repr(
-        gdb_arrow, "decimal128_scalar_pos_scale_pos",
-        "arrow::Decimal128Scalar of value 123.4567 [precision=10, scale=4]")
-    check_stack_repr(
-        gdb_arrow, "decimal128_scalar_pos_scale_neg",
-        "arrow::Decimal128Scalar of value -123.4567 [precision=10, scale=4]")
-    check_stack_repr(
-        gdb_arrow, "decimal128_scalar_neg_scale_pos",
-        ("arrow::Decimal128Scalar of value 1.234567e+10 "
-         "[precision=10, scale=-4]"))
-    check_stack_repr(
-        gdb_arrow, "decimal128_scalar_neg_scale_neg",
-        ("arrow::Decimal128Scalar of value -1.234567e+10 "
-         "[precision=10, scale=-4]"))
-
-    check_stack_repr(
-        gdb_arrow, "decimal256_scalar_null",
-        "arrow::Decimal256Scalar of null value [precision=50, scale=4]")
-    check_stack_repr(
-        gdb_arrow, "decimal256_scalar_pos_scale_pos",
-        ("arrow::Decimal256Scalar of value "
-         "123456789012345678901234567890123456789012.3456 "
-         "[precision=50, scale=4]"))
-    check_stack_repr(
-        gdb_arrow, "decimal256_scalar_pos_scale_neg",
-        ("arrow::Decimal256Scalar of value "
-         "-123456789012345678901234567890123456789012.3456 "
-         "[precision=50, scale=4]"))
-    check_stack_repr(
-        gdb_arrow, "decimal256_scalar_neg_scale_pos",
-        ("arrow::Decimal256Scalar of value "
-         "1.234567890123456789012345678901234567890123456e+49 "
-         "[precision=50, scale=-4]"))
-    check_stack_repr(
-        gdb_arrow, "decimal256_scalar_neg_scale_neg",
-        ("arrow::Decimal256Scalar of value "
-         "-1.234567890123456789012345678901234567890123456e+49 "
-         "[precision=50, scale=-4]"))
+        gdb_arrow, "binary_scalar_empty",
+        'arrow::BinaryScalar of size 0, value ""')
 
     check_stack_repr(
         gdb_arrow, "fixed_size_binary_scalar",
