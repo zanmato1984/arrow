@@ -615,12 +615,12 @@ def test_scalars_stack(gdb_arrow):
     #      "-1.234567890123456789012345678901234567890123456e+49 "
     #      "[precision=50, scale=-4]"))
 
-    sys.stderr.write(f"type type: {gdb.print_value_type("binary_scalar_empty.type")}\n")
-    sys.stderr.write(f"value type: {gdb.print_value_type("binary_scalar_empty.value")}\n")
-    sys.stderr.write(f"scalar type: {gdb.print_value_type("binary_scalar_empty")}\n")
-    sys.stderr.write(f"type: {gdb.print_value("binary_scalar_empty.type")}\n")
-    sys.stderr.write(f"value: {gdb.print_value("binary_scalar_empty.value")}\n")
-    sys.stderr.write(f"scalar: {gdb.print_value("binary_scalar_empty")}\n")
+    sys.stderr.write(f"type type: {gdb.print_value_type('binary_scalar_empty.type')}\n")
+    sys.stderr.write(f"value type: {gdb.print_value_type('binary_scalar_empty.value')}\n")
+    sys.stderr.write(f"scalar type: {gdb.print_value_type('binary_scalar_empty')}\n")
+    sys.stderr.write(f"type: {gdb.print_value('binary_scalar_empty.type')}\n")
+    sys.stderr.write(f"value: {gdb.print_value('binary_scalar_empty.value')}\n")
+    sys.stderr.write(f"scalar: {gdb.print_value('binary_scalar_empty')}\n")
 
     check_stack_repr(
         gdb_arrow, "binary_scalar_empty",
