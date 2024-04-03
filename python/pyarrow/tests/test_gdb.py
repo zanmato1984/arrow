@@ -615,10 +615,13 @@ def test_scalars_stack(gdb_arrow):
 
     sys.stderr.write("!!!Debug!!!")
     sys.stderr.write(f"type type: {gdb_arrow.print_value_type('binary_scalar_empty.type')}\n")
-    sys.stderr.write(f"value type: {gdb_arrow.print_value_type('binary_scalar_empty.value')}\n")
-    sys.stderr.write(f"scalar type: {gdb_arrow.print_value_type('binary_scalar_empty')}\n")
+    sys.stderr.write(f"type addr: {gdb_arrow.print_value('binary_scalar_empty.type.get()')}\n")
     sys.stderr.write(f"type: {gdb_arrow.print_value('binary_scalar_empty.type')}\n")
+    sys.stderr.write(f"value type: {gdb_arrow.print_value_type('binary_scalar_empty.value')}\n")
+    sys.stderr.write(f"value addr: {gdb_arrow.print_value('binary_scalar_empty.value.get()')}\n")
     sys.stderr.write(f"value: {gdb_arrow.print_value('binary_scalar_empty.value')}\n")
+    sys.stderr.write(f"scalar type: {gdb_arrow.print_value_type('binary_scalar_empty')}\n")
+    sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_empty')}\n")
     sys.stderr.write(f"scalar: {gdb_arrow.print_value('binary_scalar_empty')}\n")
     sys.stderr.write("!!!Debug!!!")
 
