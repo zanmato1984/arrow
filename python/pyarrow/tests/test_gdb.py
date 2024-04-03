@@ -613,18 +613,37 @@ def test_scalars_stack(gdb_arrow):
     #      "-1.234567890123456789012345678901234567890123456e+49 "
     #      "[precision=50, scale=-4]"))
 
+    check_stack_repr(
+        gdb_arrow, "binary_scalar_null",
+        "arrow::BinaryScalar of null value")
+    check_stack_repr(
+        gdb_arrow, "binary_scalar_unallocated",
+        "arrow::BinaryScalar of value <unallocated>")
+
     sys.stderr.write("!!!Debug!!!")
+
+    sys.stderr.write(f"type type: {gdb_arrow.print_value_type('binary_scalar_null.type')}\n")
+    sys.stderr.write(f"type addr: {gdb_arrow.print_value('binary_scalar_null.type.get()')}\n")
+    sys.stderr.write(f"type: {gdb_arrow.print_value('binary_scalar_null.type')}\n")
+    sys.stderr.write(f"type deref: {gdb_arrow.print_value('*(binary_scalar_null.type)')}\n")
+
+    sys.stderr.write(f"type type: {gdb_arrow.print_value_type('binary_scalar_unallocated.type')}\n")
+    sys.stderr.write(f"type addr: {gdb_arrow.print_value('binary_scalar_unallocated.type.get()')}\n")
+    sys.stderr.write(f"type: {gdb_arrow.print_value('binary_scalar_unallocated.type')}\n")
+    sys.stderr.write(f"type deref: {gdb_arrow.print_value('*(binary_scalar_unallocated.type)')}\n")
+
     sys.stderr.write(f"type type: {gdb_arrow.print_value_type('binary_scalar_empty.type')}\n")
     sys.stderr.write(f"type addr: {gdb_arrow.print_value('binary_scalar_empty.type.get()')}\n")
     sys.stderr.write(f"type: {gdb_arrow.print_value('binary_scalar_empty.type')}\n")
     sys.stderr.write(f"type deref: {gdb_arrow.print_value('*(binary_scalar_empty.type)')}\n")
-    sys.stderr.write(f"value type: {gdb_arrow.print_value_type('binary_scalar_empty.value')}\n")
-    sys.stderr.write(f"value addr: {gdb_arrow.print_value('binary_scalar_empty.value.get()')}\n")
-    sys.stderr.write(f"value: {gdb_arrow.print_value('binary_scalar_empty.value')}\n")
-    sys.stderr.write(f"value deref: {gdb_arrow.print_value('*(binary_scalar_empty.value)')}\n")
-    sys.stderr.write(f"scalar type: {gdb_arrow.print_value_type('binary_scalar_empty')}\n")
-    sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_empty')}\n")
-    sys.stderr.write(f"scalar: {gdb_arrow.print_value('binary_scalar_empty')}\n")
+
+    # sys.stderr.write(f"value type: {gdb_arrow.print_value_type('binary_scalar_empty.value')}\n")
+    # sys.stderr.write(f"value addr: {gdb_arrow.print_value('binary_scalar_empty.value.get()')}\n")
+    # sys.stderr.write(f"value: {gdb_arrow.print_value('binary_scalar_empty.value')}\n")
+    # sys.stderr.write(f"value deref: {gdb_arrow.print_value('*(binary_scalar_empty.value)')}\n")
+    # sys.stderr.write(f"scalar type: {gdb_arrow.print_value_type('binary_scalar_empty')}\n")
+    # sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_empty')}\n")
+    # sys.stderr.write(f"scalar: {gdb_arrow.print_value('binary_scalar_empty')}\n")
     sys.stderr.write("!!!Debug!!!")
 
     check_stack_repr(
@@ -658,12 +677,6 @@ def test_scalars_stack(gdb_arrow):
         gdb_arrow, "large_string_scalar_hehe",
         'arrow::LargeStringScalar of size 6, value "héhé"')
 
-    check_stack_repr(
-        gdb_arrow, "binary_scalar_null",
-        "arrow::BinaryScalar of null value")
-    check_stack_repr(
-        gdb_arrow, "binary_scalar_unallocated",
-        "arrow::BinaryScalar of value <unallocated>")
     check_stack_repr(
         gdb_arrow, "binary_scalar_abc",
         'arrow::BinaryScalar of size 3, value "abc"')
