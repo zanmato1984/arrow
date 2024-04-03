@@ -589,7 +589,7 @@ def test_scalars_stack(gdb_arrow):
     # check_stack_repr(
     #     gdb_arrow, "decimal128_scalar_neg_scale_neg",
     #     ("arrow::Decimal128Scalar of value -1.234567e+10 "
-        #  "[precision=10, scale=-4]"))
+    #     "[precision=10, scale=-4]"))
 
     # check_stack_repr(
     #     gdb_arrow, "decimal256_scalar_null",
