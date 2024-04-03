@@ -1401,19 +1401,42 @@ class BaseBinaryScalarPrinter(ScalarPrinter):
         # sys.stderr.write(f"self: {self}\n")
         if not self.is_valid:
             return self._format_null()
-        val = self.val['value']
+        try:
+            val = self.val['value']
+        except Exception:
+            return ValueError('val not found')
         # sys.stderr.write(f"raw_val: {val}\n")
-        shared_ptr = SharedPtr(val)
+        try:
+            shared_ptr = SharedPtr(val)
+        except Exception:
+            return ValueError('shared_ptr error')
         # sys.stderr.write(f"shared_ptr: {shared_ptr}\n")
-        shared_ptr_val = shared_ptr.get()
+        try:
+            shared_ptr_val = shared_ptr.get()
+        except Exception:
+            return ValueError('shared_ptr get error')
         # sys.stderr.write(f"shared_ptr_val: {shared_ptr}\n")
-        bufptr = BufferPtr(shared_ptr_val)
+        try:
+            bufptr = BufferPtr(shared_ptr_val)
+        except Exception:
+            return ValueError('bufptr error')
         # sys.stderr.write(f"buf_ptr: {bufptr}\n")
-        size = bufptr.size
+        try:
+            size = bufptr.size
+        except Exception:
+            return ValueError('bufptr size error')
         if size is None:
             return f"{self._format_type()} of value <unallocated>"
-        return (f"{self._format_type()} of size {size}, "
-                f"value {self._format_buf(bufptr)}")
+        try:
+            typestr = self._format_type()
+        except Exception:
+            return ValueError('format type error')
+        try:
+            bufstr = self._format_buf(bufptr)
+        except Exception:
+            return ValueError('format buf error')
+        return (f"{typestr} of size {size}, "
+                f"value {bufstr}")
 
 
 class FixedSizeBinaryScalarPrinter(BaseBinaryScalarPrinter):
