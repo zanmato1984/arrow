@@ -622,6 +622,10 @@ def test_scalars_stack(gdb_arrow):
 
     sys.stderr.write("!!!Debug!!!")
 
+    sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_null')}\n")
+    sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_unallocated')}\n")
+    sys.stderr.write(f"scalar addr: {gdb_arrow.print_value('&binary_scalar_empty')}\n")
+
     sys.stderr.write(f"type type: {gdb_arrow.print_value_type('binary_scalar_null.type')}\n")
     sys.stderr.write(f"type addr: {gdb_arrow.print_value('binary_scalar_null.type.get()')}\n")
     sys.stderr.write(f"type: {gdb_arrow.print_value('binary_scalar_null.type')}\n")
