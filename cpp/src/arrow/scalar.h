@@ -285,12 +285,11 @@ struct ARROW_EXPORT BinaryScalar
   using ArraySpanFillFromScalarScratchSpace =
       internal::ArraySpanFillFromScalarScratchSpace<BinaryScalar>;
 
-  explicit BinaryScalar(std::shared_ptr<Buffer> value)
-      : BinaryScalar(std::move(value), binary()) {}
+  explicit BinaryScalar(std::shared_ptr<Buffer> value);
 
-  explicit BinaryScalar(std::string s) : BaseBinaryScalar(std::move(s), binary()) {}
+  explicit BinaryScalar(std::string s);
 
-  BinaryScalar() : BinaryScalar(binary()) {}
+  BinaryScalar();
 
  private:
   void FillScratchSpace();

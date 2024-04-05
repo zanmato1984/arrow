@@ -572,6 +572,16 @@ Status Scalar::ValidateFull() const {
 BaseBinaryScalar::BaseBinaryScalar(std::string s, std::shared_ptr<DataType> type)
     : BaseBinaryScalar(Buffer::FromString(std::move(s)), std::move(type)) {}
 
+BinaryScalar::BinaryScalar(std::shared_ptr<Buffer> value) : BinaryScalar(std::move(value), binary()) {
+  ARROW_CHECK(type->id() == Type::BINARY);
+}
+
+BinaryScalar::BinaryScalar(std::string s) : BaseBinaryScalar(std::move(s), binary()) {
+  ARROW_CHECK(type->id() == Type::BINARY);
+}
+
+BinaryScalar::BinaryScalar() : BinaryScalar(binary()) { ARROW_CHECK(type->id() == Type::BINARY); }
+
 void BinaryScalar::FillScratchSpace() {
   FillScalarScratchSpace(scratch_space_, int32_t(0),
                          is_valid ? static_cast<int32_t>(value->size()) : int32_t(0));
