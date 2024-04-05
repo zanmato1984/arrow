@@ -584,13 +584,13 @@ BinaryScalar::BinaryScalar() : BinaryScalar(binary()) { ARROW_CHECK(type->id() =
 
 void BinaryScalar::FillScratchSpace() {
   FillScalarScratchSpace(scratch_space_, int32_t(0),
-                         is_valid ? static_cast<int32_t>(value->size()) : int32_t(0));
+                         is_valid && value ? static_cast<int32_t>(value->size()) : int32_t(0));
 }
 
 void BinaryViewScalar::FillScratchSpace() {
   static_assert(sizeof(BinaryViewType::c_type) <= internal::kScalarScratchSpaceSize);
   auto* view = new (&scratch_space_) BinaryViewType::c_type;
-  if (is_valid) {
+  if (is_valid && value) {
     *view = util::ToBinaryView(std::string_view{*value}, 0, 0);
   } else {
     *view = {};
@@ -599,7 +599,7 @@ void BinaryViewScalar::FillScratchSpace() {
 
 void LargeBinaryScalar::FillScratchSpace() {
   FillScalarScratchSpace(scratch_space_, int64_t(0),
-                         is_valid ? static_cast<int64_t>(value->size()) : int64_t(0));
+                         is_valid && value ? static_cast<int64_t>(value->size()) : int64_t(0));
 }
 
 FixedSizeBinaryScalar::FixedSizeBinaryScalar(std::shared_ptr<Buffer> value,
