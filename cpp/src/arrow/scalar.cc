@@ -1397,6 +1397,8 @@ struct FromTypeVisitor : CastImplVisitor {
     return CastFromListLike(large_list_view_type);
   }
 
+  Status Visit(const MapType& map_type) { return CastFromListLike(map_type); }
+
   Status Visit(const NullType&) { return NotImplemented(); }
   Status Visit(const DictionaryType&) { return NotImplemented(); }
   Status Visit(const ExtensionType&) { return NotImplemented(); }
