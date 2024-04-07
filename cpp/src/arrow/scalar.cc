@@ -816,7 +816,8 @@ SparseUnionScalar::SparseUnionScalar(ValueType value, int8_t type_code,
     : UnionScalar(std::move(type), type_code, /*is_valid=*/true),
       value(std::move(value)) {
   const auto child_ids = checked_cast<const SparseUnionType&>(*this->type).child_ids();
-  if (type_code >= 0 && static_cast<size_t>(type_code) < child_ids.size()) {
+  if (type_code >= 0 && static_cast<size_t>(type_code) < child_ids.size() &&
+      child_ids[type_code] != UnionType::kInvalidChildId) {
     this->child_id = child_ids[type_code];
 
     // Fix nullness based on whether the selected child is null
