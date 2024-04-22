@@ -481,6 +481,8 @@ struct GrouperImpl : public Grouper {
 
   uint32_t num_groups() const override { return num_groups_; }
 
+  int64_t temp_stack_size() const override { return 0; }
+
   Result<ExecBatch> GetUniques() override {
     ExecBatch out({}, num_groups_);
 
@@ -718,6 +720,8 @@ struct GrouperFastImpl : public Grouper {
 
   uint32_t num_groups() const override { return static_cast<uint32_t>(rows_.length()); }
 
+  int64_t temp_stack_size() const override { return 64 * minibatch_size_max_; }
+
   // Make sure padded buffers end up with the right logical size
 
   Result<std::shared_ptr<Buffer>> AllocatePaddedBitmap(int64_t length) {
@@ -838,8 +842,7 @@ struct GrouperFastImpl : public Grouper {
     return out;
   }
 
-  static constexpr int log_minibatch_max_ = 10;
-  static constexpr int minibatch_size_max_ = 1 << log_minibatch_max_;
+  static constexpr int minibatch_size_max_ = arrow::util::MiniBatch::kMiniBatchLength;
   static constexpr int minibatch_size_min_ = 128;
   int minibatch_size_;
 

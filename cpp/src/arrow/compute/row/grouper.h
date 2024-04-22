@@ -122,6 +122,8 @@ class ARROW_EXPORT Grouper {
   /// Get the current number of groups.
   virtual uint32_t num_groups() const = 0;
 
+  virtual int64_t temp_stack_size() const = 0;
+
   /// \brief Assemble lists of indices of identical elements.
   ///
   /// \param[in] ids An unsigned, all-valid integral array which will be
