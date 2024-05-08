@@ -28,6 +28,7 @@
 #include "arrow/api.h"
 #include "arrow/compute/kernels/row_encoder_internal.h"
 #include "arrow/compute/kernels/test_util.h"
+#include "arrow/compute/light_array_internal.h"
 #include "arrow/testing/extension_type.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/matchers.h"
@@ -41,6 +42,7 @@ namespace arrow {
 
 using compute::call;
 using compute::default_exec_context;
+using compute::ExecBatchBuilder;
 using compute::ExecSpan;
 using compute::field_ref;
 using compute::SortIndices;
@@ -3199,6 +3201,41 @@ TEST(HashJoin, ChainedIntegerHashJoins) {
     ARROW_SCOPED_TRACE("Test ", std::to_string(i));
     TestSingleChainOfHashJoins(rng);
   }
+}
+
+// Test that a large number of joins don't overflow the temp vector stack, like GH-39582
+// and GH-39951.
+TEST(HashJoin, ManyJoins) {
+  const int num_joins = 64;
+
+  const int num_left_rows = ExecBatchBuilder::num_rows_max() + 1024;
+  std::vector<TypeHolder> left_types = {int8()};
+  ASSERT_OK_AND_ASSIGN(
+      auto left_batches,
+      MakeIntegerBatches({[](int) -> int64_t { return 1; }},
+                         schema({field("l_key", int8())}),
+                         /*num_batches=*/1, /*batch_size=*/num_left_rows));
+  // auto left_batch = ExecBatchFromJSON(left_types, R"([[1]])");
+  Declaration root{"exec_batch_source",
+                   ExecBatchSourceNodeOptions(left_batches.schema, left_batches.batches)};
+
+  std::vector<TypeHolder> right_types = {int8()};
+  auto right_batch = ExecBatchFromJSON(right_types, R"([[1]])");
+
+  HashJoinNodeOptions join_opts(JoinType::INNER, /*left_keys=*/{"l_key"},
+                                /*right_keys*/ {"r_key"});
+
+  for (int i = 0; i < num_joins; ++i) {
+    Declaration table{
+        "exec_batch_source",
+        ExecBatchSourceNodeOptions(schema({field("r_key", int8())}), {right_batch})};
+    Declaration new_root{"hashjoin", {std::move(root), std::move(table)}, join_opts};
+
+    root = std::move(new_root);
+  }
+
+  ASSERT_OK_AND_ASSIGN(auto result, DeclarationToTable(std::move(root)));
+  ASSERT_EQ(result->num_rows(), num_left_rows);
 }
 
 }  // namespace acero
