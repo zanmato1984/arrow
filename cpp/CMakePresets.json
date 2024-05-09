@@ -251,6 +251,34 @@
       "cacheVariables": {}
     },
     {
+      "name": "ninja-debug-asan",
+      "inherits": [
+        "base-debug",
+        "features-main"
+      ],
+      "displayName": "Asan",
+      "cacheVariables": {
+        "ARROW_USE_ASAN": "ON",
+        "ARROW_USE_UBSAN": "ON",
+        "ARROW_JEMALLOC": "OFF",
+        "ARROW_MIMALLOC": "OFF"
+      }
+    },
+    {
+      "name": "ninja-debug-tsan",
+      "inherits": [
+        "base-debug",
+        "features-main"
+      ],
+      "displayName": "Tsan",
+      "cacheVariables": {
+        "ARROW_USE_TSAN": "ON",
+        "ARROW_USE_UBSAN": "ON",
+        "ARROW_JEMALLOC": "OFF",
+        "ARROW_MIMALLOC": "OFF"
+      }
+    },
+    {
       "name": "ninja-debug-cuda",
       "inherits": [
         "base-debug",

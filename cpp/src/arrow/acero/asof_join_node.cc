@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1032,6 +1033,8 @@ class AsofJoinNode : public ExecNode {
   }
 
   bool Process() {
+    // std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
     std::lock_guard<std::mutex> guard(gate_);
     if (!CheckEnded()) {
       return false;
@@ -1043,7 +1046,13 @@ class AsofJoinNode : public ExecNode {
 
       if (result.ok()) {
         auto out_rb = *result;
-        if (!out_rb) break;
+        if (!out_rb) {
+          std::stringstream ss;
+          ss << "[" << std::this_thread::get_id()
+             << "] Process: inner breaking with no output batch\n";
+          std::cout << ss.str();
+          break;
+        }
         ExecBatch out_b(*out_rb);
         out_b.index = batches_produced_++;
         DEBUG_SYNC(this, "produce batch ", out_b.index, ":", DEBUG_MANIP(std::endl),
@@ -1054,6 +1063,10 @@ class AsofJoinNode : public ExecNode {
         }
       } else {
         EndFromProcessThread(result.status());
+        std::stringstream ss;
+        ss << "[" << std::this_thread::get_id()
+           << "] Process: inner returning with error\n";
+        std::cout << ss.str();
         return false;
       }
     }
@@ -1064,11 +1077,17 @@ class AsofJoinNode : public ExecNode {
     // It may happen here in cases where InputFinished was called before we were finished
     // producing results (so we didn't know the output size at that time)
     if (!CheckEnded()) {
+      std::stringstream ss;
+      ss << "[" << std::this_thread::get_id() << "] Process: outer returning false\n";
+      std::cout << ss.str();
       return false;
     }
 
     // There is no more we can do now but there is still work remaining for later when
     // more data arrives.
+    std::stringstream ss;
+    ss << "[" << std::this_thread::get_id() << "] Process: outer returning true\n";
+    std::cout << ss.str();
     return true;
   }
 
@@ -1076,9 +1095,15 @@ class AsofJoinNode : public ExecNode {
     for (;;) {
       if (!process_.Pop()) {
         EndFromProcessThread();
+        std::stringstream ss;
+        ss << "[" << std::this_thread::get_id() << "] ProcessThread: returning first\n";
+        std::cout << ss.str();
         return;
       }
       if (!Process()) {
+        // std::stringstream ss;
+        // ss << "[" << std::this_thread::get_id() << "] ProcessThread: returning
+        // second\n"; std::cout << ss.str();
         return;
       }
     }
@@ -1379,7 +1404,12 @@ class AsofJoinNode : public ExecNode {
     // InputReceived may be called after execution was finished. Pushing it to the
     // InputState is unnecessary since we're done (and anyway may cause the
     // BackPressureController to pause the input, causing a deadlock), so drop it.
+    size_t k = std_find(inputs_, input) - inputs_.begin();
     if (process_task_.is_finished()) {
+      std::stringstream ss;
+      ss << "[" << std::this_thread::get_id() << "] InputReceived(" << k
+         << "): dropping\n";
+      std::cout << ss.str();
       DEBUG_SYNC(this, "Input received while done. Short circuiting.",
                  DEBUG_MANIP(std::endl));
       return Status::OK();
@@ -1387,7 +1417,6 @@ class AsofJoinNode : public ExecNode {
 
     // Get the input
     ARROW_DCHECK(std_has(inputs_, input));
-    size_t k = std_find(inputs_, input) - inputs_.begin();
 
     // Put into the queue
     auto rb = *batch.ToRecordBatch(input->output_schema());
@@ -1400,11 +1429,18 @@ class AsofJoinNode : public ExecNode {
   }
 
   Status InputFinished(ExecNode* input, int total_batches) override {
+    size_t k = 0;
     {
       std::lock_guard<std::mutex> guard(gate_);
       ARROW_DCHECK(std_has(inputs_, input));
-      size_t k = std_find(inputs_, input) - inputs_.begin();
+      k = std_find(inputs_, input) - inputs_.begin();
       state_.at(k)->set_total_batches(total_batches);
+      std::stringstream ss;
+      ss << "[" << std::this_thread::get_id() << "] InputFinished(" << k << "): upper\n";
+      std::cout << ss.str();
+    }
+    if (k == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     // Trigger a process call
     // The reason for this is that there are cases at the end of a table where we don't
