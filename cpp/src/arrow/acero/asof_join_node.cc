@@ -972,6 +972,7 @@ class AsofJoinNode : public ExecNode {
       // materialize the output batch. The join is done by advancing through
       // the LHS and adding joined row to rows_ (done by Emplace). Finally,
       // input batches that are no longer needed are removed to free up memory.
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
       if (IsUpToDateWithLhsRow()) {
         dst.Emplace(state_, tolerance_);
         ARROW_ASSIGN_OR_RAISE(bool advanced, lhs.Advance());
@@ -1033,10 +1034,14 @@ class AsofJoinNode : public ExecNode {
   }
 
   bool Process() {
-    // std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     std::lock_guard<std::mutex> guard(gate_);
     if (!CheckEnded()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::stringstream ss;
+      ss << "[" << std::this_thread::get_id() << "] Process: shortcut returning false\n";
+      std::cout << ss.str();
       return false;
     }
 
@@ -1055,6 +1060,13 @@ class AsofJoinNode : public ExecNode {
         }
         ExecBatch out_b(*out_rb);
         out_b.index = batches_produced_++;
+        if (out_b.length == 1 && out_b[2].array()->IsNull(0)) {
+          std::stringstream ss;
+          ss << "[" << std::this_thread::get_id()
+             << "] Process: produced one batch (size=" << out_b.length
+             << ", v=" << out_b[2].array()->IsNull(0) << "\n";
+          std::cout << ss.str();
+        }
         DEBUG_SYNC(this, "produce batch ", out_b.index, ":", DEBUG_MANIP(std::endl),
                    out_rb->ToString(), DEBUG_MANIP(std::endl));
         Status st = output_->InputReceived(this, std::move(out_b));
@@ -1096,14 +1108,15 @@ class AsofJoinNode : public ExecNode {
       if (!process_.Pop()) {
         EndFromProcessThread();
         std::stringstream ss;
+
         ss << "[" << std::this_thread::get_id() << "] ProcessThread: returning first\n";
         std::cout << ss.str();
         return;
       }
       if (!Process()) {
-        // std::stringstream ss;
-        // ss << "[" << std::this_thread::get_id() << "] ProcessThread: returning
-        // second\n"; std::cout << ss.str();
+        std::stringstream ss;
+        ss << "[" << std::this_thread::get_id() << "] ProcessThread: returning second\n";
+        std::cout << ss.str();
         return;
       }
     }
@@ -1401,10 +1414,15 @@ class AsofJoinNode : public ExecNode {
   const Ordering& ordering() const override { return ordering_; }
 
   Status InputReceived(ExecNode* input, ExecBatch batch) override {
+    size_t k = std_find(inputs_, input) - inputs_.begin();
+    if (k == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
     // InputReceived may be called after execution was finished. Pushing it to the
     // InputState is unnecessary since we're done (and anyway may cause the
     // BackPressureController to pause the input, causing a deadlock), so drop it.
-    size_t k = std_find(inputs_, input) - inputs_.begin();
     if (process_task_.is_finished()) {
       std::stringstream ss;
       ss << "[" << std::this_thread::get_id() << "] InputReceived(" << k
@@ -1424,24 +1442,32 @@ class AsofJoinNode : public ExecNode {
                rb->ToString(), DEBUG_MANIP(std::endl));
 
     ARROW_RETURN_NOT_OK(state_.at(k)->Push(rb));
+    // if (k == 0) {
+    //   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // }
     process_.Push(true);
     return Status::OK();
   }
 
   Status InputFinished(ExecNode* input, int total_batches) override {
     size_t k = 0;
+    ARROW_DCHECK(std_has(inputs_, input));
+    k = std_find(inputs_, input) - inputs_.begin();
+    if (k == 0) {
+      // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
     {
       std::lock_guard<std::mutex> guard(gate_);
-      ARROW_DCHECK(std_has(inputs_, input));
-      k = std_find(inputs_, input) - inputs_.begin();
       state_.at(k)->set_total_batches(total_batches);
       std::stringstream ss;
       ss << "[" << std::this_thread::get_id() << "] InputFinished(" << k << "): upper\n";
       std::cout << ss.str();
     }
-    if (k == 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
+    // if (k == 0) {
+    //   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // }
     // Trigger a process call
     // The reason for this is that there are cases at the end of a table where we don't
     // know whether the RHS of the join is up-to-date until we know that the table is
