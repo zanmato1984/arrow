@@ -966,6 +966,12 @@ class AsofJoinNode : public ExecNode {
       // Advance each of the RHS as far as possible to be up to date for the LHS timestamp
       ARROW_ASSIGN_OR_RAISE(bool any_rhs_advanced, UpdateRhs());
 
+      // UpdateRhs saw empty RHS at time 200 and didn't do any Advance.
+      // Then wait until 400 by when right batch will be already pushed (at time 300).
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      // Now is time 400, IsUpToDateWithLhsRow will see non-empty RHS up to date for LHS
+      // and emit wrong results, without RHS properly advanced.
+
       // If we have received enough inputs to produce the next output batch
       // (decided by IsUpToDateWithLhsRow), we will perform the join and
       // materialize the output batch. The join is done by advancing through
@@ -1032,6 +1038,9 @@ class AsofJoinNode : public ExecNode {
   }
 
   bool Process() {
+    // Process starts at time 200, by when LHS is not empty and RHS is empty.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
     std::lock_guard<std::mutex> guard(gate_);
     if (!CheckEnded()) {
       return false;
@@ -1388,6 +1397,13 @@ class AsofJoinNode : public ExecNode {
     // Get the input
     ARROW_DCHECK(std_has(inputs_, input));
     size_t k = std_find(inputs_, input) - inputs_.begin();
+    if (k == 0) {
+      // At time 100 the left batch is pushed.
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } else {
+      // At time 300 the right batch is pushed.
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
 
     // Put into the queue
     auto rb = *batch.ToRecordBatch(input->output_schema());
