@@ -42,6 +42,24 @@ Status ScatterBitmap(const uint8_t* in_bitmap, const uint8_t* mask_bitmap,
   return Status::OK();
 }
 
+Result<std::shared_ptr<Buffer>> ScatterBuffer(const Buffer& src, const uint8_t* mask,
+                                              int64_t byte_width, int64_t length,
+                                              MemoryPool* pool) {
+  ARROW_ASSIGN_OR_RAISE(auto out, AllocateBuffer(length * byte_width, pool));
+  auto* in_data = src.data();
+  auto* out_data = out->mutable_data();
+  int64_t i_in = 0, i_out = 0;
+  VisitNullBitmapInline(
+      mask, /*valid_bits_offset=*/0, length, kUnknownNullCount,
+      [&] {
+        std::memcpy(out_data + i_out++ * byte_width, in_data + i_in++ * byte_width,
+                    byte_width);
+      },
+      [&] { ++i_out; });
+
+  return Status::OK();
+}
+
 struct ScatterImpl {
   explicit ScatterImpl(const ArrayData& in, const BooleanArray& mask, MemoryPool* pool)
       : in_(in), mask_(mask), pool_(pool), out_(std::shared_ptr<ArrayData>()) {
@@ -96,6 +114,13 @@ struct ScatterImpl {
     RETURN_NOT_OK(ScatterBitmap(in_.buffers[1]->data(), out_->buffers[0]->data(),
                                 out_->buffers[1]->mutable_data(), out_->length));
     return Status::OK();
+  }
+
+  Status Visit(const FixedWidthType& type) {
+    DCHECK_EQ(type.bit_width() % 8, 0);
+    return ScatterBuffer(*in_.buffers[1], out_->buffers[0]->data(), type.bit_width() / 8,
+                         out_->length, pool_)
+        .Value(&out_->buffers[1]);
   }
 
   Status Visit(const DataType&) {
