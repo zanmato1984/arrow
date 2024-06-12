@@ -114,12 +114,19 @@ add_arrow_compute_test(vector_selection_test
                        EXTRA_LINK_LIBS
                        arrow_compute_kernels_testing)
 
+add_arrow_compute_test(vector_scatter_test
+                       SOURCES
+                       vector_scatter_test.cc
+                       EXTRA_LINK_LIBS
+                       arrow_compute_kernels_testing)
+
 add_arrow_benchmark(vector_hash_benchmark PREFIX "arrow-compute")
 add_arrow_benchmark(vector_sort_benchmark PREFIX "arrow-compute")
 add_arrow_benchmark(vector_partition_benchmark PREFIX "arrow-compute")
 add_arrow_benchmark(vector_topk_benchmark PREFIX "arrow-compute")
 add_arrow_benchmark(vector_replace_benchmark PREFIX "arrow-compute")
 add_arrow_benchmark(vector_selection_benchmark PREFIX "arrow-compute")
+add_arrow_benchmark(vector_scatter_benchmark PREFIX "arrow-compute")
 
 # ----------------------------------------------------------------------
 # Aggregate kernels
