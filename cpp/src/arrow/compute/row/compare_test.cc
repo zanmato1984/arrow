@@ -173,9 +173,9 @@ TEST(KeyCompare, CompareColumnsToRowsMany) {
     GTEST_SKIP() << "Test only works on 64-bit platforms";
   }
 
-  // The idea of this case is to create a row table using one var length column (so the
-  // row is hence var length and has offset buffer), with more than 2^31 rows. Then
-  // compare the rows with row ids larger than 2^31.
+  // The idea of this case is to create a row table using one fixed length column and one
+  // var length column (so the row is hence var length and has offset buffer), with more
+  // than 2^31 rows. Then compare the rows with row ids larger than 2^31.
 
   // A small batch to append to the row table repeatedly to grow the row table to big
   // enough.
@@ -192,6 +192,11 @@ TEST(KeyCompare, CompareColumnsToRowsMany) {
   ExecBatch batch_left;
   {
     std::vector<Datum> values;
+
+    // A fixed length array containing random values.
+    ASSERT_OK_AND_ASSIGN(auto value_fixed_length,
+                         ::arrow::gen::Random(uint32())->Generate(num_rows_batch));
+    values.push_back(std::move(value_fixed_length));
 
     // A var length array containing small var length values ("X").
     ASSERT_OK_AND_ASSIGN(auto value_var_length,
