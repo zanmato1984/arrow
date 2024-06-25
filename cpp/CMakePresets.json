@@ -242,6 +242,19 @@
       "cacheVariables": {}
     },
     {
+      "name": "compare",
+      "inherits": [
+        "base-debug",
+        "features-basic"
+      ],
+      "displayName": "compare",
+      "cacheVariables": {
+        "ARROW_JEMALLOC": "OFF",
+        "ARROW_MIMALLOC": "OFF",
+        "ARROW_USE_ASAN": "ON"
+      }
+    },
+    {
       "name": "ninja-debug",
       "inherits": [
         "base-debug",
