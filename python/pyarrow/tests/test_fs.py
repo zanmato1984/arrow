@@ -1450,8 +1450,8 @@ def test_azurefs_options(pickle_module):
     fs3 = AzureFileSystem(account_name='fake-account', account_key='fakeaccount',
                           blob_storage_authority='fake-blob-authority',
                           dfs_storage_authority='fake-dfs-authority',
-                          blob_storage_scheme='fake-blob-scheme',
-                          dfs_storage_scheme='fake-dfs-scheme')
+                          blob_storage_scheme='https',
+                          dfs_storage_scheme='https')
     assert isinstance(fs3, AzureFileSystem)
     assert pickle_module.loads(pickle_module.dumps(fs3)) == fs3
     assert fs3 != fs2
@@ -1987,6 +1987,8 @@ def test_s3_finalize_region_resolver():
     subprocess.check_call([sys.executable, "-c", code])
 
 
+@pytest.mark.processes
+@pytest.mark.threading
 @pytest.mark.s3
 def test_concurrent_s3fs_init():
     # GH-39897: lazy concurrent initialization of S3 subsystem should not crash

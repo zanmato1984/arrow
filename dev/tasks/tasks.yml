@@ -1194,6 +1194,15 @@ tasks:
       image: conda-python
 {% endfor %}
 
+  test-conda-python-emscripten:
+    ci: github
+    template: docker-tests/github.linux.yml
+    params:
+      env:
+        UBUNTU: 22.04
+        PYTHON: 3.12
+      image: conda-python-emscripten
+
   test-conda-python-3.11-hypothesis:
     ci: github
     template: docker-tests/github.linux.yml
@@ -1271,6 +1280,7 @@ tasks:
       env:
         ARROW_R_DEV: "TRUE"
       image: ubuntu-r-valgrind
+      timeout: 300 # 5 hours
 
   test-r-linux-rchk:
     ci: github
@@ -1494,10 +1504,11 @@ tasks:
 
 {% for python_version, pandas_version, numpy_version, cache_leaf in [("3.8", "1.0", "1.19", True),
                                                                      ("3.9", "latest", "latest", False),
+                                                                     ("3.10", "latest", "1.26", False),
                                                                      ("3.10", "latest", "latest", False),
                                                                      ("3.10", "nightly", "nightly", False),
                                                                      ("3.11", "upstream_devel", "nightly", False)] %}
-  test-conda-python-{{ python_version }}-pandas-{{ pandas_version }}:
+  test-conda-python-{{ python_version }}-pandas-{{ pandas_version }}-numpy-{{ numpy_version }}:
     ci: github
     template: docker-tests/github.linux.yml
     params:
@@ -1554,10 +1565,11 @@ tasks:
         TEST_PYARROW_ONLY: "{{ test_pyarrow_only }}"
         NUMPY: "{{ numpy_version }}"
         JDK: "{{ jdk_version }}"
+      fetch_depth: 0
       # use the branch-3.0 of spark, so prevent reusing any layers
       flags: --no-leaf-cache
       image: conda-python-spark
-      fetch_depth: 0
+      timeout: 90
 {% endfor %}
 
 {% for kind in ["static", "static-system-dependency"] %}
