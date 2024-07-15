@@ -735,8 +735,6 @@ set(ARROW_COMPUTE_SRCS
     compute/kernels/util_internal.cc
     compute/kernels/vector_hash.cc
     compute/kernels/vector_scatter.cc
-    compute/kernels/vector_scatter_by_mask_internal.cc
-    compute/kernels/vector_scatter_internal.cc
     compute/kernels/vector_selection.cc
     compute/kernels/vector_selection_filter_internal.cc
     compute/kernels/vector_selection_internal.cc
