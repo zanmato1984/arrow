@@ -1019,5 +1019,12 @@ class JoinProbeProcessor {
   OutputBatchFn output_batch_fn_;
 };
 
+void BenchGatherNonSimd(const uint8_t* rows, int width, int num_gather, int* rows_to_gather,
+                        uint8_t* output);
+void BenchGatherSimd(const uint8_t* rows, int width, int num_gather, int* rows_to_gather,
+                        uint8_t* output);
+void BenchGatherFuse(const uint8_t* rows, int width, int num_gather, int* rows_to_gather,
+                        uint8_t* output);
+
 }  // namespace acero
 }  // namespace arrow

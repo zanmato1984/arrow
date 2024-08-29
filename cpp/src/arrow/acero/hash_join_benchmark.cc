@@ -761,5 +761,44 @@ BENCHMARK_CAPTURE(BM_RowArray_DecodeOneOfColumns,
     ->ArgsProduct({benchmark::CreateDenseRange(0, var_length_row_column_types.size() - 1,
                                                1)});
 
+template <typename... Args>
+static void BM_Gather(benchmark::State& st, Args&&...) {
+  int mode = static_cast<int>(st.range(0));
+  int num_bytes = static_cast<int>(st.range(1));
+  int width = static_cast<int>(st.range(2));
+  int num_rows = num_bytes / width;
+  std::vector<uint64_t> rows(num_bytes / 8 + 64);
+  std::vector<uint64_t> output(num_bytes / 8 + 64);
+  std::vector<int> row_ids(num_rows);
+  std::iota(row_ids.begin(), row_ids.end(), 0);
+  //   for (size_t i = 0; i < num_rows; ++i) {
+  //     row_ids[i] = (i + 10243 * i) % num_rows;
+  //   }
+
+  uint64_t total_rows = 0;
+  for (auto _ : st) {
+    st.ResumeTiming();
+    if (mode == 0) {
+      BenchGatherSimd(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
+                      row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
+    } else if (mode == 1) {
+      BenchGatherNonSimd(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
+                         row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
+    } else {
+      BenchGatherFuse(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
+                         row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
+    }
+    total_rows += num_rows;
+    st.PauseTiming();
+  }
+  st.counters["rows/sec"] = benchmark::Counter(total_rows, benchmark::Counter::kIsRate);
+}
+
+BENCHMARK(BM_Gather)
+    ->ArgNames({"Simd", "Bytes", "Width"})
+    ->ArgsProduct({benchmark::CreateDenseRange(0, 2, 1),
+                   benchmark::CreateRange(64, 64 * 1024 * 1024, 8),
+                   benchmark::CreateDenseRange(4, 8, 4)});
+
 }  // namespace acero
 }  // namespace arrow

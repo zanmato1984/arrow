@@ -2935,5 +2935,37 @@ Result<std::unique_ptr<HashJoinImpl>> HashJoinImpl::MakeSwiss() {
   return impl;
 }
 
+void GatherNonSimd(const uint32_t* rows, int num_gather, int* rows_to_gather,
+                   uint32_t* output) {
+  for (int i = 0; i < num_gather; ++i) {
+    output[i] = rows[rows_to_gather[i]];
+  }
+}
+
+void GatherNonSimd(const uint64_t* rows, int num_gather, int* rows_to_gather,
+                   uint64_t* output) {
+  for (int i = 0; i < num_gather; ++i) {
+    output[i] = rows[rows_to_gather[i]];
+  }
+}
+
+template <typename T>
+void GatherNonSimd(const T* rows, int num_gather, int* rows_to_gather, T* output) {
+  for (int i = 0; i < num_gather; ++i) {
+    output[i] = rows[rows_to_gather[i]];
+  }
+}
+
+void BenchGatherNonSimd(const uint8_t* rows, int width, int num_gather,
+                        int* rows_to_gather, uint8_t* output) {
+  if (width == 4) {
+    GatherNonSimd(reinterpret_cast<const uint32_t*>(rows), num_gather, rows_to_gather,
+                  reinterpret_cast<uint32_t*>(output));
+  } else {
+    GatherNonSimd(reinterpret_cast<const uint64_t*>(rows), num_gather, rows_to_gather,
+                  reinterpret_cast<uint64_t*>(output));
+  }
+}
+
 }  // namespace acero
 }  // namespace arrow
