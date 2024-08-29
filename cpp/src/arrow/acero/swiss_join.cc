@@ -155,7 +155,7 @@ Status RowArray::DecodeSelected(ResizableArrayData* output, int column_id,
     // Process fixed length columns
     //
 #ifdef ARROW_HAVE_RUNTIME_AVX2
-    if (use_avx2) {
+    if (use_avx2 && (fixed_length == 0 || fixed_length > 8)) {
       num_rows_processed = DecodeFixedLength_avx2(
           output, num_rows_before, column_id, fixed_length, num_rows_to_append, row_ids);
     }
@@ -167,10 +167,10 @@ Status RowArray::DecodeSelected(ResizableArrayData* output, int column_id,
     // Process offsets for varying length columns
     //
 #ifdef ARROW_HAVE_RUNTIME_AVX2
-    if (use_avx2) {
-      num_rows_processed = DecodeOffsets_avx2(output, num_rows_before, column_id,
-                                              num_rows_to_append, row_ids);
-    }
+    // if (use_avx2) {
+    //   num_rows_processed = DecodeOffsets_avx2(output, num_rows_before, column_id,
+    //                                           num_rows_to_append, row_ids);
+    // }
 #endif
     DecodeOffsets(output, num_rows_before + num_rows_processed, column_id,
                   num_rows_to_append - num_rows_processed, row_ids + num_rows_processed);

@@ -180,8 +180,8 @@ int RowArrayAccessor::Visit_avx2(const RowTableImpl& rows, int column_id, int nu
         // Load 8 32-bit row ids.
         __m256i row_id =
             _mm256_loadu_si256(reinterpret_cast<const __m256i*>(row_ids) + i);
-        // Widen the 32-bit row ids to 64-bit and store the lower/higher 4 of them into 2
-        // 256-bit registers.
+        // Widen the 32-bit row ids to 64-bit and store the lower/higher 4 of them into
+        // 2 256-bit registers.
         __m256i row_id_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(row_id));
         __m256i row_id_hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(row_id, 1));
         // Calculate the lower/higher 4 64-bit row offsets based on the lower/higher 4
