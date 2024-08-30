@@ -405,11 +405,11 @@ int RowArray::DecodeFixedLength_avx2(ResizableArrayData* output, int output_star
   // off the cost of the heavy gather instructions.
   // For fixed length 0 (boolean column), the vectorized code wins by batching 8 bits into
   // a single byte instead of modifying the same byte 8 times in the scalar code.
-  if (!(fixed_length == 0 || fixed_length > 8)) {
-    DecodeFixedLength(output, output_start_row, column_id, fixed_length,
-                      num_rows_to_append, row_ids);
-    return num_rows_to_append;
-  }
+  // if (!(fixed_length == 0 || fixed_length > 8)) {
+  //   DecodeFixedLength(output, output_start_row, column_id, fixed_length,
+  //                     num_rows_to_append, row_ids);
+  //   return num_rows_to_append;
+  // }
 
   DCHECK_EQ(output_start_row % 8, 0);
 
@@ -484,8 +484,8 @@ int RowArray::DecodeOffsets_avx2(ResizableArrayData* output, int output_start_ro
                                  int column_id, int num_rows_to_append,
                                  const uint32_t* row_ids) const {
   // Same reason as DecodeFixedLength_avx2.
-  DecodeOffsets(output, output_start_row, column_id, num_rows_to_append, row_ids);
-  return num_rows_to_append;
+  // DecodeOffsets(output, output_start_row, column_id, num_rows_to_append, row_ids);
+  // return num_rows_to_append;
 
   uint32_t* offsets =
       reinterpret_cast<uint32_t*>(output->mutable_data(1)) + output_start_row;
