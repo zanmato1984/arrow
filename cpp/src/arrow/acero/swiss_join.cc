@@ -155,7 +155,8 @@ Status RowArray::DecodeSelected(ResizableArrayData* output, int column_id,
     // Process fixed length columns
     //
 #ifdef ARROW_HAVE_RUNTIME_AVX2
-    if (use_avx2 && (fixed_length == 0 || fixed_length > 8)) {
+    if (use_avx2) {
+      // if (use_avx2 && (fixed_length == 0 || fixed_length > 8)) {
       num_rows_processed = DecodeFixedLength_avx2(
           output, num_rows_before, column_id, fixed_length, num_rows_to_append, row_ids);
     }
@@ -193,10 +194,12 @@ Status RowArray::DecodeSelected(ResizableArrayData* output, int column_id,
   // Process nulls
   //
 #ifdef ARROW_HAVE_RUNTIME_AVX2
-  if (use_avx2) {
-    num_rows_processed =
-        DecodeNulls_avx2(output, num_rows_before, column_id, num_rows_to_append, row_ids);
-  }
+  // if (use_avx2) {
+  //   num_rows_processed =
+  //       DecodeNulls_avx2(output, num_rows_before, column_id, num_rows_to_append,
+  //       row_ids);
+  // }
+  num_rows_processed = 0;
 #endif
   DecodeNulls(output, num_rows_before + num_rows_processed, column_id,
               num_rows_to_append - num_rows_processed, row_ids + num_rows_processed);
@@ -2936,19 +2939,19 @@ Result<std::unique_ptr<HashJoinImpl>> HashJoinImpl::MakeSwiss() {
   return impl;
 }
 
-void GatherNonSimd(const uint32_t* rows, int num_gather, int* rows_to_gather,
-                   uint32_t* output) {
-  for (int i = 0; i < num_gather; ++i) {
-    output[i] = rows[rows_to_gather[i]];
-  }
-}
+// void GatherNonSimd(const uint32_t* rows, int num_gather, int* rows_to_gather,
+//                    uint32_t* output) {
+//   for (int i = 0; i < num_gather; ++i) {
+//     output[i] = rows[rows_to_gather[i]];
+//   }
+// }
 
-void GatherNonSimd(const uint64_t* rows, int num_gather, int* rows_to_gather,
-                   uint64_t* output) {
-  for (int i = 0; i < num_gather; ++i) {
-    output[i] = rows[rows_to_gather[i]];
-  }
-}
+// void GatherNonSimd(const uint64_t* rows, int num_gather, int* rows_to_gather,
+//                    uint64_t* output) {
+//   for (int i = 0; i < num_gather; ++i) {
+//     output[i] = rows[rows_to_gather[i]];
+//   }
+// }
 
 template <typename T>
 void GatherNonSimd(const T* rows, int num_gather, int* rows_to_gather, T* output) {
@@ -2959,7 +2962,13 @@ void GatherNonSimd(const T* rows, int num_gather, int* rows_to_gather, T* output
 
 void BenchGatherNonSimd(const uint8_t* rows, int width, int num_gather,
                         int* rows_to_gather, uint8_t* output) {
-  if (width == 4) {
+  if (width == 1) {
+    GatherNonSimd(reinterpret_cast<const uint8_t*>(rows), num_gather, rows_to_gather,
+                  reinterpret_cast<uint8_t*>(output));
+  } else if (width == 2) {
+    GatherNonSimd(reinterpret_cast<const uint16_t*>(rows), num_gather, rows_to_gather,
+                  reinterpret_cast<uint16_t*>(output));
+  } else if (width == 4) {
     GatherNonSimd(reinterpret_cast<const uint32_t*>(rows), num_gather, rows_to_gather,
                   reinterpret_cast<uint32_t*>(output));
   } else {

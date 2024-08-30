@@ -508,6 +508,47 @@ int RowArray::DecodeNulls_avx2(ResizableArrayData* output, int output_start_row,
       });
 }
 
+void GatherSimd(const uint8_t* rows, int num_gather, int* rows_to_gather,
+                uint8_t* output) {
+  constexpr uint64_t kByteSequence_0_4_8_12 = 0x0c080400ULL;
+  const __m256i shuffle_const =
+      _mm256_setr_epi64x(kByteSequence_0_4_8_12, -1, kByteSequence_0_4_8_12, -1);
+  for (int i = 0; i < num_gather / 8; ++i) {
+    __m256i row_id =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(rows_to_gather) + i);
+    __m256i row_id_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(row_id));
+    __m256i row_id_hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(row_id, 1));
+    __m128i row_lo = _mm256_i64gather_epi32((const int*)rows, row_id_lo, 1);
+    __m128i row_hi = _mm256_i64gather_epi32((const int*)rows, row_id_hi, 1);
+    __m256i row = _mm256_set_m128i(row_hi, row_lo);
+    row = _mm256_shuffle_epi8(row, shuffle_const);
+    uint32_t compact_row_lo = static_cast<uint32_t>(_mm256_extract_epi32(row, 0));
+    uint64_t compact_row_hi = static_cast<uint64_t>(_mm256_extract_epi32(row, 4)) << 32;
+    *reinterpret_cast<uint64_t*>(output) = compact_row_lo | compact_row_hi;
+  }
+}
+
+void GatherSimd(const uint16_t* rows, int num_gather, int* rows_to_gather,
+                uint16_t* output) {
+  constexpr uint64_t kByteSequence_0_1_4_5_8_9_12_13 = 0x0d0c090805040100ULL;
+  const __m256i shuffle_const = _mm256_setr_epi64x(kByteSequence_0_1_4_5_8_9_12_13, -1,
+                                                   kByteSequence_0_1_4_5_8_9_12_13, -1);
+  for (int i = 0; i < num_gather / 8; ++i) {
+    __m256i row_id =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(rows_to_gather) + i);
+    __m256i row_id_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(row_id));
+    __m256i row_id_hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(row_id, 1));
+    __m256i row_offset_lo = _mm256_mul_epi32(row_id_lo, _mm256_set1_epi32(2));
+    __m256i row_offset_hi = _mm256_mul_epi32(row_id_hi, _mm256_set1_epi32(2));
+    __m128i row_lo = _mm256_i64gather_epi32((const int*)rows, row_offset_lo, 1);
+    __m128i row_hi = _mm256_i64gather_epi32((const int*)rows, row_offset_hi, 1);
+    __m256i row = _mm256_set_m128i(row_hi, row_lo);
+    row = _mm256_shuffle_epi8(row, shuffle_const);
+    row = _mm256_permute4x64_epi64(row, 0xd8);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(output), _mm256_castsi256_si128(row));
+  }
+}
+
 void GatherSimd(const uint32_t* rows, int num_gather, int* rows_to_gather,
                 uint32_t* output) {
   for (int i = 0; i < num_gather / 8; ++i) {
@@ -532,12 +573,35 @@ void GatherSimd(const uint64_t* rows, int num_gather, int* rows_to_gather,
         _mm256_loadu_si256(reinterpret_cast<const __m256i*>(rows_to_gather) + i);
     __m256i row_id_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(row_id));
     __m256i row_id_hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(row_id, 1));
-    __m256i row_offset_lo = _mm256_mul_epi32(row_id_lo, _mm256_set1_epi32(4));
-    __m256i row_offset_hi = _mm256_mul_epi32(row_id_hi, _mm256_set1_epi32(4));
+    __m256i row_offset_lo = _mm256_mul_epi32(row_id_lo, _mm256_set1_epi32(8));
+    __m256i row_offset_hi = _mm256_mul_epi32(row_id_hi, _mm256_set1_epi32(8));
     __m256i row_lo = _mm256_i64gather_epi64(row_ptr_base_i64, row_offset_lo, 1);
     __m256i row_hi = _mm256_i64gather_epi64(row_ptr_base_i64, row_offset_hi, 1);
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(output) + i, row_lo);
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(output + 4) + i, row_hi);
+  }
+}
+
+void GatherFuse(const uint8_t* rows, int num_gather, int* rows_to_gather,
+                uint8_t* output) {
+  uint8_t row[8];
+  for (int i = 0; i < num_gather / 8; ++i) {
+    for (int j = 0; j < 8; ++j) {
+      row[j] = rows[rows_to_gather[i * 8 + j]];
+    }
+    *reinterpret_cast<uint64_t*>(output) = *reinterpret_cast<uint64_t*>(row);
+  }
+}
+
+void GatherFuse(const uint16_t* rows, int num_gather, int* rows_to_gather,
+                uint16_t* output) {
+  uint16_t row[8];
+  for (int i = 0; i < num_gather / 8; ++i) {
+    for (int j = 0; j < 8; ++j) {
+      row[j] = rows[rows_to_gather[i * 8 + j]];
+    }
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(output) + i,
+                     *reinterpret_cast<__m128i*>(row));
   }
 }
 
@@ -569,7 +633,13 @@ void GatherFuse(const uint64_t* rows, int num_gather, int* rows_to_gather,
 
 void BenchGatherSimd(const uint8_t* rows, int width, int num_gather, int* rows_to_gather,
                      uint8_t* output) {
-  if (width == 4) {
+  if (width == 1) {
+    GatherSimd(reinterpret_cast<const uint8_t*>(rows), num_gather, rows_to_gather,
+               reinterpret_cast<uint8_t*>(output));
+  } else if (width == 2) {
+    GatherSimd(reinterpret_cast<const uint16_t*>(rows), num_gather, rows_to_gather,
+               reinterpret_cast<uint16_t*>(output));
+  } else if (width == 4) {
     GatherSimd(reinterpret_cast<const uint32_t*>(rows), num_gather, rows_to_gather,
                reinterpret_cast<uint32_t*>(output));
   } else {
@@ -580,7 +650,13 @@ void BenchGatherSimd(const uint8_t* rows, int width, int num_gather, int* rows_t
 
 void BenchGatherFuse(const uint8_t* rows, int width, int num_gather, int* rows_to_gather,
                      uint8_t* output) {
-  if (width == 4) {
+  if (width == 1) {
+    GatherFuse(reinterpret_cast<const uint8_t*>(rows), num_gather, rows_to_gather,
+               reinterpret_cast<uint8_t*>(output));
+  } else if (width == 2) {
+    GatherFuse(reinterpret_cast<const uint16_t*>(rows), num_gather, rows_to_gather,
+               reinterpret_cast<uint16_t*>(output));
+  } else if (width == 4) {
     GatherFuse(reinterpret_cast<const uint32_t*>(rows), num_gather, rows_to_gather,
                reinterpret_cast<uint32_t*>(output));
   } else {

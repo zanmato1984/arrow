@@ -762,32 +762,27 @@ BENCHMARK_CAPTURE(BM_RowArray_DecodeOneOfColumns,
     ->ArgsProduct({benchmark::CreateDenseRange(0, var_length_row_column_types.size() - 1,
                                                1)});
 
-template <typename... Args>
-static void BM_Gather(benchmark::State& st, Args&&...) {
-  int mode = static_cast<int>(st.range(0));
-  int num_bytes = static_cast<int>(st.range(1));
-  int width = static_cast<int>(st.range(2));
+static void GatherBench(benchmark::State& st, int mode, int num_bytes, int width,
+                        std::function<int(int&)> gen_row_id) {
   int num_rows = num_bytes / width;
   std::vector<uint64_t> rows(num_bytes / 8 + 64);
   std::vector<uint64_t> output(num_bytes / 8 + 64);
   std::vector<int> row_ids(num_rows);
-  std::iota(row_ids.begin(), row_ids.end(), 0);
-  //   for (size_t i = 0; i < num_rows; ++i) {
-  //     row_ids[i] = (i + 10243 * i) % num_rows;
-  //   }
+  std::transform(row_ids.begin(), row_ids.end(), row_ids.begin(), gen_row_id);
+  // std::iota(row_ids.begin(), row_ids.end(), 0);
 
   uint64_t total_rows = 0;
   for (auto _ : st) {
     st.ResumeTiming();
     if (mode == 0) {
-      BenchGatherSimd(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
-                      row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
-    } else if (mode == 1) {
       BenchGatherNonSimd(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
                          row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
+    } else if (mode == 1) {
+      BenchGatherSimd(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
+                      row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
     } else {
       BenchGatherFuse(reinterpret_cast<const uint8_t*>(rows.data()), width, num_rows,
-                         row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
+                      row_ids.data(), reinterpret_cast<uint8_t*>(output.data()));
     }
     total_rows += num_rows;
     st.PauseTiming();
@@ -795,11 +790,57 @@ static void BM_Gather(benchmark::State& st, Args&&...) {
   st.counters["rows/sec"] = benchmark::Counter(total_rows, benchmark::Counter::kIsRate);
 }
 
-BENCHMARK(BM_Gather)
-    ->ArgNames({"Simd", "Bytes", "Width"})
-    ->ArgsProduct({benchmark::CreateDenseRange(0, 2, 1),
-                   benchmark::CreateRange(64, 64 * 1024 * 1024, 8),
-                   benchmark::CreateDenseRange(4, 8, 4)});
+template <typename... Args>
+static void BM_GatherSequential(benchmark::State& st, Args&&...) {
+  int mode = static_cast<int>(st.range(0));
+  int num_bytes = static_cast<int>(st.range(1));
+  int width = static_cast<int>(st.range(2));
+  int i = 0;
+  auto gen_row_id = [&](int&) { return i++; };
+  GatherBench(st, mode, num_bytes, width, gen_row_id);
+}
+
+template <typename... Args>
+static void BM_GatherRandom(benchmark::State& st, Args&&...) {
+  int mode = static_cast<int>(st.range(0));
+  int num_bytes = static_cast<int>(st.range(1));
+  int width = static_cast<int>(st.range(2));
+  int num_rows = num_bytes / width;
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dist(0, num_rows);
+  auto gen_row_id = [&](int&) { return dist(gen); };
+  GatherBench(st, mode, num_bytes, width, gen_row_id);
+}
+
+// BENCHMARK(BM_GatherSequential)
+//     ->ArgNames({"Simd", "Bytes", "Width"})
+//     ->ArgsProduct({benchmark::CreateDenseRange(0, 2, 1),
+//                    benchmark::CreateRange(1024, 64 * 1024 * 1024, 8),
+//                    {8}});
+
+// BENCHMARK(BM_GatherRandom)
+//     ->ArgNames({"Simd", "Bytes", "Width"})
+//     ->ArgsProduct({{0, 1, 2},
+//                    benchmark::CreateRange(1024, 64 * 1024 * 1024, 8),
+//                    {1, 2, 4, 8}});
+
+template <typename... Args>
+static void BM_GatherRandomByRow(benchmark::State& st, Args&&...) {
+  int mode = static_cast<int>(st.range(0));
+  int num_rows = static_cast<int>(st.range(1));
+  int width = static_cast<int>(st.range(2));
+  int num_bytes = num_rows * width;
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dist(0, num_rows);
+  auto gen_row_id = [&](int&) { return dist(gen); };
+  GatherBench(st, mode, num_bytes, width, gen_row_id);
+}
+
+BENCHMARK(BM_GatherRandomByRow)
+    ->ArgNames({"Simd", "Rows", "Width"})
+    ->ArgsProduct({{0, 1, 2}, {65536}, {1, 2, 4, 8}});
 
 }  // namespace acero
 }  // namespace arrow
