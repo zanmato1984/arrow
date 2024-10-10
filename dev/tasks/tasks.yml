@@ -922,6 +922,9 @@ tasks:
                     "js",
                     "python",
                     "ruby"] %}
+    # Skip verification for python and integration on Ubuntu 20.04
+    # GH-44253. Remove once we drop support for 20.04
+    {% if not (target in ["python", "integration"] and version == "20.04") %}
   verify-rc-source-{{ target }}-linux-{{ distribution }}-{{ version }}-amd64:
     ci: github
     template: verify-rc/github.linux.amd64.docker.yml
@@ -930,15 +933,20 @@ tasks:
         {{ distribution.upper() }}: "{{ version }}"
       target: {{ target }}
       distro: {{ distribution }}
+    {% endif %}
   {% endfor %}
 
   {% for target in ["jars", "wheels"] %}
+    # Skip verification for wheels on Ubuntu 20.04
+    # GH-44253. Remove once we drop support for 20.04
+    {% if not (target == "wheels" and version == "20.04") %}
   verify-rc-binaries-{{ target }}-linux-{{ distribution }}-{{ version }}-amd64:
     ci: github
     template: verify-rc/github.linux.amd64.docker.yml
     params:
       target: {{ target }}
       distro: {{ distribution }}
+    {% endif %}
   {% endfor %}
 
 {% endfor %}
@@ -1118,7 +1126,7 @@ tasks:
     template: docker-tests/github.linux.yml
     params:
       env:
-        UBUNTU: 20.04
+        UBUNTU: 22.04
       flags: >-
         -e ARROW_AZURE=OFF
         -e ARROW_GANDIVA=OFF
@@ -1188,12 +1196,12 @@ tasks:
         UBUNTU: 24.04
       image: ubuntu-cpp-thread-sanitizer
 
-  test-ubuntu-20.04-cpp-minimal-with-formats:
+  test-ubuntu-24.04-cpp-minimal-with-formats:
     ci: github
     template: docker-tests/github.linux.yml
     params:
       env:
-        UBUNTU: 20.04
+        UBUNTU: 24.04
       flags: "-e ARROW_CSV=ON -e ARROW_PARQUET=ON"
       image: ubuntu-cpp-minimal
 
@@ -1319,7 +1327,7 @@ tasks:
       env:
         ARROW_R_DEV: "TRUE"
       image: ubuntu-r-valgrind
-      timeout: 300 # 5 hours
+      timeout: 330 # 5.5 hours
 
   test-r-linux-rchk:
     ci: github
@@ -1509,6 +1517,8 @@ tasks:
     ci: github
     template: docker-tests/github.cuda.yml
     params:
+      env:
+        UBUNTU: 20.04
       image: ubuntu-cuda-cpp
 
   test-cuda-cpp-ubuntu-22.04-cuda-11.7.1:
