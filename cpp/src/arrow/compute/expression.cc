@@ -28,6 +28,7 @@
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression_internal.h"
 #include "arrow/compute/function_internal.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/compute/util.h"
 #include "arrow/io/memory.h"
 #include "arrow/ipc/reader.h"
@@ -55,6 +56,13 @@ void Expression::Call::ComputeHash() {
   }
 }
 
+void Expression::Special::ComputeHash() {
+  hash = std::hash<std::string>{}(special_form->name);
+  for (const auto& arg : arguments) {
+    arrow::internal::hash_combine(hash, arg.hash());
+  }
+}
+
 Expression::Expression(Call call) {
   call.ComputeHash();
   impl_ = std::make_shared<Impl>(std::move(call));
@@ -65,6 +73,9 @@ Expression::Expression(Datum literal)
 
 Expression::Expression(Parameter parameter)
     : impl_(std::make_shared<Impl>(std::move(parameter))) {}
+
+Expression::Expression(Special special)
+    : impl_(std::make_shared<Impl>(std::move(special))) {}
 
 Expression literal(Datum lit) { return Expression(std::move(lit)); }
 
@@ -79,6 +90,13 @@ Expression call(std::string function, std::vector<Expression> arguments,
   call.arguments = std::move(arguments);
   call.options = std::move(options);
   return Expression(std::move(call));
+}
+
+Expression if_else_special(Expression cond, Expression if_true, Expression if_false) {
+  Expression::Special special;
+  special.arguments = {std::move(cond), std::move(if_true), std::move(if_false)};
+  special.special_form = std::make_shared<IfElseSpecialForm>();
+  return Expression(std::move(special));
 }
 
 const Datum* Expression::literal() const {
@@ -106,6 +124,12 @@ const Expression::Call* Expression::call() const {
   return std::get_if<Call>(impl_.get());
 }
 
+const Expression::Special* Expression::special() const {
+  if (impl_ == nullptr) return nullptr;
+
+  return std::get_if<Special>(impl_.get());
+}
+
 const DataType* Expression::type() const {
   if (impl_ == nullptr) return nullptr;
 
@@ -117,7 +141,11 @@ const DataType* Expression::type() const {
     return parameter->type.type;
   }
 
-  return CallNotNull(*this)->type.type;
+  if (const Call* call = this->call()) {
+    return call->type.type;
+  }
+
+  return SpecialNotNull(*this)->type.type;
 }
 
 namespace {
@@ -268,7 +296,11 @@ size_t Expression::hash() const {
     return ref->hash();
   }
 
-  return CallNotNull(*this)->hash;
+  if (auto call = call()) {
+    return call->hash;
+  }
+
+  return SpecialNotNull(*this)->hash;
 }
 
 bool Expression::IsBound() const {
@@ -601,6 +633,78 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
   return Expression(std::move(call));
 }
 
+Result<Expression> BindNonRecursive(Expression::Special special, bool insert_implicit_casts,
+                                    compute::ExecContext* exec_context) {
+  DCHECK(std::all_of(special.arguments.begin(), special.arguments.end(),
+                     [](const Expression& argument) { return argument.IsBound(); }));
+
+  std::vector<TypeHolder> types = GetTypes(special.arguments);
+  ARROW_ASSIGN_OR_RAISE(call.function, GetFunction(call, exec_context));
+
+  auto FinishBind = [&] {
+    compute::KernelContext kernel_context(exec_context, call.kernel);
+    if (call.kernel->init) {
+      const FunctionOptions* options =
+          call.options ? call.options.get() : call.function->default_options();
+      ARROW_ASSIGN_OR_RAISE(
+          call.kernel_state,
+          call.kernel->init(&kernel_context, {call.kernel, types, options}));
+
+      kernel_context.SetState(call.kernel_state.get());
+    }
+
+    ARROW_ASSIGN_OR_RAISE(
+        call.type, call.kernel->signature->out_type().Resolve(&kernel_context, types));
+    return Status::OK();
+  };
+
+  // First try and bind exactly
+  Result<const Kernel*> maybe_exact_match = call.function->DispatchExact(types);
+  if (maybe_exact_match.ok()) {
+    call.kernel = *maybe_exact_match;
+    if (FinishBind().ok()) {
+      return Expression(std::move(call));
+    }
+  }
+
+  if (!insert_implicit_casts) {
+    return maybe_exact_match.status();
+  }
+
+  // If exact binding fails, and we are allowed to cast, then prefer casting literals
+  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
+  // first down-cast the literals as much as possible
+  types = GetTypesWithSmallestLiteralRepresentation(call.arguments);
+  ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
+
+  for (size_t i = 0; i < types.size(); ++i) {
+    if (types[i] == call.arguments[i].type()) continue;
+
+    if (const Datum* lit = call.arguments[i].literal()) {
+      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
+      call.arguments[i] = literal(std::move(new_lit));
+      continue;
+    }
+
+    // construct an implicit cast Expression with which to replace this argument
+    Expression::Call implicit_cast;
+    implicit_cast.function_name = "cast";
+    implicit_cast.arguments = {std::move(call.arguments[i])};
+
+    // TODO(wesm): Use TypeHolder in options
+    implicit_cast.options = std::make_shared<compute::CastOptions>(
+        compute::CastOptions::Safe(types[i].GetSharedPtr()));
+
+    ARROW_ASSIGN_OR_RAISE(
+        call.arguments[i],
+        BindNonRecursive(std::move(implicit_cast),
+                         /*insert_implicit_casts=*/false, exec_context));
+  }
+
+  RETURN_NOT_OK(FinishBind());
+  return Expression(std::move(call));
+}
+
 template <typename TypeOrSchema>
 Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
                             compute::ExecContext* exec_context) {
@@ -622,12 +726,18 @@ Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
     return Expression{std::move(param)};
   }
 
-  auto call = *CallNotNull(expr);
+  if (const Call* call = expr.call()) {
+    for (auto& argument : call.arguments) {
+      ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
+    }
+    return BindNonRecursive(std::move(call),
+                            /*insert_implicit_casts=*/true, exec_context);
+  }
+
+  auto special = *SpecialNotNull(expr);
   for (auto& argument : call.arguments) {
     ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
   }
-  return BindNonRecursive(std::move(call),
-                          /*insert_implicit_casts=*/true, exec_context);
 }
 
 }  // namespace
