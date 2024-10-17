@@ -19,6 +19,33 @@
 
 #include <gtest/gtest.h>
 
+#include "arrow/compute/exec.h"
+#include "arrow/compute/expression.h"
 #include "arrow/testing/gtest_util.h"
 
-namespace arrow::compute {}  // namespace arrow::compute
+namespace arrow::compute {
+
+TEST(SpecialForm, IfElseSpecialForm) {
+  {
+    ARROW_SCOPED_TRACE("if (b != 0) then a / b else b");
+    auto cond = call("not_equal", {field_ref("b"), literal(0)});
+    auto if_true = call("divide", {field_ref("a"), field_ref("b")});
+    auto if_false = field_ref("b");
+    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+    auto rb = RecordBatchFromJSON(schema, R"([
+        [1, 1],
+        [2, 1],
+        [3, 0],
+        [4, 1],
+        [5, 1]
+      ])");
+    auto input = ExecBatch(*rb);
+    auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+    auto special = if_else_special(cond, if_true, if_false);
+    ASSERT_OK_AND_ASSIGN(auto special_bound, special.Bind(*schema));
+    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(special_bound, input));
+    AssertDatumsEqual(*expected, result);
+  }
+}
+
+}  // namespace arrow::compute

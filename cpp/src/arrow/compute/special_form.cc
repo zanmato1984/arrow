@@ -25,10 +25,6 @@
 
 namespace arrow::compute {
 
-Result<Datum> Permute(const Datum& values, const Datum& indices, int64_t output_length) {
-  return Datum();
-}
-
 Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments,
                                               ExecContext* exec_context) const {
   ARROW_ASSIGN_OR_RAISE(auto function,
@@ -112,9 +108,18 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
   ARROW_ASSIGN_OR_RAISE(
       auto if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
 
-  auto result = ChunkedArrayFromDatums({if_true, if_false});
+  auto if_true_false = ChunkedArrayFromDatums({if_true, if_false});
   auto sel = ChunkedArrayFromDatums({sel_true, sel_false});
-  return Permute(result, sel, input.length);
+  ARROW_ASSIGN_OR_RAISE(
+      auto result_datum,
+      Permute(if_true_false, sel, PermuteOptions{/*output_length=*/input.length}));
+  DCHECK(result_datum.is_arraylike());
+  if (result_datum.is_chunked_array() &&
+      result_datum.chunked_array()->num_chunks() == 1) {
+    return result_datum.chunked_array()->chunk(0);
+  } else {
+    return result_datum;
+  }
 }
 
 }  // namespace arrow::compute
