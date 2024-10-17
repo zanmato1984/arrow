@@ -40,11 +40,35 @@ TEST(SpecialForm, IfElseSpecialForm) {
         [5, 1]
       ])");
     auto input = ExecBatch(*rb);
-    auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
-    auto special = if_else_special(cond, if_true, if_false);
-    ASSERT_OK_AND_ASSIGN(auto special_bound, special.Bind(*schema));
-    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(special_bound, input));
-    AssertDatumsEqual(*expected, result);
+    auto if_else_sp = if_else_special(cond, if_true, if_false);
+    {
+      auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+      ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+      AssertDatumsEqual(*expected, result);
+    }
+    {
+      ARROW_SCOPED_TRACE("(if (b != 0) then a / b else b) + 1");
+      auto plus_one = call("add", {if_else_sp, literal(1)});
+      {
+        auto expected = ArrayFromJSON(int32(), "[2, 3, 1, 5, 6]");
+        ASSERT_OK_AND_ASSIGN(auto bound, plus_one.Bind(*schema));
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+        AssertDatumsEqual(*expected, result);
+      }
+      {
+        ARROW_SCOPED_TRACE(
+            "if ((if (b != 0) then a / b else b) + 1 != 1) then a / b else b");
+        auto cond = call("not_equal", {plus_one, literal(1)});
+        auto if_true = call("divide", {field_ref("a"), field_ref("b")});
+        auto if_false = field_ref("b");
+        auto if_else_sp = if_else_special(cond, if_true, if_false);
+        auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+        ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+        AssertDatumsEqual(*expected, result);
+      }
+    }
   }
 }
 
