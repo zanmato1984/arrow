@@ -141,11 +141,25 @@ const DataType* Expression::type() const {
     return parameter->type.type;
   }
 
-  if (const Call* call = this->call()) {
-    return call->type.type;
+  if (const Special* special = this->special()) {
+    return special->type.type;
   }
 
-  return SpecialNotNull(*this)->type.type;
+  return CallNotNull(*this)->type.type;
+}
+
+bool Expression::selection_vector_aware() const {
+  DCHECK(IsBound());
+
+  if (literal() || field_ref()) {
+    return true;
+  }
+
+  if (auto special = this->special()) {
+    return special->selection_vector_aware;
+  }
+
+  return CallNotNull(*this)->selection_vector_aware;
 }
 
 namespace {
@@ -191,6 +205,10 @@ std::string Expression::ToString() const {
       return path->ToString();
     }
     return ref->ToString();
+  }
+
+  if (auto sp = special()) {
+    return sp->special_form->name + "(special)";
   }
 
   auto call = CallNotNull(*this);
@@ -261,6 +279,10 @@ bool Expression::Equals(const Expression& other) const {
     return ref->Equals(*other.field_ref());
   }
 
+  if (auto special = this->special()) {
+    return true;
+  }
+
   auto call = CallNotNull(*this);
   auto other_call = CallNotNull(other);
 
@@ -296,11 +318,11 @@ size_t Expression::hash() const {
     return ref->hash();
   }
 
-  if (auto c = call()) {
-    return c->hash;
+  if (auto special = this->special()) {
+    return special->hash;
   }
 
-  return SpecialNotNull(*this)->hash;
+  return CallNotNull(*this)->hash;
 }
 
 bool Expression::IsBound() const {
@@ -323,6 +345,8 @@ bool Expression::IsScalarExpression() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -383,6 +407,8 @@ bool Expression::IsSatisfiable() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -581,6 +607,11 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
       kernel_context.SetState(call.kernel_state.get());
     }
 
+    call.selection_vector_aware =
+        call.kernel->selection_vector_aware &&
+        std::all_of(call.arguments.begin(), call.arguments.end(),
+                    [](const Expression& arg) { return arg.selection_vector_aware(); });
+
     ARROW_ASSIGN_OR_RAISE(
         call.type, call.kernel->signature->out_type().Resolve(&kernel_context, types));
     return Status::OK();
@@ -641,6 +672,9 @@ Result<Expression> BindNonRecursive(Expression::Special special,
 
   ARROW_ASSIGN_OR_RAISE(special.type,
                         special.special_form->Resolve(&special.arguments, exec_context));
+  // Selection vector awareness-es of the subexpressions is fully taken over by the
+  // special form so not recursive.
+  special.selection_vector_aware = special.special_form->selection_vector_aware;
   return Expression(std::move(special));
 }
 
@@ -665,19 +699,19 @@ Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
     return Expression{std::move(param)};
   }
 
-  if (expr.call()) {
-    auto call = *expr.call();
-    for (auto& argument : call.arguments) {
+  if (expr.special()) {
+    auto special = *expr.special();
+    for (auto& argument : special.arguments) {
       ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
     }
-    return BindNonRecursive(call, /*insert_implicit_casts=*/true, exec_context);
+    return BindNonRecursive(special, /*insert_implicit_casts=*/true, exec_context);
   }
 
-  auto special = *SpecialNotNull(expr);
-  for (auto& argument : special.arguments) {
+  auto call = *CallNotNull(expr);
+  for (auto& argument : call.arguments) {
     ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
   }
-  return BindNonRecursive(special, /*insert_implicit_casts=*/true, exec_context);
+  return BindNonRecursive(call, /*insert_implicit_casts=*/true, exec_context);
 }
 
 }  // namespace
@@ -783,6 +817,8 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
         "ExecuteScalarExpression cannot Execute non-scalar expression ", expr.ToString());
   }
 
+  DCHECK(!input.selection_vector || expr.selection_vector_aware());
+
   if (auto lit = expr.literal()) return *lit;
 
   if (auto param = expr.parameter()) {
@@ -870,18 +906,34 @@ std::vector<FieldRef> FieldsInExpression(const Expression& expr) {
     return {*ref};
   }
 
-  std::vector<FieldRef> fields;
-  for (const Expression& arg : CallNotNull(expr)->arguments) {
-    auto argument_fields = FieldsInExpression(arg);
-    std::move(argument_fields.begin(), argument_fields.end(), std::back_inserter(fields));
+  const auto& fields = [](const auto& expr) {
+    std::vector<FieldRef> fields;
+    for (const Expression& arg : expr->arguments) {
+      auto argument_fields = FieldsInExpression(arg);
+      std::move(argument_fields.begin(), argument_fields.end(),
+                std::back_inserter(fields));
+    }
+    return fields;
+  };
+
+  if (auto sp = expr.special()) {
+    return fields(sp);
   }
-  return fields;
+
+  return fields(CallNotNull(expr));
 }
 
 bool ExpressionHasFieldRefs(const Expression& expr) {
   if (expr.literal()) return false;
 
   if (expr.field_ref()) return true;
+
+  if (auto sp = expr.special()) {
+    for (const Expression& arg : sp->arguments) {
+      if (ExpressionHasFieldRefs(arg)) return true;
+    }
+    return false;
+  }
 
   for (const Expression& arg : CallNotNull(expr)->arguments) {
     if (ExpressionHasFieldRefs(arg)) return true;
