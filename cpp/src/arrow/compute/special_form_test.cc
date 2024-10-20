@@ -70,6 +70,26 @@ TEST(SpecialForm, IfElseSpecialForm) {
       }
     }
   }
+  {
+    ARROW_SCOPED_TRACE("if (b != 0) then a else a");
+    auto cond = call("not_equal", {field_ref("b"), literal(0)});
+    auto if_true = field_ref("a");
+    auto if_false = field_ref("a");
+    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+    auto rb = RecordBatchFromJSON(schema, R"([
+        [1, 1],
+        [2, 1],
+        [3, 0],
+        [4, 1],
+        [5, 1]
+      ])");
+    auto input = ExecBatch(*rb);
+    auto if_else_sp = if_else_special(cond, if_true, if_false);
+    auto expected = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5]");
+    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+    AssertDatumsEqual(*expected, result);
+  }
 }
 
 }  // namespace arrow::compute

@@ -33,7 +33,7 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
 
   // TODO: DispatchBest and implicit cast.
   ARROW_ASSIGN_OR_RAISE(auto maybe_exact_match, function->DispatchExact(types));
-  compute::KernelContext kernel_context(exec_context, maybe_exact_match);
+  KernelContext kernel_context(exec_context, maybe_exact_match);
   if (maybe_exact_match->init) {
     const FunctionOptions* options = function->default_options();
     ARROW_ASSIGN_OR_RAISE(
@@ -74,12 +74,31 @@ std::shared_ptr<ChunkedArray> ChunkedArrayFromDatums(const std::vector<Datum>& d
   return std::make_shared<ChunkedArray>(std::move(chunks));
 }
 
+bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& arguments,
+                                         const ExecBatch& input,
+                                         ExecContext* exec_context) {
+  for (const auto& expr : arguments) {
+    if (!expr.selection_vector_aware()) {
+      return false;
+    }
+  }
+  for (const auto& value : input.values) {
+    if (value.is_scalar()) {
+      continue;
+    }
+    if (value.is_array() && input.length <= exec_context->exec_chunksize()) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& arguments,
                                          const ExecBatch& input,
-                                         compute::ExecContext* exec_context) const {
-  // TODO: Selection vector aware path.
+                                         ExecContext* exec_context) const {
   DCHECK_EQ(input.selection_vector, nullptr);
   DCHECK_EQ(arguments.size(), 3);
 
@@ -93,16 +112,36 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
                         ExecuteScalarExpression(cond_expr, input, exec_context));
   DCHECK_EQ(cond.type()->id(), Type::BOOL);
 
+  if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
+                                          exec_context)) {
+    DCHECK(cond.is_array());
+    ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(cond.array()));
+    ARROW_ASSIGN_OR_RAISE(auto cond_inverted,
+                          CallFunction("invert", {cond}, exec_context));
+    DCHECK(cond_inverted.is_array());
+    ARROW_ASSIGN_OR_RAISE(auto sel_false,
+                          SelectionVector::FromMask(cond_inverted.array()));
+    ExecBatch input_true = input;
+    input_true.selection_vector = std::make_shared<SelectionVector>(sel_true.array());
+    ExecBatch input_false = input;
+    input_false.selection_vector = std::make_shared<SelectionVector>(sel_false.array());
+    ARROW_ASSIGN_OR_RAISE(
+        auto if_true, ExecuteScalarExpression(if_true_expr, input_true, exec_context));
+    ARROW_ASSIGN_OR_RAISE(
+        auto if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+    return CallFunction("if_else", {cond, if_true, if_false}, exec_context);
+  }
+
   ARROW_ASSIGN_OR_RAISE(auto sel_true,
                         CallFunction("indices_nonzero", {cond}, exec_context));
+  ARROW_ASSIGN_OR_RAISE(auto cond_inverted, CallFunction("invert", {cond}, exec_context));
+  ARROW_ASSIGN_OR_RAISE(auto sel_false,
+                        CallFunction("indices_nonzero", {cond_inverted}, exec_context));
+
   ARROW_ASSIGN_OR_RAISE(auto input_true,
                         TakeBySelectionVector(input, sel_true, exec_context));
   ARROW_ASSIGN_OR_RAISE(auto if_true,
                         ExecuteScalarExpression(if_true_expr, input_true, exec_context));
-
-  ARROW_ASSIGN_OR_RAISE(auto cond_inverted, CallFunction("invert", {cond}, exec_context));
-  ARROW_ASSIGN_OR_RAISE(auto sel_false,
-                        CallFunction("indices_nonzero", {cond_inverted}, exec_context));
   ARROW_ASSIGN_OR_RAISE(auto input_false,
                         TakeBySelectionVector(input, sel_false, exec_context));
   ARROW_ASSIGN_OR_RAISE(
