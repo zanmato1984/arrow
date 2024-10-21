@@ -115,16 +115,16 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
   if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
                                           exec_context)) {
     DCHECK(cond.is_array());
-    ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(cond.array()));
+    auto boolean_cond = cond.array_as<BooleanArray>();
+    ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(*boolean_cond));
     ARROW_ASSIGN_OR_RAISE(auto cond_inverted,
                           CallFunction("invert", {cond}, exec_context));
     DCHECK(cond_inverted.is_array());
-    ARROW_ASSIGN_OR_RAISE(auto sel_false,
-                          SelectionVector::FromMask(cond_inverted.array()));
+    ARROW_ASSIGN_OR_RAISE(auto sel_false, SelectionVector::FromMask(*boolean_cond));
     ExecBatch input_true = input;
-    input_true.selection_vector = std::make_shared<SelectionVector>(sel_true.array());
+    input_true.selection_vector = sel_true;
     ExecBatch input_false = input;
-    input_false.selection_vector = std::make_shared<SelectionVector>(sel_false.array());
+    input_false.selection_vector = sel_false;
     ARROW_ASSIGN_OR_RAISE(
         auto if_true, ExecuteScalarExpression(if_true_expr, input_true, exec_context));
     ARROW_ASSIGN_OR_RAISE(
