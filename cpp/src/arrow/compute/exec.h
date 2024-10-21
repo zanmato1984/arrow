@@ -141,7 +141,8 @@ class ARROW_EXPORT SelectionVector {
   explicit SelectionVector(const Array& arr);
 
   /// \brief Create SelectionVector from boolean mask
-  static Result<std::shared_ptr<SelectionVector>> FromMask(const BooleanArray& arr);
+  static Result<std::shared_ptr<SelectionVector>> FromMask(
+      const BooleanArray& arr, MemoryPool* pool = default_memory_pool());
 
   const int32_t* indices() const { return indices_; }
   int32_t length() const;

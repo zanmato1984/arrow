@@ -27,6 +27,7 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
+#include "arrow/array/builder_primitive.h"
 #include "arrow/array/data.h"
 #include "arrow/array/util.h"
 #include "arrow/buffer.h"
@@ -50,6 +51,7 @@
 #include "arrow/util/logging.h"
 #include "arrow/util/thread_pool.h"
 #include "arrow/util/vector.h"
+#include "arrow/visit_data_inline.h"
 
 namespace arrow {
 
@@ -1355,8 +1357,27 @@ SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data())
 int32_t SelectionVector::length() const { return static_cast<int32_t>(data_->length); }
 
 Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(
-    const BooleanArray& arr) {
-  return Status::NotImplemented("FromMask");
+    const BooleanArray& arr, MemoryPool* pool) {
+  auto length = arr.null_count();
+  Int32Builder builder(pool);
+  RETURN_NOT_OK(builder.Reserve(length));
+  ArraySpan span(*arr.data());
+  int32_t i = 0;
+  RETURN_NOT_OK(VisitArraySpanInline<Int32Type>(
+      span,
+      [&](bool mask) -> Status {
+        if (mask) {
+          RETURN_NOT_OK(builder.Append(i));
+        }
+        ++i;
+        return Status::OK();
+      },
+      [&]() {
+        ++i;
+        return Status::OK();
+      }));
+  ARROW_ASSIGN_OR_RAISE(auto indices, builder.Finish());
+  return std::make_shared<SelectionVector>(indices->data());
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
