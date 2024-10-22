@@ -19,7 +19,7 @@
 
 namespace arrow::compute {
 
-class SpecialForm {
+class ARROW_EXPORT SpecialForm {
  public:
   explicit SpecialForm(std::string name, bool selection_vector_aware = false)
       : name(std::move(name)), selection_vector_aware(selection_vector_aware) {}
@@ -35,6 +35,11 @@ class SpecialForm {
  public:
   const std::string name;
   const bool selection_vector_aware = false;
+};
+
+class ARROW_EXPORT SpecialFormState {
+ public:
+  virtual ~SpecialFormState() = default;
 };
 
 class IfElseSpecialForm : public SpecialForm {

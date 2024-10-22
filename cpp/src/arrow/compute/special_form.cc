@@ -112,40 +112,76 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
                         ExecuteScalarExpression(cond_expr, input, exec_context));
   DCHECK_EQ(cond.type()->id(), Type::BOOL);
 
+  if (cond.is_scalar()) {
+    auto cond_scalar = cond.scalar_as<BooleanScalar>();
+    if (!cond_scalar.is_valid) {
+      // Always eagerly return minimal "shape" whenever possible because special form has
+      // all the power to shortcut the computation. This means we don't really respect the
+      // shape of the input (scalar/array/chunked array) as what normal expression
+      // evaluation does.
+      return MakeNullScalar(if_true_expr.type()->GetSharedPtr());
+    } else if (cond_scalar.value) {
+      return ExecuteScalarExpression(if_true_expr, input, exec_context);
+    } else {
+      return ExecuteScalarExpression(if_false_expr, input, exec_context);
+    }
+  }
+
+  Datum if_true = MakeNullScalar(if_true_expr.type()->GetSharedPtr());
+  Datum if_false = MakeNullScalar(if_false_expr.type()->GetSharedPtr());
+
   if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
                                           exec_context)) {
     DCHECK(cond.is_array());
     auto boolean_cond = cond.array_as<BooleanArray>();
+
     ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(*boolean_cond));
+    if (sel_true->length() > 0) {
+      ExecBatch input_true = input;
+      input_true.selection_vector = sel_true;
+      ARROW_ASSIGN_OR_RAISE(
+          if_true, ExecuteScalarExpression(if_true_expr, input_true, exec_context));
+      if (sel_true->length() == input.length) {
+        return if_true;
+      }
+    }
+
     ARROW_ASSIGN_OR_RAISE(auto cond_inverted,
                           CallFunction("invert", {cond}, exec_context));
     DCHECK(cond_inverted.is_array());
     ARROW_ASSIGN_OR_RAISE(auto sel_false, SelectionVector::FromMask(*boolean_cond));
-    ExecBatch input_true = input;
-    input_true.selection_vector = sel_true;
     ExecBatch input_false = input;
     input_false.selection_vector = sel_false;
     ARROW_ASSIGN_OR_RAISE(
-        auto if_true, ExecuteScalarExpression(if_true_expr, input_true, exec_context));
-    ARROW_ASSIGN_OR_RAISE(
-        auto if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+        if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+    if (sel_false->length() == input.length) {
+      return if_false;
+    }
     return CallFunction("if_else", {cond, if_true, if_false}, exec_context);
   }
 
   ARROW_ASSIGN_OR_RAISE(auto sel_true,
                         CallFunction("indices_nonzero", {cond}, exec_context));
+  if (sel_true.length() > 0) {
+    ARROW_ASSIGN_OR_RAISE(auto input_true,
+                          TakeBySelectionVector(input, sel_true, exec_context));
+    ARROW_ASSIGN_OR_RAISE(
+        if_true, ExecuteScalarExpression(if_true_expr, input_true, exec_context));
+    if (sel_true.length() == input.length) {
+      return if_true;
+    }
+  }
+
   ARROW_ASSIGN_OR_RAISE(auto cond_inverted, CallFunction("invert", {cond}, exec_context));
   ARROW_ASSIGN_OR_RAISE(auto sel_false,
                         CallFunction("indices_nonzero", {cond_inverted}, exec_context));
-
-  ARROW_ASSIGN_OR_RAISE(auto input_true,
-                        TakeBySelectionVector(input, sel_true, exec_context));
-  ARROW_ASSIGN_OR_RAISE(auto if_true,
-                        ExecuteScalarExpression(if_true_expr, input_true, exec_context));
   ARROW_ASSIGN_OR_RAISE(auto input_false,
                         TakeBySelectionVector(input, sel_false, exec_context));
   ARROW_ASSIGN_OR_RAISE(
-      auto if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+      if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+  if (sel_false.length() == input.length) {
+    return if_false;
+  }
 
   auto if_true_false = ChunkedArrayFromDatums({if_true, if_false});
   auto sel = ChunkedArrayFromDatums({sel_true, sel_false});
