@@ -117,6 +117,7 @@ void AssertIfElseEqualWithExpr(Expression cond, Expression if_true, Expression i
 
 }  // namespace
 
+// TODO: A function to break the selection vector awareness of the expressions.
 TEST(IfElseSpecialForm, Shortcuts) {
   {
     ARROW_SCOPED_TRACE("if (null) then 1 else 0");
