@@ -21,9 +21,69 @@
 
 #include "arrow/compute/exec.h"
 #include "arrow/compute/expression.h"
+#include "arrow/compute/function.h"
+#include "arrow/compute/kernels/codegen_internal.h"
+#include "arrow/compute/registry.h"
 #include "arrow/testing/gtest_util.h"
+#include "arrow/util/logging.h"
 
 namespace arrow::compute {
+
+namespace {
+
+template <bool selection_vector_aware>
+Status TestKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+  DCHECK_EQ(span.num_values(), 1);
+  if constexpr (!selection_vector_aware) {
+    if (span.selection_vector != nullptr) {
+      return Status::Invalid("There is a selection vector");
+    }
+  }
+  const auto& arg = span[0];
+  DCHECK(arg.is_array());
+  *out->array_data_mutable() = *arg.array.ToArrayData();
+  return Status::OK();
+}
+
+static Status RegisterTestFunctions() {
+  auto registry = GetFunctionRegistry();
+
+  auto register_test_func = [&](const std::string& name,
+                                bool selection_vector_aware) -> Status {
+    auto panic_on_selection =
+        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+    ArrayKernelExec exec;
+    if (selection_vector_aware) {
+      exec = TestKernelExec<true>;
+    } else {
+      exec = TestKernelExec<false>;
+    }
+    ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+    kernel.selection_vector_aware = selection_vector_aware;
+    kernel.can_write_into_slices = false;
+    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    RETURN_NOT_OK(panic_on_selection->AddKernel(kernel));
+    RETURN_NOT_OK(registry->AddFunction(std::move(panic_on_selection)));
+    return Status::OK();
+  };
+
+  RETURN_NOT_OK(register_test_func("panic_on_selection", false));
+  RETURN_NOT_OK(register_test_func("calm_on_selection", true));
+
+  return Status::OK();
+}
+
+Expression panic_on_selection(Expression arg) {
+  return call("panic_on_selection", {std::move(arg)});
+}
+
+Expression calm_on_selection(Expression arg) {
+  return call("calm_on_selection", {std::move(arg)});
+}
+
+}  // namespace
 
 TEST(IfElseSpecialForm, Basic) {
   {
@@ -97,28 +157,35 @@ namespace {
 void AssertIfElseEqual(const Datum& expected, Expression cond, Expression if_true,
                        Expression if_false, const std::shared_ptr<Schema>& schema,
                        const ExecBatch& input) {
-  auto if_else_sp = if_else_special(cond, if_true, if_false);
-  ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-  ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
-  AssertDatumsEqual(expected, result);
+  // Test using original/panic_on_selection(original)/calm_on_selection(original).
+  for (auto if_else_sp : {if_else_special(cond, if_true, if_false),
+                          panic_on_selection(if_else_special(
+                              panic_on_selection(cond), panic_on_selection(if_true),
+                              panic_on_selection(if_false))),
+                          calm_on_selection(if_else_special(
+                              calm_on_selection(cond), calm_on_selection(if_true),
+                              calm_on_selection(if_false)))}) {
+    ARROW_SCOPED_TRACE(if_else_sp.ToString());
+    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+    AssertDatumsEqual(expected, result);
+  }
 }
 
 void AssertIfElseEqualWithExpr(Expression cond, Expression if_true, Expression if_false,
                                const std::shared_ptr<Schema>& schema,
                                const ExecBatch& input) {
   auto if_else = call("if_else", {cond, if_true, if_false});
-  auto if_else_sp = if_else_special(cond, if_true, if_false);
   ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
   ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
-  ASSERT_OK_AND_ASSIGN(auto bound_sp, if_else_sp.Bind(*schema));
-  ASSERT_OK_AND_ASSIGN(auto result_sp, ExecuteScalarExpression(bound_sp, input));
-  AssertDatumsEqual(result, result_sp);
+  AssertIfElseEqual(result, cond, if_true, if_false, schema, input);
 }
 
 }  // namespace
 
 // TODO: A function to break the selection vector awareness of the expressions.
 TEST(IfElseSpecialForm, Shortcuts) {
+  ASSERT_OK(RegisterTestFunctions());
   {
     ARROW_SCOPED_TRACE("if (null) then 1 else 0");
     AssertIfElseEqual(MakeNullScalar(int32()), literal(MakeNullScalar(boolean())),
@@ -140,12 +207,17 @@ TEST(IfElseSpecialForm, Shortcuts) {
   {
     auto schema = arrow::schema({field("a", int32()), field("b", int32())});
     std::vector<ExecBatch> batches = {
+        ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
         ExecBatch(*RecordBatchFromJSON(schema, R"([
             [1, 0],
             [1, 0],
             [1, 0]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
+        ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [1, 0],
+            [null, 0],
+            [1, null]
+          ])")),
     };
     for (const auto& input : batches) {
       {
@@ -185,14 +257,29 @@ TEST(IfElseSpecialForm, Shortcuts) {
             [null, 1, 0]
           ])")),
         ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [null, 1, 0],
+            [null, null, 0],
+            [null, 1, null]
+          ])")),
+        ExecBatch(*RecordBatchFromJSON(schema, R"([
             [true, 1, 0],
             [true, 1, 0],
             [true, 1, 0]
           ])")),
         ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [true, 1, 0],
+            [true, null, 0],
+            [true, 1, null]
+          ])")),
+        ExecBatch(*RecordBatchFromJSON(schema, R"([
             [false, 1, 0],
             [false, 1, 0],
             [false, 1, 0]
+          ])")),
+        ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [false, 1, 0],
+            [false, null, 0],
+            [false, 1, null]
           ])")),
     };
     for (const auto& input : batches) {
@@ -206,6 +293,81 @@ TEST(IfElseSpecialForm, Shortcuts) {
         AssertIfElseEqualWithExpr(field_ref("a"), literal(1), literal(0), schema, input);
       }
     }
+  }
+}
+
+namespace {
+
+template <bool selection_vector_aware>
+Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+  DCHECK_EQ(span.num_values(), 1);
+  DCHECK_EQ(span.length, 1);
+  DCHECK(out->is_array_span());
+  DCHECK_EQ(out->length(), 1);
+  if constexpr (!selection_vector_aware) {
+    if (span.selection_vector != nullptr) {
+      return Status::Invalid("There is a selection vector");
+    }
+  }
+  int32_t* out_values = out->array_span_mutable()->GetValues<int32_t>(1);
+  *out_values = 0;
+  return Status::OK();
+}
+
+static Status RegisterConstantFunctions() {
+  auto registry = GetFunctionRegistry();
+
+  auto register_test_func = [&](const std::string& name,
+                                bool selection_vector_aware) -> Status {
+    auto zero =
+        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+    ArrayKernelExec exec;
+    if (selection_vector_aware) {
+      exec = ConstantKernelExec<true>;
+    } else {
+      exec = ConstantKernelExec<false>;
+    }
+    ScalarKernel kernel({InputType::Any()}, OutputType{int32()}, std::move(exec));
+    kernel.selection_vector_aware = selection_vector_aware;
+    kernel.can_write_into_slices = true;
+    kernel.null_handling = NullHandling::OUTPUT_NOT_NULL;
+    kernel.mem_allocation = MemAllocation::PREALLOCATE;
+    RETURN_NOT_OK(zero->AddKernel(kernel));
+    RETURN_NOT_OK(registry->AddFunction(std::move(zero)));
+    return Status::OK();
+  };
+
+  RETURN_NOT_OK(register_test_func("zero_panic", false));
+  RETURN_NOT_OK(register_test_func("zero_calm", true));
+
+  return Status::OK();
+}
+
+}  // namespace
+
+TEST(IfElseSpecialForm, Reference) {
+  ASSERT_OK(RegisterConstantFunctions());
+
+  auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+  std::vector<ExecBatch> batches = {
+      ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
+      ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [1, 0],
+            [1, 0],
+            [1, 0]
+          ])")),
+      ExecBatch(*RecordBatchFromJSON(schema, R"([
+            [1, 0],
+            [null, 0],
+            [1, null]
+          ])")),
+  };
+  for (const auto& input : batches) {
+    auto expr = call("zero_panic", {literal(42)});
+    ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schema));
+    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+    std::cout << result.ToString() << std::endl;
   }
 }
 

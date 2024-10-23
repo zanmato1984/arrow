@@ -369,6 +369,7 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   value_offsets_.clear();
   value_offsets_.resize(args_->size(), 0);
   max_chunksize_ = std::min(length_, max_chunksize);
+  selection_vector_ = batch.selection_vector.get();
   return Status::OK();
 }
 
@@ -437,12 +438,15 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
           span->values[i].scalar = nullptr;
         }
         have_chunked_arrays_ = true;
+        DCHECK_EQ(selection_vector_, nullptr);
       }
     }
 
     if (have_all_scalars_ && promote_if_all_scalars_) {
       PromoteExecSpanScalars(span);
     }
+
+    span->selection_vector = selection_vector_;
 
     initialized_ = true;
   } else if (position_ == length_) {

@@ -46,6 +46,7 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
 
 namespace {
 
+// TODO: Take scalar may not work.
 Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
                                         const Datum& selection_vector,
                                         ExecContext* exec_context) {
@@ -62,12 +63,14 @@ std::shared_ptr<ChunkedArray> ChunkedArrayFromDatums(const std::vector<Datum>& d
   std::vector<std::shared_ptr<Array>> chunks;
   for (const auto& datum : datums) {
     DCHECK(datum.is_arraylike());
-    if (datum.is_array()) {
+    if (datum.is_array() && datum.length() > 0) {
       chunks.push_back(datum.make_array());
     } else {
       DCHECK(datum.is_chunked_array());
       for (const auto& chunk : datum.chunked_array()->chunks()) {
-        chunks.push_back(chunk);
+        if (chunk->length() > 0) {
+          chunks.push_back(chunk);
+        }
       }
     }
   }
@@ -129,6 +132,7 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
 
   Datum if_true = MakeNullScalar(if_true_expr.type()->GetSharedPtr());
   Datum if_false = MakeNullScalar(if_false_expr.type()->GetSharedPtr());
+  bool all_null = true;
 
   if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
                                           exec_context)) {
@@ -144,19 +148,28 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
       if (sel_true->length() == input.length) {
         return if_true;
       }
+      all_null = false;
     }
 
     ARROW_ASSIGN_OR_RAISE(auto cond_inverted,
                           CallFunction("invert", {cond}, exec_context));
     DCHECK(cond_inverted.is_array());
     ARROW_ASSIGN_OR_RAISE(auto sel_false, SelectionVector::FromMask(*boolean_cond));
-    ExecBatch input_false = input;
-    input_false.selection_vector = sel_false;
-    ARROW_ASSIGN_OR_RAISE(
-        if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
-    if (sel_false->length() == input.length) {
-      return if_false;
+    if (sel_false->length() > 0) {
+      ExecBatch input_false = input;
+      input_false.selection_vector = sel_false;
+      ARROW_ASSIGN_OR_RAISE(
+          if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+      if (sel_false->length() == input.length) {
+        return if_false;
+      }
+      all_null = false;
     }
+
+    if (all_null) {
+      return MakeNullScalar(if_true_expr.type()->GetSharedPtr());
+    }
+
     return CallFunction("if_else", {cond, if_true, if_false}, exec_context);
   }
 
@@ -170,17 +183,21 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
     if (sel_true.length() == input.length) {
       return if_true;
     }
+    all_null = false;
   }
 
   ARROW_ASSIGN_OR_RAISE(auto cond_inverted, CallFunction("invert", {cond}, exec_context));
   ARROW_ASSIGN_OR_RAISE(auto sel_false,
                         CallFunction("indices_nonzero", {cond_inverted}, exec_context));
-  ARROW_ASSIGN_OR_RAISE(auto input_false,
-                        TakeBySelectionVector(input, sel_false, exec_context));
-  ARROW_ASSIGN_OR_RAISE(
-      if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
-  if (sel_false.length() == input.length) {
-    return if_false;
+  if (sel_false.length() > 0) {
+    ARROW_ASSIGN_OR_RAISE(auto input_false,
+                          TakeBySelectionVector(input, sel_false, exec_context));
+    ARROW_ASSIGN_OR_RAISE(
+        if_false, ExecuteScalarExpression(if_false_expr, input_false, exec_context));
+    if (sel_false.length() == input.length) {
+      return if_false;
+    }
+    all_null = false;
   }
 
   auto if_true_false = ChunkedArrayFromDatums({if_true, if_false});
