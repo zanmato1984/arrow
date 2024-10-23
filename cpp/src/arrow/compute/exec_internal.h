@@ -42,6 +42,8 @@ namespace detail {
 /// \brief Break std::vector<Datum> into a sequence of non-owning
 /// ExecSpan for kernel execution. The lifetime of the Datum vector
 /// must be longer than the lifetime of this object
+// TODO: Can this struct sense the presence of selection vector and not split ExecBatch if
+// so?
 class ARROW_EXPORT ExecSpanIterator {
  public:
   ExecSpanIterator() = default;
@@ -94,6 +96,7 @@ class ARROW_EXPORT ExecSpanIterator {
   int64_t position_ = 0;
   int64_t length_ = 0;
   int64_t max_chunksize_;
+  SelectionVector* selection_vector_ = NULLPTR;
 };
 
 // "Push" / listener API like IPC reader so that consumers can receive
