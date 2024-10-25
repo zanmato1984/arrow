@@ -29,62 +29,6 @@
 
 namespace arrow::compute {
 
-namespace {
-
-template <bool selection_vector_aware>
-Status TestKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
-  DCHECK_EQ(span.num_values(), 1);
-  if constexpr (!selection_vector_aware) {
-    if (span.selection_vector != nullptr) {
-      return Status::Invalid("There is a selection vector");
-    }
-  }
-  const auto& arg = span[0];
-  DCHECK(arg.is_array());
-  *out->array_data_mutable() = *arg.array.ToArrayData();
-  return Status::OK();
-}
-
-static Status RegisterTestFunctions() {
-  auto registry = GetFunctionRegistry();
-
-  auto register_test_func = [&](const std::string& name,
-                                bool selection_vector_aware) -> Status {
-    auto panic_on_selection =
-        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
-
-    ArrayKernelExec exec;
-    if (selection_vector_aware) {
-      exec = TestKernelExec<true>;
-    } else {
-      exec = TestKernelExec<false>;
-    }
-    ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-    kernel.selection_vector_aware = selection_vector_aware;
-    kernel.can_write_into_slices = false;
-    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-    RETURN_NOT_OK(panic_on_selection->AddKernel(kernel));
-    RETURN_NOT_OK(registry->AddFunction(std::move(panic_on_selection)));
-    return Status::OK();
-  };
-
-  RETURN_NOT_OK(register_test_func("panic_on_selection", false));
-  RETURN_NOT_OK(register_test_func("calm_on_selection", true));
-
-  return Status::OK();
-}
-
-Expression panic_on_selection(Expression arg) {
-  return call("panic_on_selection", {std::move(arg)});
-}
-
-Expression calm_on_selection(Expression arg) {
-  return call("calm_on_selection", {std::move(arg)});
-}
-
-}  // namespace
-
 TEST(IfElseSpecialForm, Basic) {
   {
     ARROW_SCOPED_TRACE("if (b != 0) then a / b else b");
@@ -154,6 +98,58 @@ TEST(IfElseSpecialForm, Basic) {
 
 namespace {
 
+template <bool selection_vector_aware>
+Status TestKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+  DCHECK_EQ(span.num_values(), 1);
+  if constexpr (!selection_vector_aware) {
+    if (span.selection_vector != nullptr) {
+      return Status::Invalid("There is a selection vector");
+    }
+  }
+  const auto& arg = span[0];
+  DCHECK(arg.is_array());
+  *out->array_data_mutable() = *arg.array.ToArrayData();
+  return Status::OK();
+}
+
+static Status RegisterTestFunctions() {
+  auto registry = GetFunctionRegistry();
+
+  auto register_test_func = [&](const std::string& name,
+                                bool selection_vector_aware) -> Status {
+    auto panic_on_selection =
+        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+    ArrayKernelExec exec;
+    if (selection_vector_aware) {
+      exec = TestKernelExec<true>;
+    } else {
+      exec = TestKernelExec<false>;
+    }
+    ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+    kernel.selection_vector_aware = selection_vector_aware;
+    kernel.can_write_into_slices = false;
+    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    RETURN_NOT_OK(panic_on_selection->AddKernel(kernel));
+    RETURN_NOT_OK(registry->AddFunction(std::move(panic_on_selection)));
+    return Status::OK();
+  };
+
+  RETURN_NOT_OK(register_test_func("panic_on_selection", false));
+  RETURN_NOT_OK(register_test_func("calm_on_selection", true));
+
+  return Status::OK();
+}
+
+Expression panic_on_selection(Expression arg) {
+  return call("panic_on_selection", {std::move(arg)});
+}
+
+Expression calm_on_selection(Expression arg) {
+  return call("calm_on_selection", {std::move(arg)});
+}
+
 void AssertIfElseResultEqual(const Datum& expected, const Datum& result) {
   if (expected.kind() == result.kind()) {
     AssertDatumsEqual(expected, result);
@@ -202,7 +198,6 @@ void AssertIfElseEqualWithExpr(Expression cond, Expression if_true, Expression i
 
 }  // namespace
 
-// TODO: A function to break the selection vector awareness of the expressions.
 TEST(IfElseSpecialForm, Shortcuts) {
   ASSERT_OK(RegisterTestFunctions());
   {
@@ -314,6 +309,8 @@ TEST(IfElseSpecialForm, Shortcuts) {
     }
   }
 }
+
+// TODO: ChunkedArray.
 
 namespace {
 
