@@ -154,6 +154,25 @@ TEST(IfElseSpecialForm, Basic) {
 
 namespace {
 
+void AssertIfElseResultEqual(const Datum& expected, const Datum& result) {
+  if (expected.kind() == result.kind()) {
+    AssertDatumsEqual(expected, result);
+    return;
+  }
+  if (expected.is_scalar()) {
+    ASSERT_OK_AND_ASSIGN(auto expected_array,
+                         MakeArrayFromScalar(*expected.scalar(), result.length()));
+    AssertDatumsEqual(expected_array, result);
+    return;
+  }
+  if (result.is_scalar()) {
+    ASSERT_OK_AND_ASSIGN(auto result_array,
+                         MakeArrayFromScalar(*result.scalar(), expected.length()));
+    AssertDatumsEqual(expected, result_array);
+    return;
+  }
+}
+
 void AssertIfElseEqual(const Datum& expected, Expression cond, Expression if_true,
                        Expression if_false, const std::shared_ptr<Schema>& schema,
                        const ExecBatch& input) {
@@ -168,7 +187,7 @@ void AssertIfElseEqual(const Datum& expected, Expression cond, Expression if_tru
     ARROW_SCOPED_TRACE(if_else_sp.ToString());
     ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
     ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
-    AssertDatumsEqual(expected, result);
+    AssertIfElseResultEqual(expected, result);
   }
 }
 
@@ -188,21 +207,21 @@ TEST(IfElseSpecialForm, Shortcuts) {
   ASSERT_OK(RegisterTestFunctions());
   {
     ARROW_SCOPED_TRACE("if (null) then 1 else 0");
-    AssertIfElseEqual(MakeNullScalar(int32()), literal(MakeNullScalar(boolean())),
-                      literal(1), literal(0), arrow::schema({field("", int32())}),
-                      ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
+    AssertIfElseEqualWithExpr(literal(MakeNullScalar(boolean())), literal(1), literal(0),
+                              arrow::schema({field("", int32())}),
+                              ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
   }
   {
     ARROW_SCOPED_TRACE("if (true) then 1 else 0");
-    AssertIfElseEqual(MakeScalar(1), literal(true), literal(1), literal(0),
-                      arrow::schema({field("", int32())}),
-                      ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
+    AssertIfElseEqualWithExpr(literal(true), literal(1), literal(0),
+                              arrow::schema({field("", int32())}),
+                              ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
   }
   {
     ARROW_SCOPED_TRACE("if (false) then 1 else 0");
-    AssertIfElseEqual(MakeScalar(0), literal(false), literal(1), literal(0),
-                      arrow::schema({field("", int32())}),
-                      ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
+    AssertIfElseEqualWithExpr(literal(false), literal(1), literal(0),
+                              arrow::schema({field("", int32())}),
+                              ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0));
   }
   {
     auto schema = arrow::schema({field("a", int32()), field("b", int32())});
@@ -222,13 +241,13 @@ TEST(IfElseSpecialForm, Shortcuts) {
     for (const auto& input : batches) {
       {
         ARROW_SCOPED_TRACE("if (null) then a else b");
-        AssertIfElseEqual(MakeNullScalar(int32()), literal(MakeNullScalar(boolean())),
-                          field_ref("a"), field_ref("b"), schema, input);
+        AssertIfElseEqualWithExpr(literal(MakeNullScalar(boolean())), field_ref("a"),
+                                  field_ref("b"), schema, input);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then 0 else b");
-        AssertIfElseEqual(MakeScalar(0), literal(true), literal(0), field_ref("b"),
-                          schema, input);
+        AssertIfElseEqualWithExpr(literal(true), literal(0), field_ref("b"), schema,
+                                  input);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then a else b");
@@ -237,8 +256,8 @@ TEST(IfElseSpecialForm, Shortcuts) {
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else 1");
-        AssertIfElseEqual(MakeScalar(1), literal(false), field_ref("a"), literal(1),
-                          schema, input);
+        AssertIfElseEqualWithExpr(literal(false), field_ref("a"), literal(1), schema,
+                                  input);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else b");
