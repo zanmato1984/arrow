@@ -46,6 +46,123 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
 
 namespace {
 
+// struct Condition {
+//   Expression expr;
+// };
+
+// struct Action {
+//   Expression expr;
+// };
+
+// struct BranchResult {
+//   int instruction;
+// };
+
+// struct Branch {
+//   Condition condition;
+//   Action action;
+//   bool masked = true;
+//   Branch* next = nullptr;
+
+//   Result<BranchResult> Execute(BranchResult last, const ExecBatch& input,
+//                                ExecContext* exec_context) const {
+//     if (masked) {
+//       auto cond = condition.Execute(last.Mask(), input, exec_context);
+//       if (cond.Complete()) {
+//         if (cond.AllNull()) {
+//           auto this_result = MakeNullScalar(action.expr.type()->GetSharedPtr());
+//           return MergeResult(last, this_result);
+//         } else {
+//           auto this_result = action.Execute(input, cond.Mask(), exec_context);
+//           return MergeResult(last, this_result);
+//         }
+//       }
+//       if (cond.AllNull()) {
+//         auto this_result = MakeNullScalar(action.expr.type()->GetSharedPtr());
+//         auto merged = MergeResult(last, this_result);
+//         return next->Execute(merged, input, exec_context);
+//       } else {
+//         auto this_result = action.Execute(input, cond.Mask(), exec_context);
+//         auto merged = MergeResult(last, this_result);
+//         return next->Execute(merged, input, exec_context);
+//       }
+//     }
+
+//     auto cond = condition.Execute(last.SelectionVector(), input, exec_context);
+//     if (cond.Complete()) {
+//       if (cond.AllNull()) {
+//         auto this_result = MakeNullScalar(action.expr.type()->GetSharedPtr());
+//         return MergeResult(last, this_result);
+//       } else {
+//         auto this_result = action.Execute(input, cond.SelectionVector(), exec_context);
+//         return MergeResult(last, this_result);
+//       }
+//     }
+//     if (cond.AllNull()) {
+//       auto this_result = MakeNullScalar(action.expr.type()->GetSharedPtr());
+//       return MergeResult(last, this_result);
+//     } else {
+//       auto this_result = action.Execute(input, cond.SelectionVector(), exec_context);
+//       return MergeResult(last, this_result);
+//     }
+//   }
+// };
+
+// struct Mask {};
+
+// struct Branch {};
+
+// struct SelVecAwareExecutor {
+//   Result<Datum> Execute(const std::vector<Branch>& branches, const ExecBatch& input,
+//                         ExecContext* exec_context) const {
+//     std::vector<Datum> results;
+//     std::vector<std::shared_ptr<SelectionVector>> sel_vecs;
+//     auto non_taken = Mask(input.selection_vector);
+//     for (const auto& branch : branches) {
+//       if (non_taken->length() == 0) {
+//         break;
+//       }
+//       auto cond = branch.Condition(non_taken, input, exec_context);
+//       auto taken = SelVecAnd(non_taken, cond, exec_context);
+//       if (taken->length() == 0) {
+//         continue;
+//       }
+//       auto branch_input = branch.TakenInput(input, taken, exec_context);
+//       ARROW_ASSIGN_OR_RAISE(auto result, branch.Action(branch_input, exec_context));
+//       results.push_back(result);
+//       sel_vecs.push_back(taken);
+//       non_taken = SelVecAnd(non_taken, SelVecNot(cond, exec_context), exec_context);
+//     }
+//     return Choose(results, sel_vecs, input.length, exec_context);
+//   }
+// };
+
+// struct Executor {
+//   Result<Datum> Execute(const std::vector<Branch>& branches, const ExecBatch& input,
+//                         ExecContext* exec_context) const {
+//     DCHECK_EQ(input.selection_vector, nullptr);
+//     std::vector<Datum> results;
+//     std::vector<std::shared_ptr<SelectionVector>> sel_vecs;
+//     for (const auto& branch : branches) {
+//       auto cond = branch.Condition(nontaken, input, exec_context);
+//       if (cond.AllNull()) {
+//       }
+//       auto taken = SelVecAnd(nontaken, cond);
+//       nontaken = SelVecAnd(nontaken, SelVecNot(cond));
+//       if (taken->length() == 0) {
+//         continue;
+//       }
+//       auto branch_input = input;
+//       branch_input.selection_vector = taken;
+//       ARROW_ASSIGN_OR_RAISE(auto result, branch.Action(branch_input, exec_context));
+//       results.push_back(result);
+//       sel_vecs.push_back(taken);
+//     }
+//     return Choose(results, sel_vecs, input.length, exec_context);
+//   }
+// }
+// };
+
 // TODO: Take scalar may not work.
 Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
                                         const Datum& selection_vector,
@@ -150,7 +267,8 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
       return ExecuteScalarExpression(if_false_expr, input, exec_context);
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(*boolean_cond));
+    ARROW_ASSIGN_OR_RAISE(auto sel_true, SelectionVector::FromMask(
+                                             *boolean_cond, exec_context->memory_pool()));
     if (sel_true->length() > 0) {
       ExecBatch input_true = input;
       input_true.selection_vector = sel_true;
@@ -162,8 +280,9 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
                           CallFunction("invert", {cond}, exec_context));
     DCHECK(cond_inverted.is_array());
     auto boolean_cond_inverted = cond_inverted.array_as<BooleanArray>();
-    ARROW_ASSIGN_OR_RAISE(auto sel_false,
-                          SelectionVector::FromMask(*boolean_cond_inverted));
+    ARROW_ASSIGN_OR_RAISE(
+        auto sel_false,
+        SelectionVector::FromMask(*boolean_cond_inverted, exec_context->memory_pool()));
     if (sel_false->length() > 0) {
       ExecBatch input_false = input;
       input_false.selection_vector = sel_false;
