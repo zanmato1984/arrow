@@ -257,35 +257,36 @@ class ARROW_EXPORT ListFlattenOptions : public FunctionOptions {
   bool recursive = false;
 };
 
-/// \brief Options for reverse_indices function
-class ARROW_EXPORT ReverseIndicesOptions : public FunctionOptions {
+/// \brief Options for inverse_permutation function
+class ARROW_EXPORT InversePermutationOptions : public FunctionOptions {
  public:
-  explicit ReverseIndicesOptions(int64_t output_length = -1,
-                                 std::shared_ptr<DataType> output_type = NULLPTR);
-  static constexpr char const kTypeName[] = "ReverseIndicesOptions";
-  static ReverseIndicesOptions Defaults() { return ReverseIndicesOptions(); }
+  explicit InversePermutationOptions(int64_t max_index = -1,
+                                     std::shared_ptr<DataType> output_type = NULLPTR);
+  static constexpr char const kTypeName[] = "InversePermutationOptions";
+  static InversePermutationOptions Defaults() { return InversePermutationOptions(); }
 
-  /// \brief The length of the output reverse indices. If negative, the output will be of
-  /// the same length as the input indices. Any indices that are greater or equal to this
-  /// length will be ignored.
-  int64_t output_length = -1;
-  /// \brief The type of the output reverse indices. If null, the output will be of the
-  /// same type as the input indices, otherwise must be integer types. An invalid error
-  /// will be reported if this type is not able to store the length of the input indices.
+  /// \brief The max value in the input indices to process. Any indices that are greater
+  /// to this length will be ignored. If negative, this value will be set to the length of
+  /// the input indices minus 1.
+  int64_t max_index = -1;
+  /// \brief The type of the output inverse permutation. If null, the output will be of
+  /// the same type as the input indices, otherwise must be integer types. An invalid
+  /// error will be reported if this type is not able to store the length of the input
+  /// indices.
   std::shared_ptr<DataType> output_type = NULLPTR;
 };
 
-/// \brief Options for permute function
-class ARROW_EXPORT PermuteOptions : public FunctionOptions {
+/// \brief Options for scatter function
+class ARROW_EXPORT ScatterOptions : public FunctionOptions {
  public:
-  explicit PermuteOptions(int64_t output_length = -1);
-  static constexpr char const kTypeName[] = "PermuteOptions";
-  static PermuteOptions Defaults() { return PermuteOptions(); }
+  explicit ScatterOptions(int64_t max_index = -1);
+  static constexpr char const kTypeName[] = "ScatterOptions";
+  static ScatterOptions Defaults() { return ScatterOptions(); }
 
-  /// \brief The length of the output permutation. If negative, the output will be of the
-  /// same length as the input values (and indices). Any values with indices that are
-  /// greater or equal to this length will be ignored.
-  int64_t output_length = -1;
+  /// \brief The max value in the input indices to process. Any values with indices that
+  /// are greater to this length will be ignored. If negative, this value will be set to
+  /// the length of the input minus 1.
+  int64_t max_index = -1;
 };
 
 /// @}
@@ -736,55 +737,51 @@ Result<std::shared_ptr<Array>> PairwiseDiff(const Array& array,
                                             bool check_overflow = false,
                                             ExecContext* ctx = NULLPTR);
 
-/// \brief Return the reverse indices of the given indices.
+/// \brief Return the inverse permutation of the given indices.
 ///
-/// For indices[i] = x, reverse_indices[x] = i. And reverse_indices[x] = null if x does
-/// not appear in the input indices. For indices[i] = x where x < 0 or x >= output_length,
+/// For indices[i] = x, inverse_permutation[x] = i. And inverse_permutation[x] = null if x
+/// does not appear in the input indices. For indices[i] = x where x < 0 or x > max_index,
 /// it is ignored. If multiple indices point to the same value, the last one is used.
 ///
-/// For example, with indices = [null, 0, 3, 2, 4, 1, 1], the reverse indices is
-///   [1, 6, 3]                    if output_length = 3,
-///   [1, 6, 3, 2, 4, null, null]  if output_length = 7.
-/// output_length can also be negative, in which case the reverse indices is of the same
-/// length as the indices.
+/// For example, with indices = [null, 0, 3, 2, 4, 1, 1], the inverse permutation is
+///   [1, 6, 3]                    if max_index = 2,
+///   [1, 6, 3, 2, 4, null, null]  if max_index = 6.
 ///
 /// \param[in] indices array-like indices
-/// \param[in] options configures the output length and the output type
+/// \param[in] options configures the max index and the output type
 /// \param[in] ctx the function execution context, optional
-/// \return the resulting reverse indices
+/// \return the resulting inverse permutation
 ///
 /// \since 19.0.0
 /// \note API not yet finalized
 ARROW_EXPORT
-Result<Datum> ReverseIndices(
+Result<Datum> InversePermutation(
     const Datum& indices,
-    const ReverseIndicesOptions& options = ReverseIndicesOptions::Defaults(),
+    const InversePermutationOptions& options = InversePermutationOptions::Defaults(),
     ExecContext* ctx = NULLPTR);
 
-/// \brief Permute the values into specified positions according to the indices.
+/// \brief Scatter the values into specified positions according to the indices.
 ///
 /// For indices[i] = x, output[x] = values[i]. And output[x] = null if x does not appear
-/// in the input indices. For indices[i] = x where x < 0 or x >= output_length, values[i]
+/// in the input indices. For indices[i] = x where x < 0 or x > max_index, values[i]
 /// is ignored. If multiple indices point to the same value, the last one is used.
 ///
 /// For example, with values = [a, b, c, d, e, f, g] and indices = [null, 0,
-/// 3, 2, 4, 1, 1], the permutation is
-///   [b, g, d]                    if output_length = 3,
-///   [b, g, d, c, e, null, null]  if output_length = 7.
-/// output_length can also be negative, in which case the permutation is of the same
-/// length as the values (and indices).
+/// 3, 2, 4, 1, 1], the output is
+///   [b, g, d]                    if max_index = 2,
+///   [b, g, d, c, e, null, null]  if max_index = 6.
 ///
-/// \param[in] values datum to permute
+/// \param[in] values datum to scatter
 /// \param[in] indices array-like indices
-/// \param[in] options configures the output length of the permutation
+/// \param[in] options configures the max index of to scatter
 /// \param[in] ctx the function execution context, optional
-/// \return the resulting permutation
+/// \return the resulting datum
 ///
 /// \since 19.0.0
 /// \note API not yet finalized
 ARROW_EXPORT
-Result<Datum> Permute(const Datum& values, const Datum& indices,
-                      const PermuteOptions& options = PermuteOptions::Defaults(),
+Result<Datum> Scatter(const Datum& values, const Datum& indices,
+                      const ScatterOptions& options = ScatterOptions::Defaults(),
                       ExecContext* ctx = NULLPTR);
 
 }  // namespace compute

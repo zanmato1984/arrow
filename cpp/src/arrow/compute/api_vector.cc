@@ -155,11 +155,12 @@ static auto kPairwiseOptionsType = GetFunctionOptionsType<PairwiseOptions>(
     DataMember("periods", &PairwiseOptions::periods));
 static auto kListFlattenOptionsType = GetFunctionOptionsType<ListFlattenOptions>(
     DataMember("recursive", &ListFlattenOptions::recursive));
-static auto kReverseIndicesOptionsType = GetFunctionOptionsType<ReverseIndicesOptions>(
-    DataMember("output_length", &ReverseIndicesOptions::output_length),
-    DataMember("output_type", &ReverseIndicesOptions::output_type));
-static auto kPermuteOptionsType = GetFunctionOptionsType<PermuteOptions>(
-    DataMember("output_length", &PermuteOptions::output_length));
+static auto kInversePermutationOptionsType =
+    GetFunctionOptionsType<InversePermutationOptions>(
+        DataMember("max_index", &InversePermutationOptions::max_index),
+        DataMember("output_type", &InversePermutationOptions::output_type));
+static auto kScatterOptionsType = GetFunctionOptionsType<ScatterOptions>(
+    DataMember("max_index", &ScatterOptions::max_index));
 }  // namespace
 }  // namespace internal
 
@@ -235,16 +236,16 @@ ListFlattenOptions::ListFlattenOptions(bool recursive)
     : FunctionOptions(internal::kListFlattenOptionsType), recursive(recursive) {}
 constexpr char ListFlattenOptions::kTypeName[];
 
-ReverseIndicesOptions::ReverseIndicesOptions(int64_t output_length,
-                                             std::shared_ptr<DataType> output_type)
-    : FunctionOptions(internal::kReverseIndicesOptionsType),
-      output_length(output_length),
+InversePermutationOptions::InversePermutationOptions(
+    int64_t max_index, std::shared_ptr<DataType> output_type)
+    : FunctionOptions(internal::kInversePermutationOptionsType),
+      max_index(max_index),
       output_type(std::move(output_type)) {}
-constexpr char ReverseIndicesOptions::kTypeName[];
+constexpr char InversePermutationOptions::kTypeName[];
 
-PermuteOptions::PermuteOptions(int64_t output_length)
-    : FunctionOptions(internal::kPermuteOptionsType), output_length(output_length) {}
-constexpr char PermuteOptions::kTypeName[];
+ScatterOptions::ScatterOptions(int64_t max_index)
+    : FunctionOptions(internal::kScatterOptionsType), max_index(max_index) {}
+constexpr char ScatterOptions::kTypeName[];
 
 namespace internal {
 void RegisterVectorOptions(FunctionRegistry* registry) {
@@ -260,8 +261,8 @@ void RegisterVectorOptions(FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunctionOptionsType(kRankOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kPairwiseOptionsType));
   DCHECK_OK(registry->AddFunctionOptionsType(kListFlattenOptionsType));
-  DCHECK_OK(registry->AddFunctionOptionsType(kReverseIndicesOptionsType));
-  DCHECK_OK(registry->AddFunctionOptionsType(kPermuteOptionsType));
+  DCHECK_OK(registry->AddFunctionOptionsType(kInversePermutationOptionsType));
+  DCHECK_OK(registry->AddFunctionOptionsType(kScatterOptionsType));
 }
 }  // namespace internal
 
@@ -448,16 +449,17 @@ Result<Datum> CumulativeMean(const Datum& values, const CumulativeOptions& optio
 }
 
 // ----------------------------------------------------------------------
-// Placement functions
+// Swizzle functions
 
-Result<Datum> ReverseIndices(const Datum& indices, const ReverseIndicesOptions& options,
-                             ExecContext* ctx) {
-  return CallFunction("reverse_indices", {indices}, &options, ctx);
+Result<Datum> InversePermutation(const Datum& indices,
+                                 const InversePermutationOptions& options,
+                                 ExecContext* ctx) {
+  return CallFunction("inverse_permutation", {indices}, &options, ctx);
 }
 
-Result<Datum> Permute(const Datum& values, const Datum& indices,
-                      const PermuteOptions& options, ExecContext* ctx) {
-  return CallFunction("permute", {values, indices}, &options, ctx);
+Result<Datum> Scatter(const Datum& values, const Datum& indices,
+                      const ScatterOptions& options, ExecContext* ctx) {
+  return CallFunction("scatter", {values, indices}, &options, ctx);
 }
 
 }  // namespace compute
