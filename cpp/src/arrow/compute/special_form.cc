@@ -108,60 +108,52 @@ namespace {
 //   }
 // };
 
-// struct Mask {};
+struct Mask {
+  virtual std::shared_ptr<Mask> Not() const = 0;
+  virtual std::shared_ptr<Mask> And(const std::shared_ptr<Mask>& other) const = 0;
+  virtual Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
+                              ExecContext* exec_context) const = 0;
+};
 
-// struct Branch {};
+struct AllTrueMask : public Mask {
+  std::shared_ptr<Mask> Not() const override { return std::make_unique<AllFalseMask>(); }
+  std::shared_ptr<Mask> And(const std::shared_ptr<Mask>& other) const override {
+    return other;
+  }
+};
 
-// struct SelVecAwareExecutor {
-//   Result<Datum> Execute(const std::vector<Branch>& branches, const ExecBatch& input,
-//                         ExecContext* exec_context) const {
-//     std::vector<Datum> results;
-//     std::vector<std::shared_ptr<SelectionVector>> sel_vecs;
-//     auto non_taken = Mask(input.selection_vector);
-//     for (const auto& branch : branches) {
-//       if (non_taken->length() == 0) {
-//         break;
-//       }
-//       auto cond = branch.Condition(non_taken, input, exec_context);
-//       auto taken = SelVecAnd(non_taken, cond, exec_context);
-//       if (taken->length() == 0) {
-//         continue;
-//       }
-//       auto branch_input = branch.TakenInput(input, taken, exec_context);
-//       ARROW_ASSIGN_OR_RAISE(auto result, branch.Action(branch_input, exec_context));
-//       results.push_back(result);
-//       sel_vecs.push_back(taken);
-//       non_taken = SelVecAnd(non_taken, SelVecNot(cond, exec_context), exec_context);
-//     }
-//     return Choose(results, sel_vecs, input.length, exec_context);
-//   }
-// };
+struct AllFalseMask : public Mask {
+  std::shared_ptr<Mask> Not() const override { return std::make_unique<AllTrueMask>(); }
+  std::shared_ptr<Mask> And(const std::shared_ptr<Mask>& other) const override {
+    return std::make_shared<AllFalseMask>();
+  }
+};
 
-// struct Executor {
-//   Result<Datum> Execute(const std::vector<Branch>& branches, const ExecBatch& input,
-//                         ExecContext* exec_context) const {
-//     DCHECK_EQ(input.selection_vector, nullptr);
-//     std::vector<Datum> results;
-//     std::vector<std::shared_ptr<SelectionVector>> sel_vecs;
-//     for (const auto& branch : branches) {
-//       auto cond = branch.Condition(nontaken, input, exec_context);
-//       if (cond.AllNull()) {
-//       }
-//       auto taken = SelVecAnd(nontaken, cond);
-//       nontaken = SelVecAnd(nontaken, SelVecNot(cond));
-//       if (taken->length() == 0) {
-//         continue;
-//       }
-//       auto branch_input = input;
-//       branch_input.selection_vector = taken;
-//       ARROW_ASSIGN_OR_RAISE(auto result, branch.Action(branch_input, exec_context));
-//       results.push_back(result);
-//       sel_vecs.push_back(taken);
-//     }
-//     return Choose(results, sel_vecs, input.length, exec_context);
-//   }
-// }
-// };
+struct Branch {};
+
+struct SelVecAwareExecutor {
+  Result<Datum> Execute(const std::vector<Branch>& branches, const ExecBatch& input,
+                        ExecContext* exec_context) const {
+    std::vector<Datum> results;
+    std::vector<std::shared_ptr<SelectionVector>> sel_vecs;
+    auto non_taken = Mask(input.selection_vector);
+    for (const auto& branch : branches) {
+      if (non_taken->length() == 0) {
+        break;
+      }
+      auto cond = branch.Condition(non_taken, input, exec_context);
+      auto taken = SelVecAnd(non_taken, cond, exec_context);
+      if (taken->length() == 0) {
+        continue;
+      }
+      ARROW_ASSIGN_OR_RAISE(auto result, branch.Action(taken, input, exec_context));
+      results.push_back(result);
+      sel_vecs.push_back(taken);
+      non_taken = SelVecAnd(non_taken, SelVecNot(cond, exec_context), exec_context);
+    }
+    return Choose(results, sel_vecs, input.length, exec_context);
+  }
+};
 
 // TODO: Take scalar may not work.
 Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
@@ -330,7 +322,7 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
   auto sel = ChunkedArrayFromDatums({sel_true, sel_false});
   ARROW_ASSIGN_OR_RAISE(
       auto result_datum,
-      Permute(if_true_false, sel, PermuteOptions{/*output_length=*/input.length}));
+      Permute(if_true_false, sel, ScatterOptions{/*max_index=*/input.length - 1}));
   DCHECK(result_datum.is_arraylike());
   if (result_datum.is_chunked_array() &&
       result_datum.chunked_array()->num_chunks() == 1) {
