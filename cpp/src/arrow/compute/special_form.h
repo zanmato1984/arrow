@@ -44,7 +44,8 @@ class ARROW_EXPORT SpecialFormState {
 
 class IfElseSpecialForm : public SpecialForm {
  public:
-  IfElseSpecialForm() : SpecialForm("if_else") {}
+  IfElseSpecialForm()
+      : SpecialForm(/*name=*/"if_else", /*selection_vector_aware=*/true) {}
 
   Result<TypeHolder> Resolve(std::vector<Expression>* arguments,
                              ExecContext* exec_context) const override;

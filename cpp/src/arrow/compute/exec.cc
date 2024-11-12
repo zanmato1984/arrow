@@ -1362,12 +1362,12 @@ int32_t SelectionVector::length() const { return static_cast<int32_t>(data_->len
 
 Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(
     const BooleanArray& arr, MemoryPool* pool) {
-  auto length = arr.null_count();
+  auto length = arr.true_count();
   Int32Builder builder(pool);
   RETURN_NOT_OK(builder.Reserve(length));
   ArraySpan span(*arr.data());
   int32_t i = 0;
-  RETURN_NOT_OK(VisitArraySpanInline<Int32Type>(
+  RETURN_NOT_OK(VisitArraySpanInline<BooleanType>(
       span,
       [&](bool mask) -> Status {
         if (mask) {
@@ -1382,6 +1382,22 @@ Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(
       }));
   ARROW_ASSIGN_OR_RAISE(auto indices, builder.Finish());
   return std::make_shared<SelectionVector>(indices->data());
+}
+
+Result<std::shared_ptr<BooleanArray>> SelectionVector::ToMask(int64_t length,
+                                                              MemoryPool* pool) const {
+  BooleanBuilder builder(pool);
+  RETURN_NOT_OK(builder.Reserve(length));
+  int64_t nulls_start = 0;
+  for (int32_t i = 0; i < this->length(); ++i) {
+    RETURN_NOT_OK(builder.AppendValues(indices_[i] - nulls_start, false));
+    RETURN_NOT_OK(builder.Append(true));
+    nulls_start = indices_[i] + 1;
+  }
+  RETURN_NOT_OK(builder.AppendValues(length - nulls_start, false));
+
+  ARROW_ASSIGN_OR_RAISE(auto mask, builder.Finish());
+  return arrow::internal::checked_pointer_cast<BooleanArray>(mask);
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
