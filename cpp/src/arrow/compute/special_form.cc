@@ -47,39 +47,6 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
 
 namespace {
 
-// TODO: Take scalar may not work.
-Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
-                                        const Datum& selection_vector,
-                                        ExecContext* exec_context) {
-  std::vector<Datum> values(input.num_values());
-  for (int i = 0; i < input.num_values(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(
-        values[i], Take(input[i], selection_vector, TakeOptions{/*boundcheck=*/false},
-                        exec_context));
-  }
-  return ExecBatch::Make(std::move(values), selection_vector.length());
-}
-
-bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& arguments,
-                                         const ExecBatch& input,
-                                         ExecContext* exec_context) {
-  for (const auto& expr : arguments) {
-    if (!expr.selection_vector_aware()) {
-      return false;
-    }
-  }
-  for (const auto& value : input.values) {
-    if (value.is_scalar()) {
-      continue;
-    }
-    if (value.is_array() && input.length <= exec_context->exec_chunksize()) {
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
 struct BodyMask;
 
 struct CondMask : public std::enable_shared_from_this<CondMask> {
@@ -471,6 +438,18 @@ struct DenseAllPassCondMask : public CondMask {
   int64_t length_;
 };
 
+Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
+                                        const Datum& selection_vector,
+                                        ExecContext* exec_context) {
+  std::vector<Datum> values(input.num_values());
+  for (int i = 0; i < input.num_values(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(
+        values[i], Take(input[i], selection_vector, TakeOptions{/*boundcheck=*/false},
+                        exec_context));
+  }
+  return ExecBatch::Make(std::move(values), selection_vector.length());
+}
+
 struct DenseCondMask : public CondMask {
   static Result<std::shared_ptr<DenseCondMask>> Make(
       std::shared_ptr<SelectionVector> selection_vector, ExecContext* exec_context) {
@@ -676,9 +655,9 @@ struct ConditionalExecutor {
 
     size_t size() const { return values_.size(); }
 
-    const std::vector<Datum> values() const { return values_; }
+    const std::vector<Datum>& values() const { return values_; }
 
-    const std::vector<std::shared_ptr<SelectionVector>> selection_vectors() const {
+    const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors() const {
       return selection_vectors_;
     }
 
@@ -719,12 +698,8 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
     ARROW_ASSIGN_OR_RAISE(auto indices, ComputeChooseIndices(results.selection_vectors(),
                                                              input.length, exec_context));
     choose_args.emplace_back(std::move(indices));
-    for (const auto& value : results.values()) {
-      choose_args.emplace_back(value);
-    }
-    // TODO: Crash???
-    // choose_args.insert(choose_args.end(), results.values().begin(),
-    //                    results.values().end());
+    choose_args.insert(choose_args.end(), results.values().begin(),
+                       results.values().end());
     return CallFunction("choose", choose_args, exec_context);
   }
 
@@ -849,6 +824,26 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
     return std::make_shared<ChunkedArray>(std::move(chunks));
   }
 };
+
+bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& arguments,
+                                         const ExecBatch& input,
+                                         ExecContext* exec_context) {
+  for (const auto& expr : arguments) {
+    if (!expr.selection_vector_aware()) {
+      return false;
+    }
+  }
+  for (const auto& value : input.values) {
+    if (value.is_scalar()) {
+      continue;
+    }
+    if (value.is_array() && input.length <= exec_context->exec_chunksize()) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
 
 }  // namespace
 
