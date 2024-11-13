@@ -80,10 +80,10 @@ bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& argument
   return true;
 }
 
-struct SubMask;
+struct BodyMask;
 
-struct Mask : public std::enable_shared_from_this<Mask> {
-  virtual ~Mask() = default;
+struct CondMask : public std::enable_shared_from_this<CondMask> {
+  virtual ~CondMask() = default;
 
   virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
 
@@ -93,21 +93,21 @@ struct Mask : public std::enable_shared_from_this<Mask> {
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const = 0;
 
-  virtual Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                                     ExecContext* exec_context) const = 0;
+  virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
 };
 
-struct SparseAllPassMask : public Mask {
-  static Result<std::shared_ptr<SparseAllPassMask>> Make(int64_t length,
-                                                         ExecContext* exec_context) {
-    auto mask = std::make_shared<SparseAllPassMask>(length);
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+struct SparseAllPassCondMask : public CondMask {
+  static Result<std::shared_ptr<SparseAllPassCondMask>> Make(int64_t length,
+                                                             ExecContext* exec_context) {
+    auto cond_mask = std::make_shared<SparseAllPassCondMask>(length);
+    RETURN_NOT_OK(cond_mask->Init(exec_context));
+    return cond_mask;
   }
 
-  explicit SparseAllPassMask(int64_t length) : length_(length) {}
+  explicit SparseAllPassCondMask(int64_t length) : length_(length) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -122,8 +122,8 @@ struct SparseAllPassMask : public Mask {
     return nullptr;
   }
 
-  Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                             ExecContext* exec_context) const override;
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const override;
 
   bool empty() const override { return false; }
 
@@ -131,39 +131,40 @@ struct SparseAllPassMask : public Mask {
   int64_t length_;
 };
 
-struct AllFailMask : public Mask {
-  static Result<std::shared_ptr<AllFailMask>> Make(ExecContext* exec_context) {
-    static auto mask = [&exec_context]() -> Result<std::shared_ptr<AllFailMask>> {
-      auto mask = std::make_shared<AllFailMask>();
-      RETURN_NOT_OK(mask->Init(exec_context));
-      return mask;
+struct AllFailCondMask : public CondMask {
+  static Result<std::shared_ptr<AllFailCondMask>> Make(ExecContext* exec_context) {
+    static auto cond_mask =
+        [&exec_context]() -> Result<std::shared_ptr<AllFailCondMask>> {
+      auto cond_mask = std::make_shared<AllFailCondMask>();
+      RETURN_NOT_OK(cond_mask->Init(exec_context));
+      return cond_mask;
     }();
-    return mask;
+    return cond_mask;
   }
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllFailMask::Apply should not be called");
+    return Status::Invalid("AllFailCondMask::Apply should not be called");
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllFailMask::GetSelectionVector should not be called");
+    return Status::Invalid("AllFailCondMask::GetSelectionVector should not be called");
   }
 
-  Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                             ExecContext* exec_context) const override {
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllFailMask::Sub should not be called");
+    return Status::Invalid("AllFailCondMask::MakeBodyMask should not be called");
   }
 
   bool empty() const override { return true; }
 };
 
-struct SubMask : public std::enable_shared_from_this<SubMask> {
-  virtual ~SubMask() = default;
+struct BodyMask : public std::enable_shared_from_this<BodyMask> {
+  virtual ~BodyMask() = default;
 
   virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
 
@@ -173,101 +174,102 @@ struct SubMask : public std::enable_shared_from_this<SubMask> {
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const = 0;
 
-  virtual Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const = 0;
+  virtual Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
 };
 
 template <typename Impl>
-struct TrivialSubMask : public SubMask {
-  static Result<std::shared_ptr<Impl>> Make(std::shared_ptr<const Mask> base_mask,
+struct TrivialBodyMask : public BodyMask {
+  static Result<std::shared_ptr<Impl>> Make(std::shared_ptr<const CondMask> cond_mask,
                                             ExecContext* exec_context) {
-    auto mask = std::make_shared<Impl>(std::move(base_mask));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+    auto body_mask = std::make_shared<Impl>(std::move(cond_mask));
+    RETURN_NOT_OK(body_mask->Init(exec_context));
+    return body_mask;
   }
 
-  explicit TrivialSubMask(std::shared_ptr<const Mask> base_mask)
-      : base_mask_(std::move(base_mask)) {}
+  explicit TrivialBodyMask(std::shared_ptr<const CondMask> cond_mask)
+      : cond_mask_(std::move(cond_mask)) {}
 
-  ARROW_DISALLOW_COPY_AND_ASSIGN(TrivialSubMask);
-  ARROW_DEFAULT_MOVE_AND_ASSIGN(TrivialSubMask);
+  ARROW_DISALLOW_COPY_AND_ASSIGN(TrivialBodyMask);
+  ARROW_DEFAULT_MOVE_AND_ASSIGN(TrivialBodyMask);
 
  protected:
-  std::shared_ptr<const Mask> base_mask_;
+  std::shared_ptr<const CondMask> cond_mask_;
 };
 
-struct AllNullSubMask : public TrivialSubMask<AllNullSubMask> {
-  // public TrivialSubMaskFactory<AllNullSubMask> {
+struct AllNullBodyMask : public TrivialBodyMask<AllNullBodyMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllNullSubMask::Apply should not be called");
+    return Status::Invalid("AllNullBodyMask::Apply should not be called");
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllNullMask::GetSelectionVector should not be called");
+    return Status::Invalid("AllNullBodyMask::GetSelectionVector should not be called");
   }
 
-  Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const override {
-    return AllFailMask::Make(exec_context);
+  Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const override {
+    return AllFailCondMask::Make(exec_context);
   }
 
   bool empty() const override { return true; }
 
  private:
-  using TrivialSubMask::TrivialSubMask;
+  using TrivialBodyMask::TrivialBodyMask;
 };
 
-struct AllPassSubMask : public TrivialSubMask<AllPassSubMask> {
-  // public TrivialSubMaskFactory<AllPassSubMask> {
+struct AllPassBodyMask : public TrivialBodyMask<AllPassBodyMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
-    return base_mask_->Apply(expr, input, exec_context);
+    return cond_mask_->Apply(expr, input, exec_context);
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
-    return base_mask_->GetSelectionVector(exec_context);
+    return cond_mask_->GetSelectionVector(exec_context);
   }
 
-  Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const override {
-    return AllFailMask::Make(exec_context);
+  Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const override {
+    return AllFailCondMask::Make(exec_context);
   }
 
   bool empty() const override { return false; }
 
  private:
-  using TrivialSubMask::TrivialSubMask;
+  using TrivialBodyMask::TrivialBodyMask;
 };
 
-struct AllFailSubMask : public TrivialSubMask<AllFailSubMask> {
-  // public TrivialSubMaskFactory<AllFailSubMask> {
+struct AllFailBodyMask : public TrivialBodyMask<AllFailBodyMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllFailSubMask::Apply should not be called");
+    return Status::Invalid("AllFailBodyMask::Apply should not be called");
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
     DCHECK(false);
-    return Status::Invalid("AllFailSubMask::GetSelectionVector should not be called");
+    return Status::Invalid("AllFailBodyMask::GetSelectionVector should not be called");
   }
 
-  Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const override {
-    return base_mask_;
+  Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const override {
+    return cond_mask_;
   }
 
   bool empty() const override { return true; }
 
  private:
-  using TrivialSubMask::TrivialSubMask;
+  using TrivialBodyMask::TrivialBodyMask;
 };
 
-struct SparseMask : public Mask {
+struct SparseCondMask : public CondMask {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     auto input_with_sel_vec = input;
@@ -280,15 +282,15 @@ struct SparseMask : public Mask {
     return selection_vector_;
   }
 
-  Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                             ExecContext* exec_context) const override;
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const override;
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
  protected:
-  SparseMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
+  SparseCondMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
 
-  SparseMask(std::shared_ptr<SelectionVector> selection_vector)
+  SparseCondMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
 
  protected:
@@ -296,16 +298,16 @@ struct SparseMask : public Mask {
   std::shared_ptr<SelectionVector> selection_vector_ = nullptr;
 };
 
-struct SparseBitmap : public SparseMask {
-  static Result<std::shared_ptr<SparseBitmap>> Make(std::shared_ptr<BooleanArray> bitmap,
-                                                    ExecContext* exec_context) {
-    auto mask = std::make_shared<SparseBitmap>(std::move(bitmap));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+struct SparseBitmapCondMask : public SparseCondMask {
+  static Result<std::shared_ptr<SparseBitmapCondMask>> Make(
+      std::shared_ptr<BooleanArray> bitmap, ExecContext* exec_context) {
+    auto cond_mask = std::make_shared<SparseBitmapCondMask>(std::move(bitmap));
+    RETURN_NOT_OK(cond_mask->Init(exec_context));
+    return cond_mask;
   }
 
-  explicit SparseBitmap(std::shared_ptr<BooleanArray> bitmap)
-      : SparseMask(std::move(bitmap)) {}
+  explicit SparseBitmapCondMask(std::shared_ptr<BooleanArray> bitmap)
+      : SparseCondMask(std::move(bitmap)) {}
 
   Status Init(ExecContext* exec_context) override {
     ARROW_ASSIGN_OR_RAISE(selection_vector_, SelectionVector::FromMask(
@@ -314,18 +316,19 @@ struct SparseBitmap : public SparseMask {
   }
 };
 
-struct SparseSelectionVector : public SparseMask {
-  static Result<std::shared_ptr<SparseSelectionVector>> Make(
+struct SparseSelectionVectorCondMask : public SparseCondMask {
+  static Result<std::shared_ptr<SparseSelectionVectorCondMask>> Make(
       std::shared_ptr<SelectionVector> selection_vector, int64_t length,
       ExecContext* exec_context) {
-    auto mask =
-        std::make_shared<SparseSelectionVector>(std::move(selection_vector), length);
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+    auto cond_mask = std::make_shared<SparseSelectionVectorCondMask>(
+        std::move(selection_vector), length);
+    RETURN_NOT_OK(cond_mask->Init(exec_context));
+    return cond_mask;
   }
 
-  SparseSelectionVector(std::shared_ptr<SelectionVector> selection_vector, int64_t length)
-      : SparseMask(std::move(selection_vector)), length_(length) {}
+  SparseSelectionVectorCondMask(std::shared_ptr<SelectionVector> selection_vector,
+                                int64_t length)
+      : SparseCondMask(std::move(selection_vector)), length_(length) {}
 
   Status Init(ExecContext* exec_context) override {
     ARROW_ASSIGN_OR_RAISE(
@@ -337,49 +340,47 @@ struct SparseSelectionVector : public SparseMask {
   int64_t length_;
 };
 
-struct SparseSubMask : public SubMask {
-  static Result<std::shared_ptr<SparseSubMask>> Make(
-      std::shared_ptr<BooleanArray> base_bitmap, std::shared_ptr<BooleanArray> sub_bitmap,
-      ExecContext* exec_context) {
-    auto mask =
-        std::make_shared<SparseSubMask>(std::move(base_bitmap), std::move(sub_bitmap));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+struct SparseBodyMask : public BodyMask {
+  static Result<std::shared_ptr<SparseBodyMask>> Make(
+      std::shared_ptr<BooleanArray> cond_bitmap,
+      std::shared_ptr<BooleanArray> body_bitmap, ExecContext* exec_context) {
+    auto body_mask =
+        std::make_shared<SparseBodyMask>(std::move(cond_bitmap), std::move(body_bitmap));
+    RETURN_NOT_OK(body_mask->Init(exec_context));
+    return body_mask;
   }
 
-  SparseSubMask(std::shared_ptr<BooleanArray> base_bitmap,
-                std::shared_ptr<BooleanArray> sub_bitmap)
-      : base_bitmap_(std::move(base_bitmap)), sub_bitmap_(std::move(sub_bitmap)) {}
+  SparseBodyMask(std::shared_ptr<BooleanArray> cond_bitmap,
+                 std::shared_ptr<BooleanArray> body_bitmap)
+      : cond_bitmap_(std::move(cond_bitmap)), body_bitmap_(std::move(body_bitmap)) {}
 
   Status Init(ExecContext* exec_context) override {
-    DCHECK_EQ(base_bitmap_->length(), sub_bitmap_->length());
+    DCHECK_EQ(cond_bitmap_->length(), body_bitmap_->length());
     RETURN_NOT_OK(ComputeCanonicalBitmap(exec_context));
+    ARROW_ASSIGN_OR_RAISE(
+        selection_vector_,
+        SelectionVector::FromMask(*canonical_bitmap_, exec_context->memory_pool()));
     return Status::OK();
   }
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
-    // TODO: Cache selection vector.
     auto input_with_sel_vec = input;
-    ARROW_ASSIGN_OR_RAISE(
-        input_with_sel_vec.selection_vector,
-        SelectionVector::FromMask(*canonical_bitmap_, exec_context->memory_pool()));
+    input_with_sel_vec.selection_vector = selection_vector_;
     return ExecuteScalarExpression(expr, input_with_sel_vec, exec_context);
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
-    ARROW_ASSIGN_OR_RAISE(
-        auto selection_vector,
-        SelectionVector::FromMask(*canonical_bitmap_, exec_context->memory_pool()));
-    return selection_vector;
+    return selection_vector_;
   }
 
-  Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const override {
+  Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const override {
     ARROW_ASSIGN_OR_RAISE(auto datum,
-                          KleeneAndNot(*base_bitmap_, *sub_bitmap_, exec_context));
+                          KleeneAndNot(*cond_bitmap_, *body_bitmap_, exec_context));
     auto not_bitmap = datum.array_as<BooleanArray>();
-    return SparseBitmap::Make(std::move(not_bitmap), exec_context);
+    return SparseBitmapCondMask::Make(std::move(not_bitmap), exec_context);
   }
 
   bool empty() const override { return canonical_bitmap_->true_count() == 0; }
@@ -387,65 +388,66 @@ struct SparseSubMask : public SubMask {
  private:
   Status ComputeCanonicalBitmap(ExecContext* exec_context) {
     ARROW_ASSIGN_OR_RAISE(auto datum,
-                          KleeneAnd(*base_bitmap_, *sub_bitmap_, exec_context));
+                          KleeneAnd(*cond_bitmap_, *body_bitmap_, exec_context));
     canonical_bitmap_ = datum.array_as<BooleanArray>();
     return Status::OK();
   }
 
  private:
-  std::shared_ptr<BooleanArray> base_bitmap_;
-  std::shared_ptr<BooleanArray> sub_bitmap_;
+  std::shared_ptr<BooleanArray> cond_bitmap_;
+  std::shared_ptr<BooleanArray> body_bitmap_;
   std::shared_ptr<BooleanArray> canonical_bitmap_ = nullptr;
+  std::shared_ptr<SelectionVector> selection_vector_ = nullptr;
 };
 
-Result<std::shared_ptr<SubMask>> SubMaskFromScalar(const BooleanScalar& scalar,
-                                                   std::shared_ptr<const Mask> mask,
-                                                   ExecContext* exec_context) {
+Result<std::shared_ptr<BodyMask>> BodyMaskFromScalar(
+    const BooleanScalar& scalar, std::shared_ptr<const CondMask> cond_mask,
+    ExecContext* exec_context) {
   if (!scalar.is_valid) {
-    return AllNullSubMask::Make(std::move(mask), exec_context);
+    return AllNullBodyMask::Make(std::move(cond_mask), exec_context);
   } else if (scalar.value) {
-    return AllPassSubMask::Make(std::move(mask), exec_context);
+    return AllPassBodyMask::Make(std::move(cond_mask), exec_context);
   } else {
-    return AllFailSubMask::Make(std::move(mask), exec_context);
+    return AllFailBodyMask::Make(std::move(cond_mask), exec_context);
   }
 }
 
-Result<std::shared_ptr<const SubMask>> SparseAllPassMask::Sub(
+Result<std::shared_ptr<const BodyMask>> SparseAllPassCondMask::MakeBodyMask(
     const Datum& datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
-    return SubMaskFromScalar(scalar, shared_from_this(), exec_context);
+    return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
   }
   ARROW_ASSIGN_OR_RAISE(
-      auto base_bitmap,
+      auto cond_bitmap,
       MakeArrayFromScalar(BooleanScalar(true), length_, exec_context->memory_pool()));
-  auto sub_bitmap = datum.array_as<BooleanArray>();
-  return SparseSubMask::Make(
-      arrow::internal::checked_pointer_cast<BooleanArray>(base_bitmap),
-      std::move(sub_bitmap), exec_context);
+  auto body_bitmap = datum.array_as<BooleanArray>();
+  return SparseBodyMask::Make(
+      arrow::internal::checked_pointer_cast<BooleanArray>(cond_bitmap),
+      std::move(body_bitmap), exec_context);
 }
 
-Result<std::shared_ptr<const SubMask>> SparseMask::Sub(const Datum& datum,
-                                                       ExecContext* exec_context) const {
+Result<std::shared_ptr<const BodyMask>> SparseCondMask::MakeBodyMask(
+    const Datum& datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
-    return SubMaskFromScalar(scalar, shared_from_this(), exec_context);
+    return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
   }
-  auto sub_bitmap = datum.array_as<BooleanArray>();
-  return SparseSubMask::Make(bitmap_, std::move(sub_bitmap), exec_context);
+  auto body_bitmap = datum.array_as<BooleanArray>();
+  return SparseBodyMask::Make(bitmap_, std::move(body_bitmap), exec_context);
 }
 
-struct DenseAllPassMask : public Mask {
-  static Result<std::shared_ptr<DenseAllPassMask>> Make(int64_t length,
-                                                        ExecContext* exec_context) {
-    auto mask = std::make_shared<DenseAllPassMask>(length);
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+struct DenseAllPassCondMask : public CondMask {
+  static Result<std::shared_ptr<DenseAllPassCondMask>> Make(int64_t length,
+                                                            ExecContext* exec_context) {
+    auto cond_mask = std::make_shared<DenseAllPassCondMask>(length);
+    RETURN_NOT_OK(cond_mask->Init(exec_context));
+    return cond_mask;
   }
 
-  explicit DenseAllPassMask(int64_t length) : length_(length) {}
+  explicit DenseAllPassCondMask(int64_t length) : length_(length) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -460,8 +462,8 @@ struct DenseAllPassMask : public Mask {
     return nullptr;
   }
 
-  Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                             ExecContext* exec_context) const override;
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const override;
 
   bool empty() const override { return false; }
 
@@ -469,15 +471,15 @@ struct DenseAllPassMask : public Mask {
   int64_t length_;
 };
 
-struct DenseMask : public Mask {
-  static Result<std::shared_ptr<DenseMask>> Make(
+struct DenseCondMask : public CondMask {
+  static Result<std::shared_ptr<DenseCondMask>> Make(
       std::shared_ptr<SelectionVector> selection_vector, ExecContext* exec_context) {
-    auto mask = std::make_shared<DenseMask>(std::move(selection_vector));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+    auto cond_mask = std::make_shared<DenseCondMask>(std::move(selection_vector));
+    RETURN_NOT_OK(cond_mask->Init(exec_context));
+    return cond_mask;
   }
 
-  explicit DenseMask(std::shared_ptr<SelectionVector> selection_vector)
+  explicit DenseCondMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
@@ -493,8 +495,8 @@ struct DenseMask : public Mask {
     return selection_vector_;
   }
 
-  Result<std::shared_ptr<const SubMask>> Sub(const Datum& datum,
-                                             ExecContext* exec_context) const override;
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      const Datum& datum, ExecContext* exec_context) const override;
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
@@ -502,17 +504,18 @@ struct DenseMask : public Mask {
   std::shared_ptr<SelectionVector> selection_vector_;
 };
 
-struct DenseSubMask : public SubMask {
-  static Result<std::shared_ptr<DenseSubMask>> Make(
+struct DenseBodyMask : public BodyMask {
+  static Result<std::shared_ptr<DenseBodyMask>> Make(
       std::shared_ptr<SelectionVector> passed, std::shared_ptr<SelectionVector> failed,
       ExecContext* exec_context) {
-    auto mask = std::make_shared<DenseSubMask>(std::move(passed), std::move(failed));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
+    auto body_mask =
+        std::make_shared<DenseBodyMask>(std::move(passed), std::move(failed));
+    RETURN_NOT_OK(body_mask->Init(exec_context));
+    return body_mask;
   }
 
-  DenseSubMask(std::shared_ptr<SelectionVector> passed,
-               std::shared_ptr<SelectionVector> failed)
+  DenseBodyMask(std::shared_ptr<SelectionVector> passed,
+                std::shared_ptr<SelectionVector> failed)
       : passed_(std::move(passed)), failed_(std::move(failed)) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
@@ -527,8 +530,9 @@ struct DenseSubMask : public SubMask {
     return passed_;
   }
 
-  Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const override {
-    return DenseMask::Make(failed_, exec_context);
+  Result<std::shared_ptr<const CondMask>> NextCondMask(
+      ExecContext* exec_context) const override {
+    return DenseCondMask::Make(failed_, exec_context);
   }
 
   bool empty() const override { return passed_->length() == 0; }
@@ -538,13 +542,13 @@ struct DenseSubMask : public SubMask {
   std::shared_ptr<SelectionVector> failed_;
 };
 
-Result<std::shared_ptr<const SubMask>> DenseAllPassMask::Sub(
+Result<std::shared_ptr<const BodyMask>> DenseAllPassCondMask::MakeBodyMask(
     const Datum& datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
 
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
-    return SubMaskFromScalar(scalar, shared_from_this(), exec_context);
+    return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
   }
 
   auto bitmap = datum.array_as<BooleanArray>();
@@ -574,16 +578,16 @@ Result<std::shared_ptr<const SubMask>> DenseAllPassMask::Sub(
   ARROW_ASSIGN_OR_RAISE(auto failed, failed_builder.Finish());
   auto passed_sv = std::make_shared<SelectionVector>(passed->data());
   auto failed_sv = std::make_shared<SelectionVector>(failed->data());
-  return DenseSubMask::Make(std::move(passed_sv), std::move(failed_sv), exec_context);
+  return DenseBodyMask::Make(std::move(passed_sv), std::move(failed_sv), exec_context);
 }
 
-Result<std::shared_ptr<const SubMask>> DenseMask::Sub(const Datum& datum,
-                                                      ExecContext* exec_context) const {
+Result<std::shared_ptr<const BodyMask>> DenseCondMask::MakeBodyMask(
+    const Datum& datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
 
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
-    return SubMaskFromScalar(scalar, shared_from_this(), exec_context);
+    return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
   }
   auto bitmap = datum.array_as<BooleanArray>();
   DCHECK_EQ(bitmap->length(), selection_vector_->length());
@@ -612,7 +616,7 @@ Result<std::shared_ptr<const SubMask>> DenseMask::Sub(const Datum& datum,
   ARROW_ASSIGN_OR_RAISE(auto failed, failed_builder.Finish());
   auto passed_sv = std::make_shared<SelectionVector>(passed->data());
   auto failed_sv = std::make_shared<SelectionVector>(failed->data());
-  return DenseSubMask::Make(std::move(passed_sv), std::move(failed_sv), exec_context);
+  return DenseBodyMask::Make(std::move(passed_sv), std::move(failed_sv), exec_context);
 }
 
 struct Branch {
@@ -632,25 +636,26 @@ struct ConditionalExecutor {
   Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const {
     BranchResults results;
     results.Reserve(branches.size());
-    ARROW_ASSIGN_OR_RAISE(auto mask,
-                          static_cast<const Impl*>(this)->InitMask(input, exec_context));
+    ARROW_ASSIGN_OR_RAISE(auto cond_mask, static_cast<const Impl*>(this)->InitCondMask(
+                                              input, exec_context));
     for (const auto& branch : branches) {
-      if (mask->empty()) {
+      if (cond_mask->empty()) {
         break;
       }
-      ARROW_ASSIGN_OR_RAISE(auto cond, mask->Apply(branch.cond, input, exec_context));
-      ARROW_ASSIGN_OR_RAISE(auto sub_mask, mask->Sub(cond, exec_context));
-      if (sub_mask->empty()) {
-        ARROW_ASSIGN_OR_RAISE(mask, sub_mask->Not(exec_context));
+      ARROW_ASSIGN_OR_RAISE(auto cond,
+                            cond_mask->Apply(branch.cond, input, exec_context));
+      ARROW_ASSIGN_OR_RAISE(auto body_mask, cond_mask->MakeBodyMask(cond, exec_context));
+      if (body_mask->empty()) {
+        ARROW_ASSIGN_OR_RAISE(cond_mask, body_mask->NextCondMask(exec_context));
         continue;
       }
       ARROW_ASSIGN_OR_RAISE(auto value,
-                            sub_mask->Apply(branch.body, input, exec_context));
+                            body_mask->Apply(branch.body, input, exec_context));
       DCHECK(value.type()->Equals(result_type_));
       ARROW_ASSIGN_OR_RAISE(auto selection_vector,
-                            sub_mask->GetSelectionVector(exec_context));
+                            body_mask->GetSelectionVector(exec_context));
       results.Emplace(std::move(value), std::move(selection_vector));
-      ARROW_ASSIGN_OR_RAISE(mask, sub_mask->Not(exec_context));
+      ARROW_ASSIGN_OR_RAISE(cond_mask, body_mask->NextCondMask(exec_context));
     }
     return static_cast<const Impl*>(this)->CombineResults(input, results, exec_context);
   }
@@ -690,13 +695,13 @@ struct ConditionalExecutor {
 struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalExecutor> {
   using ConditionalExecutor<SparseConditionalExecutor>::ConditionalExecutor;
 
-  Result<std::shared_ptr<const Mask>> InitMask(const ExecBatch& input,
-                                               ExecContext* exec_context) const {
+  Result<std::shared_ptr<const CondMask>> InitCondMask(const ExecBatch& input,
+                                                       ExecContext* exec_context) const {
     if (input.selection_vector) {
-      return SparseSelectionVector::Make(input.selection_vector, input.length,
-                                         exec_context);
+      return SparseSelectionVectorCondMask::Make(input.selection_vector, input.length,
+                                                 exec_context);
     }
-    return SparseAllPassMask::Make(input.length, exec_context);
+    return SparseAllPassCondMask::Make(input.length, exec_context);
   }
 
   Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
@@ -759,12 +764,12 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
 struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExecutor> {
   using ConditionalExecutor<DenseConditionalExecutor>::ConditionalExecutor;
 
-  Result<std::shared_ptr<const Mask>> InitMask(const ExecBatch& input,
-                                               ExecContext* exec_context) const {
+  Result<std::shared_ptr<const CondMask>> InitCondMask(const ExecBatch& input,
+                                                       ExecContext* exec_context) const {
     if (input.selection_vector) {
-      return DenseMask::Make(input.selection_vector, exec_context);
+      return DenseCondMask::Make(input.selection_vector, exec_context);
     }
-    return DenseAllPassMask::Make(input.length, exec_context);
+    return DenseAllPassCondMask::Make(input.length, exec_context);
   }
 
   Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
