@@ -178,26 +178,27 @@ struct SubMask : public std::enable_shared_from_this<SubMask> {
   virtual bool empty() const = 0;
 };
 
+template <typename Impl>
 struct TrivialSubMask : public SubMask {
+  static Result<std::shared_ptr<Impl>> Make(std::shared_ptr<const Mask> base_mask,
+                                            ExecContext* exec_context) {
+    auto mask = std::make_shared<Impl>(std::move(base_mask));
+    RETURN_NOT_OK(mask->Init(exec_context));
+    return mask;
+  }
+
   explicit TrivialSubMask(std::shared_ptr<const Mask> base_mask)
       : base_mask_(std::move(base_mask)) {}
+
+  ARROW_DISALLOW_COPY_AND_ASSIGN(TrivialSubMask);
+  ARROW_DEFAULT_MOVE_AND_ASSIGN(TrivialSubMask);
 
  protected:
   std::shared_ptr<const Mask> base_mask_;
 };
 
-template <typename SubMaskType>
-struct TrivialSubMaskFactory {
-  static Result<std::shared_ptr<SubMaskType>> Make(std::shared_ptr<const Mask> base_mask,
-                                                   ExecContext* exec_context) {
-    auto mask = std::make_shared<SubMaskType>(std::move(base_mask));
-    RETURN_NOT_OK(mask->Init(exec_context));
-    return mask;
-  }
-};
-
-struct AllNullSubMask : public TrivialSubMask,
-                        public TrivialSubMaskFactory<AllNullSubMask> {
+struct AllNullSubMask : public TrivialSubMask<AllNullSubMask> {
+  // public TrivialSubMaskFactory<AllNullSubMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
@@ -218,11 +219,10 @@ struct AllNullSubMask : public TrivialSubMask,
 
  private:
   using TrivialSubMask::TrivialSubMask;
-  friend struct TrivialSubMaskFactory<AllNullSubMask>;
 };
 
-struct AllPassSubMask : public TrivialSubMask,
-                        public TrivialSubMaskFactory<AllPassSubMask> {
+struct AllPassSubMask : public TrivialSubMask<AllPassSubMask> {
+  // public TrivialSubMaskFactory<AllPassSubMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     return base_mask_->Apply(expr, input, exec_context);
@@ -241,11 +241,10 @@ struct AllPassSubMask : public TrivialSubMask,
 
  private:
   using TrivialSubMask::TrivialSubMask;
-  friend struct TrivialSubMaskFactory<AllPassSubMask>;
 };
 
-struct AllFailSubMask : public TrivialSubMask,
-                        public TrivialSubMaskFactory<AllFailSubMask> {
+struct AllFailSubMask : public TrivialSubMask<AllFailSubMask> {
+  // public TrivialSubMaskFactory<AllFailSubMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
@@ -266,7 +265,6 @@ struct AllFailSubMask : public TrivialSubMask,
 
  private:
   using TrivialSubMask::TrivialSubMask;
-  friend struct TrivialSubMaskFactory<AllFailSubMask>;
 };
 
 struct SparseMask : public Mask {
