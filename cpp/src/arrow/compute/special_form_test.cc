@@ -295,6 +295,12 @@ TEST(IfElseSpecialForm, Shortcuts) {
             [false, null, 0],
             [false, 1, null]
           ])")),
+        // TODO: Make it alive somewhere.
+        // ExecBatch(*RecordBatchFromJSON(schema, R"([
+        //     [false, 1, 0],
+        //     [true, null, 0],
+        //     [false, 1, null]
+        //   ])")),
     };
     for (const auto& input : batches) {
       {

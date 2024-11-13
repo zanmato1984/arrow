@@ -60,25 +60,6 @@ Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
   return ExecBatch::Make(std::move(values), selection_vector.length());
 }
 
-// std::shared_ptr<ChunkedArray> ChunkedArrayFromDatums(const std::vector<Datum>& datums)
-// {
-//   std::vector<std::shared_ptr<Array>> chunks;
-//   for (const auto& datum : datums) {
-//     DCHECK(datum.is_arraylike());
-//     if (datum.is_array() && datum.length() > 0) {
-//       chunks.push_back(datum.make_array());
-//     } else {
-//       DCHECK(datum.is_chunked_array());
-//       for (const auto& chunk : datum.chunked_array()->chunks()) {
-//         if (chunk->length() > 0) {
-//           chunks.push_back(chunk);
-//         }
-//       }
-//     }
-//   }
-//   return std::make_shared<ChunkedArray>(std::move(chunks));
-// }
-
 bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& arguments,
                                          const ExecBatch& input,
                                          ExecContext* exec_context) {
@@ -116,10 +97,6 @@ struct Mask : public std::enable_shared_from_this<Mask> {
                                                      ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
-
-  // virtual int64_t passed_count() const = 0;
-
-  // virtual int64_t null_count() const = 0;
 };
 
 struct SparseAllPassMask : public Mask {
@@ -149,10 +126,6 @@ struct SparseAllPassMask : public Mask {
                                              ExecContext* exec_context) const override;
 
   bool empty() const override { return false; }
-
-  // int64_t passed_count() const override { return length_; }
-
-  // int64_t null_count() const override { return 0; }
 
  private:
   int64_t length_;
@@ -187,10 +160,6 @@ struct AllFailMask : public Mask {
   }
 
   bool empty() const override { return true; }
-
-  // int64_t passed_count() const override { return 0; }
-
-  // int64_t null_count() const override { return 0; }
 };
 
 struct SubMask : public std::enable_shared_from_this<SubMask> {
@@ -207,10 +176,6 @@ struct SubMask : public std::enable_shared_from_this<SubMask> {
   virtual Result<std::shared_ptr<const Mask>> Not(ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
-
-  // virtual int64_t passed_count() const = 0;
-
-  // virtual int64_t null_count() const = 0;
 };
 
 struct TrivialSubMask : public SubMask {
@@ -251,10 +216,6 @@ struct AllNullSubMask : public TrivialSubMask,
 
   bool empty() const override { return true; }
 
-  // int64_t passed_count() const override { return base_mask_->passed_count(); }
-
-  // int64_t null_count() const override { return base_mask_->passed_count(); }
-
  private:
   using TrivialSubMask::TrivialSubMask;
   friend struct TrivialSubMaskFactory<AllNullSubMask>;
@@ -278,17 +239,13 @@ struct AllPassSubMask : public TrivialSubMask,
 
   bool empty() const override { return false; }
 
-  // int64_t passed_count() const override { return base_mask_->passed_count(); }
-
-  // int64_t null_count() const override { return base_mask_->null_count(); }
-
  private:
   using TrivialSubMask::TrivialSubMask;
   friend struct TrivialSubMaskFactory<AllPassSubMask>;
 };
 
 struct AllFailSubMask : public TrivialSubMask,
-                        public TrivialSubMaskFactory<AllNullSubMask> {
+                        public TrivialSubMaskFactory<AllFailSubMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
     DCHECK(false);
@@ -306,10 +263,6 @@ struct AllFailSubMask : public TrivialSubMask,
   }
 
   bool empty() const override { return true; }
-
-  // int64_t passed_count() const override { return 0; }
-
-  // int64_t null_count() const override { return 0; }
 
  private:
   using TrivialSubMask::TrivialSubMask;
@@ -334,10 +287,6 @@ struct SparseMask : public Mask {
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
-  // int64_t passed_count() const override { return passed_count_; }
-
-  // int64_t null_count() const override { return null_count_; }
-
  protected:
   SparseMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
 
@@ -347,8 +296,6 @@ struct SparseMask : public Mask {
  protected:
   std::shared_ptr<BooleanArray> bitmap_ = nullptr;
   std::shared_ptr<SelectionVector> selection_vector_ = nullptr;
-  // int64_t passed_count_ = 0;
-  // int64_t null_count_ = 0;
 };
 
 struct SparseBitmap : public SparseMask {
@@ -365,8 +312,6 @@ struct SparseBitmap : public SparseMask {
   Status Init(ExecContext* exec_context) override {
     ARROW_ASSIGN_OR_RAISE(selection_vector_, SelectionVector::FromMask(
                                                  *bitmap_, exec_context->memory_pool()));
-    // passed_count_ = bitmap_->length() - bitmap_->false_count();
-    // null_count_ = bitmap_->null_count();
     return Status::OK();
   }
 };
@@ -387,8 +332,6 @@ struct SparseSelectionVector : public SparseMask {
   Status Init(ExecContext* exec_context) override {
     ARROW_ASSIGN_OR_RAISE(
         bitmap_, selection_vector_->ToMask(length_, exec_context->memory_pool()));
-    // passed_count_ = bitmap_->length() - bitmap_->false_count();
-    // null_count_ = bitmap_->null_count();
     return Status::OK();
   }
 
@@ -413,8 +356,6 @@ struct SparseSubMask : public SubMask {
   Status Init(ExecContext* exec_context) override {
     DCHECK_EQ(base_bitmap_->length(), sub_bitmap_->length());
     RETURN_NOT_OK(ComputeCanonicalBitmap(exec_context));
-    // passed_count_ = canonical_bitmap_->length() - canonical_bitmap_->false_count();
-    // null_count_ = canonical_bitmap_->null_count();
     return Status::OK();
   }
 
@@ -445,10 +386,6 @@ struct SparseSubMask : public SubMask {
 
   bool empty() const override { return canonical_bitmap_->true_count() == 0; }
 
-  // int64_t passed_count() const override { return passed_count_; }
-
-  // int64_t null_count() const override { return null_count_; }
-
  private:
   Status ComputeCanonicalBitmap(ExecContext* exec_context) {
     ARROW_ASSIGN_OR_RAISE(auto datum,
@@ -461,8 +398,6 @@ struct SparseSubMask : public SubMask {
   std::shared_ptr<BooleanArray> base_bitmap_;
   std::shared_ptr<BooleanArray> sub_bitmap_;
   std::shared_ptr<BooleanArray> canonical_bitmap_ = nullptr;
-  // int64_t passed_count_ = 0;
-  // int64_t null_count_ = 0;
 };
 
 Result<std::shared_ptr<SubMask>> SubMaskFromScalar(const BooleanScalar& scalar,
@@ -532,10 +467,6 @@ struct DenseAllPassMask : public Mask {
 
   bool empty() const override { return false; }
 
-  // int64_t passed_count() const override { return length_; }
-
-  // int64_t null_count() const override { return 0; }
-
  private:
   int64_t length_;
 };
@@ -568,10 +499,6 @@ struct DenseMask : public Mask {
                                              ExecContext* exec_context) const override;
 
   bool empty() const override { return selection_vector_->length() == 0; }
-
-  // int64_t passed_count() const override { return selection_vector_->length(); }
-
-  // int64_t null_count() const override { return 0; }
 
  private:
   std::shared_ptr<SelectionVector> selection_vector_;
@@ -607,10 +534,6 @@ struct DenseSubMask : public SubMask {
   }
 
   bool empty() const override { return passed_->length() == 0; }
-
-  // int64_t passed_count() const override { return passed_->length(); }
-
-  // int64_t null_count() const override { return 0; }
 
  private:
   std::shared_ptr<SelectionVector> passed_;
@@ -696,20 +619,21 @@ Result<std::shared_ptr<const SubMask>> DenseMask::Sub(const Datum& datum,
 
 struct Branch {
   Expression cond;
-  Expression action;
+  Expression body;
 };
 
 template <typename Impl>
 struct ConditionalExecutor {
-  explicit ConditionalExecutor(std::vector<Branch> branches)
-      : branches(std::move(branches)) {}
+  explicit ConditionalExecutor(std::vector<Branch> branches,
+                               std::shared_ptr<DataType> result_type)
+      : branches(std::move(branches)), result_type_(std::move(result_type)) {}
 
   ARROW_DISALLOW_COPY_AND_ASSIGN(ConditionalExecutor);
   ARROW_DEFAULT_MOVE_AND_ASSIGN(ConditionalExecutor);
 
   Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const {
-    std::vector<BranchResult> results;
-    results.reserve(branches.size());
+    BranchResults results;
+    results.Reserve(branches.size());
     ARROW_ASSIGN_OR_RAISE(auto mask,
                           static_cast<const Impl*>(this)->InitMask(input, exec_context));
     for (const auto& branch : branches) {
@@ -722,24 +646,47 @@ struct ConditionalExecutor {
         ARROW_ASSIGN_OR_RAISE(mask, sub_mask->Not(exec_context));
         continue;
       }
-      ARROW_ASSIGN_OR_RAISE(auto result,
-                            sub_mask->Apply(branch.action, input, exec_context));
+      ARROW_ASSIGN_OR_RAISE(auto value,
+                            sub_mask->Apply(branch.body, input, exec_context));
+      DCHECK(value.type()->Equals(result_type_));
       ARROW_ASSIGN_OR_RAISE(auto selection_vector,
                             sub_mask->GetSelectionVector(exec_context));
-      results.push_back({std::move(result), selection_vector});
+      results.Emplace(std::move(value), std::move(selection_vector));
       ARROW_ASSIGN_OR_RAISE(mask, sub_mask->Not(exec_context));
     }
     return static_cast<const Impl*>(this)->CombineResults(input, results, exec_context);
   }
 
  protected:
-  struct BranchResult {
-    Datum result;
-    std::shared_ptr<const SelectionVector> selection_vector;
+  struct BranchResults {
+    void Reserve(int64_t size) {
+      values_.reserve(size);
+      selection_vectors_.reserve(size);
+    }
+
+    void Emplace(Datum value, std::shared_ptr<SelectionVector> selection_vector) {
+      values_.emplace_back(std::move(value));
+      selection_vectors_.emplace_back(std::move(selection_vector));
+    }
+
+    bool empty() const { return values_.empty(); }
+
+    size_t size() const { return values_.size(); }
+
+    const std::vector<Datum> values() const { return values_; }
+
+    const std::vector<std::shared_ptr<SelectionVector>> selection_vectors() const {
+      return selection_vectors_;
+    }
+
+   private:
+    std::vector<Datum> values_;
+    std::vector<std::shared_ptr<SelectionVector>> selection_vectors_;
   };
 
- private:
+ protected:
   std::vector<Branch> branches;
+  std::shared_ptr<DataType> result_type_;
 };
 
 struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalExecutor> {
@@ -754,11 +701,60 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
     return SparseAllPassMask::Make(input.length, exec_context);
   }
 
-  Result<Datum> CombineResults(const ExecBatch& input,
-                               const std::vector<BranchResult>& results,
+  Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
                                ExecContext* exec_context) const {
-    return MakeArrayOfNull(results[0].result.type(), input.length,
-                           exec_context->memory_pool());
+    if (results.empty()) {
+      return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
+    }
+
+    if (results.size() == 1) {
+      return results.values()[0];
+    }
+
+    std::vector<Datum> choose_args;
+    choose_args.reserve(results.size() + 1);
+    ARROW_ASSIGN_OR_RAISE(auto indices, ComputeChooseIndices(results.selection_vectors(),
+                                                             input.length, exec_context));
+    choose_args.emplace_back(std::move(indices));
+    for (const auto& value : results.values()) {
+      choose_args.emplace_back(value);
+    }
+    // TODO: Crash???
+    // choose_args.insert(choose_args.end(), results.values().begin(),
+    //                    results.values().end());
+    return CallFunction("choose", choose_args, exec_context);
+  }
+
+ private:
+  Result<Datum> ComputeChooseIndices(
+      const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
+      int64_t length, ExecContext* exec_context) const {
+    const int64_t validity_bytes = bit_util::BytesForBits(length);
+    ARROW_ASSIGN_OR_RAISE(
+        std::shared_ptr<ResizableBuffer> validity_buf,
+        AllocateResizableBuffer(validity_bytes, exec_context->memory_pool()));
+    auto validity_data = validity_buf->mutable_data_as<uint8_t>();
+    std::memset(validity_data, 0, validity_bytes);
+
+    ARROW_ASSIGN_OR_RAISE(
+        std::shared_ptr<ResizableBuffer> indices_buf,
+        AllocateResizableBuffer(length * sizeof(int32_t), exec_context->memory_pool()));
+    auto indices_data = indices_buf->mutable_data_as<int32_t>();
+    for (int32_t index = 0; index < static_cast<int32_t>(selection_vectors.size());
+         ++index) {
+      DCHECK_NE(selection_vectors[index], nullptr);
+      DCHECK_GT(selection_vectors[index]->length(), 0);
+      auto row_ids = selection_vectors[index]->indices();
+      for (int32_t i = 0; i < selection_vectors[index]->length(); ++i) {
+        const int32_t row_id = row_ids[i];
+        DCHECK_EQ(bit_util::GetBit(validity_data, row_id), false);
+        bit_util::SetBitTo(validity_data, row_id, true);
+        indices_data[row_id] = index;
+      }
+    }
+
+    return ArrayData::Make(int32(), length,
+                           {std::move(validity_buf), std::move(indices_buf)});
   }
 };
 
@@ -773,11 +769,81 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
     return DenseAllPassMask::Make(input.length, exec_context);
   }
 
-  Result<Datum> CombineResults(const ExecBatch& input,
-                               const std::vector<BranchResult>& results,
+  Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
                                ExecContext* exec_context) const {
-    return MakeArrayOfNull(results[0].result.type(), input.length,
-                           exec_context->memory_pool());
+    if (results.empty()) {
+      return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
+    }
+
+    if (results.size() == 1) {
+      if (!results.selection_vectors()[0] || results.selection_vectors()[0]->length()) {
+        return results.values()[0];
+      }
+      return Scatter({results.values()[0]},
+                     {MakeArray(results.selection_vectors()[0]->data())},
+                     ScatterOptions{/*max_index=*/input.length - 1});
+    }
+
+    ARROW_ASSIGN_OR_RAISE(
+        auto values,
+        ToChunkedArray(results,
+                       [&](const Datum& value,
+                           const std::shared_ptr<SelectionVector>& selection_vector,
+                           ArrayVector& chunks) -> Status {
+                         DCHECK_NE(selection_vector, nullptr);
+                         DCHECK_GT(selection_vector->length(), 0);
+                         DCHECK(value.is_scalar() || value.is_arraylike());
+                         if (value.is_scalar()) {
+                           ARROW_ASSIGN_OR_RAISE(
+                               auto arr, MakeArrayFromScalar(
+                                             *value.scalar(), selection_vector->length(),
+                                             exec_context->memory_pool()));
+                           chunks.push_back(std::move(arr));
+                         } else if (value.is_array() && value.length() > 0) {
+                           chunks.push_back(value.make_array());
+                         } else {
+                           DCHECK(value.is_chunked_array());
+                           for (const auto& chunk : value.chunked_array()->chunks()) {
+                             if (chunk->length() > 0) {
+                               chunks.push_back(chunk);
+                             }
+                           }
+                         }
+                         return Status::OK();
+                       }));
+    ARROW_ASSIGN_OR_RAISE(
+        auto indices,
+        ToChunkedArray(
+            results,
+            [](const Datum&, const std::shared_ptr<SelectionVector>& selection_vector,
+               ArrayVector& chunks) -> Status {
+              DCHECK_NE(selection_vector, nullptr);
+              DCHECK_GT(selection_vector->length(), 0);
+              chunks.push_back(MakeArray(selection_vector->data()));
+              return Status::OK();
+            }));
+    ARROW_ASSIGN_OR_RAISE(
+        auto result,
+        Scatter(values, indices, ScatterOptions{/*max_index=*/input.length - 1}));
+    DCHECK(result.is_arraylike());
+    if (result.is_chunked_array() && result.chunked_array()->num_chunks() == 1) {
+      return result.chunked_array()->chunk(0);
+    } else {
+      return result;
+    }
+  }
+
+ private:
+  template <typename ChunkFunc>
+  Result<std::shared_ptr<ChunkedArray>> ToChunkedArray(const BranchResults& results,
+                                                       ChunkFunc&& chunk_func) const {
+    ArrayVector chunks;
+    chunks.reserve(results.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+      RETURN_NOT_OK(
+          chunk_func(results.values()[i], results.selection_vectors()[i], chunks));
+    }
+    return std::make_shared<ChunkedArray>(std::move(chunks));
   }
 };
 
@@ -792,6 +858,7 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
   const auto& if_true_expr = arguments[1];
   const auto& if_false_expr = arguments[2];
   DCHECK_EQ(if_true_expr.type()->id(), if_false_expr.type()->id());
+  auto result_type = if_true_expr.type()->GetSharedPtr();
 
   std::vector<Branch> branches = {
       {cond_expr, if_true_expr},
@@ -799,11 +866,32 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
   };
   if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
                                           exec_context)) {
-    return SparseConditionalExecutor(std::move(branches)).Execute(input, exec_context);
+    return SparseConditionalExecutor(std::move(branches), std::move(result_type))
+        .Execute(input, exec_context);
   } else {
-    return DenseConditionalExecutor(std::move(branches)).Execute(input, exec_context);
+    return DenseConditionalExecutor(std::move(branches), std::move(result_type))
+        .Execute(input, exec_context);
   }
 }
+
+// std::shared_ptr<ChunkedArray> ChunkedArrayFromDatums(const std::vector<Datum>& datums)
+// {
+//   std::vector<std::shared_ptr<Array>> chunks;
+//   for (const auto& datum : datums) {
+//     DCHECK(datum.is_arraylike());
+//     if (datum.is_array() && datum.length() > 0) {
+//       chunks.push_back(datum.make_array());
+//     } else {
+//       DCHECK(datum.is_chunked_array());
+//       for (const auto& chunk : datum.chunked_array()->chunks()) {
+//         if (chunk->length() > 0) {
+//           chunks.push_back(chunk);
+//         }
+//       }
+//     }
+//   }
+//   return std::make_shared<ChunkedArray>(std::move(chunks));
+// }
 
 // Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& arguments,
 //                                          const ExecBatch& input,

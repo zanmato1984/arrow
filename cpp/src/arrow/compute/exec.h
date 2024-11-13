@@ -147,7 +147,7 @@ class ARROW_EXPORT SelectionVector {
   Result<std::shared_ptr<BooleanArray>> ToMask(
       int64_t length, MemoryPool* pool = default_memory_pool()) const;
 
-  std::shared_ptr<const ArrayData> data() const { return data_; }
+  std::shared_ptr<ArrayData> data() const { return data_; }
   const int32_t* indices() const { return indices_; }
   int32_t length() const;
 
