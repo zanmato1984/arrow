@@ -32,6 +32,8 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
                         exec_context->func_registry()->GetFunction("if_else"));
   std::vector<TypeHolder> types = GetTypes(*arguments);
 
+  // TODO: Resolve choose/scatter function.
+
   // TODO: DispatchBest and implicit cast.
   ARROW_ASSIGN_OR_RAISE(auto maybe_exact_match, function->DispatchExact(types));
   KernelContext kernel_context(exec_context, maybe_exact_match);
@@ -636,7 +638,8 @@ struct ConditionalExecutor {
       results.Emplace(std::move(value), std::move(selection_vector));
       ARROW_ASSIGN_OR_RAISE(cond_mask, body_mask->NextCondMask(exec_context));
     }
-    return static_cast<const Impl*>(this)->CombineResults(input, results, exec_context);
+    return static_cast<const Impl*>(this)->MultiplexBranchResults(input, results,
+                                                                  exec_context);
   }
 
  protected:
@@ -683,8 +686,9 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
     return SparseAllPassCondMask::Make(input.length, exec_context);
   }
 
-  Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
-                               ExecContext* exec_context) const {
+  Result<Datum> MultiplexBranchResults(const ExecBatch& input,
+                                       const BranchResults& results,
+                                       ExecContext* exec_context) const {
     if (results.empty()) {
       return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
     }
@@ -747,8 +751,9 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
     return DenseAllPassCondMask::Make(input.length, exec_context);
   }
 
-  Result<Datum> CombineResults(const ExecBatch& input, const BranchResults& results,
-                               ExecContext* exec_context) const {
+  Result<Datum> MultiplexBranchResults(const ExecBatch& input,
+                                       const BranchResults& results,
+                                       ExecContext* exec_context) const {
     if (results.empty()) {
       return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
     }
