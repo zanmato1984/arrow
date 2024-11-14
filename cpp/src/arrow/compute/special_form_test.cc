@@ -29,224 +29,145 @@
 
 namespace arrow::compute {
 
-TEST(IfElseSpecialForm, Basic) {
-  {
-    ARROW_SCOPED_TRACE("if (b != 0) then a / b else b");
-    auto cond = call("not_equal", {field_ref("b"), literal(0)});
-    auto if_true = call("divide", {field_ref("a"), field_ref("b")});
-    auto if_false = field_ref("b");
-    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
-    auto rb = RecordBatchFromJSON(schema, R"([
-        [1, 1],
-        [2, 1],
-        [3, 0],
-        [4, 1],
-        [5, 1]
-      ])");
-    auto batch = ExecBatch(*rb);
-    auto if_else_sp = if_else_special(cond, if_true, if_false);
-    {
-      auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
-      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-      ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-      AssertDatumsEqual(*expected, result);
-    }
-    {
-      ARROW_SCOPED_TRACE("(if (b != 0) then a / b else b) + 1");
-      auto plus_one = call("add", {if_else_sp, literal(1)});
-      {
-        auto expected = ArrayFromJSON(int32(), "[2, 3, 1, 5, 6]");
-        ASSERT_OK_AND_ASSIGN(auto bound, plus_one.Bind(*schema));
-        ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-        AssertDatumsEqual(*expected, result);
-      }
-      {
-        ARROW_SCOPED_TRACE(
-            "if ((if (b != 0) then a / b else b) + 1 != 1) then a / b else b");
-        auto cond = call("not_equal", {plus_one, literal(1)});
-        auto if_true = call("divide", {field_ref("a"), field_ref("b")});
-        auto if_false = field_ref("b");
-        auto if_else_sp = if_else_special(cond, if_true, if_false);
-        auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
-        ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-        ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-        AssertDatumsEqual(*expected, result);
-      }
-    }
-  }
-  {
-    ARROW_SCOPED_TRACE("if (b != 0) then a else a");
-    auto cond = call("not_equal", {field_ref("b"), literal(0)});
-    auto if_true = field_ref("a");
-    auto if_false = field_ref("a");
-    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
-    auto rb = RecordBatchFromJSON(schema, R"([
-        [1, 1],
-        [2, 1],
-        [3, 0],
-        [4, 1],
-        [5, 1]
-      ])");
-    auto batch = ExecBatch(*rb);
-    auto if_else_sp = if_else_special(cond, if_true, if_false);
-    auto expected = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5]");
-    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-    AssertDatumsEqual(*expected, result);
-  }
-}
-
 namespace {
-
-Expression if_else_expr(Expression cond, Expression if_true, Expression if_false) {
-  return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
-}
 
 Status HaltExec(KernelContext*, const ExecSpan&, ExecResult*) {
   return Status::Invalid("Halting");
 }
 
-static Status RegisterHaltFunctions() {
-  auto registry = GetFunctionRegistry();
-
-  auto register_halt_func = [&](const std::string& name,
-                                bool selection_vector_aware) -> Status {
-    auto func =
-        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
-
-    ArrayKernelExec exec = HaltExec;
-    ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-    kernel.selection_vector_aware = selection_vector_aware;
-    kernel.can_write_into_slices = false;
-    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-    RETURN_NOT_OK(func->AddKernel(kernel));
-    RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-    return Status::OK();
-  };
-
-  RETURN_NOT_OK(register_halt_func("halt_selection_vector_aware",
-                                   /*selection_vector_aware=*/true));
-  RETURN_NOT_OK(register_halt_func("halt_selection_vector_unaware",
-                                   /*selection_vector_aware=*/false));
-
-  return Status::OK();
-}
-
-Expression halt_selection_vector_aware(Expression arg) {
-  return call("halt_selection_vector_aware", {std::move(arg)});
-}
-
-Expression halt_selection_vector_unaware(Expression arg) {
-  return call("halt_selection_vector_unaware", {std::move(arg)});
-}
-
-template <bool selection_vector_aware, bool assert_selection_vector_existing>
-Status SelectionVectorGuardExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+Status IdentityExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
   DCHECK_EQ(span.num_values(), 1);
-  if constexpr (!selection_vector_aware) {
-    if (span.selection_vector) {
-      return Status::Invalid("There is a selection vector");
-    }
-  } else if constexpr (assert_selection_vector_existing) {
-    if (!span.selection_vector) {
-      return Status::Invalid("There is no selection vector");
-    }
-  }
   const auto& arg = span[0];
   DCHECK(arg.is_array());
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }
 
-static Status RegisterSelectionVectorGuardFunctions() {
+template <bool sv_existence>
+Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
+                                 ExecResult* out) {
+  if constexpr (sv_existence) {
+    if (!span.selection_vector) {
+      return Status::Invalid("There is no selection vector");
+    }
+  } else {
+    if (span.selection_vector) {
+      return Status::Invalid("There is a selection vector");
+    }
+  }
+  return IdentityExec(kernel_ctx, span, out);
+}
+
+static Status RegisterAuxilaryFunctions() {
   auto registry = GetFunctionRegistry();
 
-  auto register_selection_vector_guard_func =
-      [&](const std::string& name, bool actual_selection_vector_aware,
-          bool assert_selection_vector_existing,
-          bool declare_selection_vector_aware) -> Status {
-    auto func =
-        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+  {
+    auto register_halt_func = [&](const std::string& name) -> Status {
+      auto func =
+          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-    ArrayKernelExec exec;
-    if (actual_selection_vector_aware) {
-      if (assert_selection_vector_existing) {
-        exec = SelectionVectorGuardExec<true, true>;
-      } else {
-        exec = SelectionVectorGuardExec<true, false>;
-      }
-    } else {
-      if (assert_selection_vector_existing) {
-        exec = SelectionVectorGuardExec<false, true>;
-      } else {
-        exec = SelectionVectorGuardExec<false, false>;
-      }
-    }
-    ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-    kernel.selection_vector_aware = declare_selection_vector_aware;
-    kernel.can_write_into_slices = false;
-    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-    RETURN_NOT_OK(func->AddKernel(kernel));
-    RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-    return Status::OK();
-  };
+      ArrayKernelExec exec = HaltExec;
+      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+      kernel.selection_vector_aware = true;
+      kernel.can_write_into_slices = false;
+      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+      RETURN_NOT_OK(func->AddKernel(kernel));
+      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+      return Status::OK();
+    };
 
-  RETURN_NOT_OK(
-      register_selection_vector_guard_func("selection_vector_aware",
-                                           /*actual_selection_vector_aware=*/true,
-                                           /*assert_selection_vector_existing=*/false,
-                                           /*declare_selection_vector_aware=*/true));
-  RETURN_NOT_OK(
-      register_selection_vector_guard_func("selection_vector_unaware",
-                                           /*actual_selection_vector_aware=*/false,
-                                           /*assert_selection_vector_existing=*/false,
-                                           /*declare_selection_vector_aware=*/false));
-  RETURN_NOT_OK(
-      register_selection_vector_guard_func("selection_vector_mis_aware",
-                                           /*actual_selection_vector_aware=*/false,
-                                           /*assert_selection_vector_existing=*/false,
-                                           /*declare_selection_vector_aware=*/true));
-  RETURN_NOT_OK(
-      register_selection_vector_guard_func("selection_vector_must_exist",
-                                           /*actual_selection_vector_aware=*/true,
-                                           /*assert_selection_vector_existing=*/true,
-                                           /*declare_selection_vector_aware=*/true));
+    RETURN_NOT_OK(register_halt_func("halt"));
+  }
+
+  {
+    auto register_sv_awareness_func = [&](const std::string& name,
+                                          bool sv_awareness) -> Status {
+      auto func =
+          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+      ArrayKernelExec exec = IdentityExec;
+      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+      kernel.selection_vector_aware = sv_awareness;
+      kernel.can_write_into_slices = false;
+      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+      RETURN_NOT_OK(func->AddKernel(kernel));
+      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+      return Status::OK();
+    };
+
+    RETURN_NOT_OK(register_sv_awareness_func("sv_aware", true));
+    RETURN_NOT_OK(register_sv_awareness_func("sv_unaware", false));
+  }
+
+  {
+    auto register_assert_sv_func = [&](const std::string& name,
+                                       bool sv_existence) -> Status {
+      auto func =
+          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+      ArrayKernelExec exec;
+      if (sv_existence) {
+        exec = AssertSelectionVectorExec<true>;
+      } else {
+        exec = AssertSelectionVectorExec<false>;
+      }
+      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+      kernel.selection_vector_aware = true;
+      kernel.can_write_into_slices = false;
+      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+      RETURN_NOT_OK(func->AddKernel(kernel));
+      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+      return Status::OK();
+    };
+
+    RETURN_NOT_OK(register_assert_sv_func("assert_sv_exist", /*sv_existence=*/true));
+    RETURN_NOT_OK(register_assert_sv_func("assert_sv_empty", /*sv_existence=*/false));
+  }
 
   return Status::OK();
 }
 
-Expression selection_vector_aware(Expression arg) {
-  return call("selection_vector_aware", {std::move(arg)});
+auto boolean_null = literal(MakeNullScalar(boolean()));
+
+Expression if_else_expr(Expression cond, Expression if_true, Expression if_false) {
+  return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
 
-Expression selection_vector_unaware(Expression arg) {
-  return call("selection_vector_unaware", {std::move(arg)});
+Expression halt(Expression arg) { return call("halt", {std::move(arg)}); }
+
+Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
+
+Expression sv_unaware(Expression arg) { return call("sv_unaware", {std::move(arg)}); }
+
+Expression assert_sv_exist(Expression arg) {
+  return call("assert_sv_exist", {std::move(arg)});
 }
 
-Expression selection_vector_mis_aware(Expression arg) {
-  return call("selection_vector_mis_aware", {std::move(arg)});
+Expression assert_sv_empty(Expression arg) {
+  return call("assert_sv_empty", {std::move(arg)});
 }
 
-Expression selection_vector_must_exist(Expression arg) {
-  return call("selection_vector_must_exist", {std::move(arg)});
+Expression wrap_if_else_special_with_sv_aware(Expression cond, Expression if_true,
+                                              Expression if_false) {
+  return sv_aware(if_else_special(sv_aware(cond), sv_aware(if_true), sv_aware(if_false)));
 }
 
-Expression wrap_if_else_special_with_selection_vector_aware(Expression cond,
-                                                            Expression if_true,
-                                                            Expression if_false) {
-  return selection_vector_aware(if_else_special(selection_vector_aware(cond),
-                                                selection_vector_aware(if_true),
-                                                selection_vector_aware(if_false)));
+Expression wrap_if_else_special_with_sv_unaware(Expression cond, Expression if_true,
+                                                Expression if_false) {
+  return sv_unaware(
+      if_else_special(sv_unaware(cond), sv_unaware(if_true), sv_unaware(if_false)));
 }
 
-Expression wrap_if_else_special_with_selection_vector_unaware(Expression cond,
-                                                              Expression if_true,
-                                                              Expression if_false) {
-  return selection_vector_unaware(if_else_special(selection_vector_unaware(cond),
-                                                  selection_vector_unaware(if_true),
-                                                  selection_vector_unaware(if_false)));
+std::vector<Expression> WrapSelectionVectorAwareness(Expression cond, Expression if_true,
+                                                     Expression if_false) {
+  return {
+      if_else_special(cond, if_true, if_false),
+      wrap_if_else_special_with_sv_aware(cond, if_true, if_false),
+      wrap_if_else_special_with_sv_unaware(cond, if_true, if_false),
+  };
 }
 
 void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
@@ -268,243 +189,326 @@ void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
   }
 }
 
-std::vector<Expression> WrapSelectionVectorGuard(Expression cond, Expression if_true,
-                                                 Expression if_false) {
-  return {
-      if_else_special(cond, if_true, if_false),
-      wrap_if_else_special_with_selection_vector_aware(cond, if_true, if_false),
-      wrap_if_else_special_with_selection_vector_unaware(cond, if_true, if_false),
-  };
+Result<Datum> ExecuteExpr(const Expression& expr, const std::shared_ptr<Schema>& schema,
+                          const ExecBatch& batch) {
+  ARROW_ASSIGN_OR_RAISE(auto bound, expr.Bind(*schema));
+  return ExecuteScalarExpression(bound, batch);
 }
 
-void AssertExprEqualIgnoreShape(const Datum& expected, Expression expr,
+void AssertExprEqualIgnoreShape(const Expression& expr,
                                 const std::shared_ptr<Schema>& schema,
-                                const ExecBatch& batch) {
-  ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schema));
-  ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
+                                const ExecBatch& batch, const Datum& expected) {
+  ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(expr, schema, batch));
   AssertEqualIgnoreShape(expected, result);
 }
 
-void AssertExprsEqualIgnoreShape(const Datum& expected,
-                                 const std::vector<Expression>& exprs,
+#define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message) \
+  { ASSERT_RAISES_WITH_MESSAGE(ENUM, message, ExecuteExpr(expr, schema, batch)); }
+
+void AssertExprsEqualIgnoreShape(const std::vector<Expression>& exprs,
                                  const std::shared_ptr<Schema>& schema,
-                                 const ExecBatch& batch) {
+                                 const ExecBatch& batch, const Datum& expected) {
   for (const auto& expr : exprs) {
-    AssertExprEqualIgnoreShape(expected, expr, schema, batch);
+    AssertExprEqualIgnoreShape(expr, schema, batch, expected);
   }
 }
 
-void AssertIfElseEqualWithExpr(Expression cond, Expression if_true, Expression if_false,
+void AssertIfElseEqualWithExpr(const Expression& cond, const Expression& if_true,
+                               const Expression& if_false,
                                const std::shared_ptr<Schema>& schema,
                                const ExecBatch& batch) {
   auto if_else = if_else_expr(cond, if_true, if_false);
   ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
   ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-  // Test using
-  // original/selection_vector_aware(original)/selection_vector_unaware(original).
-  auto exprs = WrapSelectionVectorGuard(cond, if_true, if_false);
-  AssertExprsEqualIgnoreShape(result, exprs, schema, batch);
+  // Test using original/sv_aware(original)/sv_unaware(original).
+  auto exprs = WrapSelectionVectorAwareness(cond, if_true, if_false);
+  AssertExprsEqualIgnoreShape(exprs, schema, batch, result);
 }
 
 }  // namespace
 
+TEST(IfElseSpecialForm, Basic) {
+  {
+    ARROW_SCOPED_TRACE("if (b != 0) then a / b else b");
+    auto cond = call("not_equal", {field_ref("b"), literal(0)});
+    auto if_true = call("divide", {field_ref("a"), field_ref("b")});
+    auto if_false = field_ref("b");
+    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+    auto rb = RecordBatchFromJSON(schema, R"([
+        [1, 1],
+        [2, 1],
+        [3, 0],
+        [4, 1],
+        [5, 1]
+      ])");
+    auto batch = ExecBatch(*rb);
+    auto if_else_sp = if_else_special(cond, if_true, if_false);
+    {
+      auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+    {
+      ARROW_SCOPED_TRACE("(if (b != 0) then a / b else b) + 1");
+      auto plus_one = call("add", {if_else_sp, literal(1)});
+      {
+        auto expected = ArrayFromJSON(int32(), "[2, 3, 1, 5, 6]");
+        AssertExprEqualIgnoreShape(plus_one, schema, batch, expected);
+      }
+      {
+        ARROW_SCOPED_TRACE(
+            "if ((if (b != 0) then a / b else b) + 1 != 1) then a / b else b");
+        auto cond = call("not_equal", {plus_one, literal(1)});
+        auto if_true = call("divide", {field_ref("a"), field_ref("b")});
+        auto if_false = field_ref("b");
+        auto if_else_sp = if_else_special(cond, if_true, if_false);
+        auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+      }
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("if (b != 0) then a else a");
+    auto cond = call("not_equal", {field_ref("b"), literal(0)});
+    auto if_true = field_ref("a");
+    auto if_false = field_ref("a");
+    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+    auto rb = RecordBatchFromJSON(schema, R"([
+        [1, 1],
+        [2, 1],
+        [3, 0],
+        [4, 1],
+        [5, 1]
+      ])");
+    auto batch = ExecBatch(*rb);
+    auto if_else_sp = if_else_special(cond, if_true, if_false);
+    auto expected = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5]");
+    AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+  }
+}
+
 class IfElseSpecialFormTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() {
-    ASSERT_OK(RegisterHaltFunctions());
-    ASSERT_OK(RegisterSelectionVectorGuardFunctions());
-  }
+  static void SetUpTestSuite() { ASSERT_OK(RegisterAuxilaryFunctions()); }
 };
 
-TEST_F(IfElseSpecialFormTest, SelectionVector) {
+TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
+  auto schema = arrow::schema({field("a", boolean())});
+  auto a = field_ref("a");
+  auto batch = ExecBatch({*ArrayFromJSON(boolean(), "[null, true, false]")}, 3);
   {
-    auto schema = arrow::schema({field("", int32())});
-    auto batch = ExecBatch({*ArrayFromJSON(int32(), "[1]")}, 1);
+    ARROW_SCOPED_TRACE("halt");
+    AssertExprRaisesWithMessage(halt(a), schema, batch, Invalid, "Invalid: Halting");
+  }
+  {
+    ARROW_SCOPED_TRACE("selection vector awareness");
     {
-      ARROW_SCOPED_TRACE("halt");
-      {
-        auto if_else = if_else_expr(literal(MakeNullScalar(boolean())),
-                                    halt_selection_vector_aware(literal(1)), literal(0));
-        ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
-        ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                   ExecuteScalarExpression(bound, batch));
-      }
-      {
-        auto if_else = if_else_expr(literal(MakeNullScalar(boolean())), literal(1),
-                                    halt_selection_vector_aware(literal(0)));
-        ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
-        ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                   ExecuteScalarExpression(bound, batch));
-      }
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(a).Bind(*schema));
+      ASSERT_TRUE(bound.selection_vector_aware());
     }
     {
-      ARROW_SCOPED_TRACE("selection vector must exist");
-      {
-        auto if_else = if_else_expr(literal(MakeNullScalar(boolean())),
-                                    selection_vector_must_exist(literal(1)), literal(0));
-        ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
-        ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: There is no selection vector",
-                                   ExecuteScalarExpression(bound, batch));
-      }
-      {
-        auto if_else = if_else_expr(literal(MakeNullScalar(boolean())), literal(1),
-                                    selection_vector_must_exist(literal(0)));
-        ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
-        ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: There is no selection vector",
-                                   ExecuteScalarExpression(bound, batch));
-      }
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_unaware(a).Bind(*schema));
+      ASSERT_FALSE(bound.selection_vector_aware());
     }
     {
-      ARROW_SCOPED_TRACE("if (null) then 1 else 0");
-      auto expected = ArrayFromJSON(int32(), "[null]");
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_aware(a)).Bind(*schema));
+      ASSERT_TRUE(bound.selection_vector_aware());
+    }
+    {
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_unaware(a)).Bind(*schema));
+      ASSERT_FALSE(bound.selection_vector_aware());
+    }
+    {
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_unaware(sv_aware(a)).Bind(*schema));
+      ASSERT_FALSE(bound.selection_vector_aware());
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("assert selection vector existence");
+    {
+      ARROW_SCOPED_TRACE("if (a) then 1 else 0");
+      auto cond = a;
+      auto if_true = literal(1);
+      auto if_false = literal(0);
+      auto expected = ArrayFromJSON(int32(), "[null, 1, 0]");
       {
-        ARROW_SCOPED_TRACE("halt selection vector aware");
-        auto if_else_sp = if_else_special(literal(MakeNullScalar(boolean())),
-                                          halt_selection_vector_aware(literal(1)),
-                                          halt_selection_vector_aware(literal(0)));
-        AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
+        auto if_else_sp =
+            if_else_special(cond, assert_sv_exist(if_true), assert_sv_exist(if_false));
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
-        ARROW_SCOPED_TRACE("halt selection vector unaware");
-        auto if_else_sp = if_else_special(literal(MakeNullScalar(boolean())),
-                                          halt_selection_vector_unaware(literal(1)),
-                                          halt_selection_vector_unaware(literal(0)));
-        AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
+        auto if_else_sp =
+            if_else_special(sv_unaware(cond), assert_sv_exist(if_true), if_false);
+        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
+                                    "Invalid: There is no selection vector");
       }
       {
-        ARROW_SCOPED_TRACE("selection vector mis-aware");
-        auto if_else_sp = if_else_special(literal(MakeNullScalar(boolean())),
-                                          selection_vector_mis_aware(literal(1)),
-                                          selection_vector_mis_aware(literal(0)));
-        AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
+        auto if_else_sp = if_else_special(cond, assert_sv_empty(if_true), if_false);
+        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
+                                    "Invalid: There is a selection vector");
       }
       {
-        ARROW_SCOPED_TRACE("selection vector must exist");
-        {
-          ARROW_SCOPED_TRACE("if_else(special)");
-          auto if_else_sp = if_else_special(literal(MakeNullScalar(boolean())),
-                                            selection_vector_must_exist(literal(1)),
-                                            selection_vector_mis_aware(literal(0)));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
+        auto if_else_sp = if_else_special(sv_unaware(cond), assert_sv_empty(if_true),
+                                          assert_sv_empty(if_false));
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
     }
     {
       ARROW_SCOPED_TRACE("if (true) then 1 else 0");
-      auto expected = ArrayFromJSON(int32(), "[1]");
+      auto cond = literal(true);
+      auto if_true = a;
+      auto if_false = literal(false);
+      auto expected = ArrayFromJSON(boolean(), "[null, true, false]");
       {
-        ARROW_SCOPED_TRACE("halt selection vector aware");
-        {
-          auto if_else_sp = if_else_special(
-              literal(true), halt_selection_vector_aware(literal(1)), literal(0));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-        {
-          auto if_else_sp = if_else_special(literal(true), literal(1),
-                                            halt_selection_vector_aware(literal(0)));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
+        auto if_else_sp = if_else_special(cond, assert_sv_exist(if_true), if_false);
+        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
+                                    "Invalid: There is no selection vector");
       }
       {
-        ARROW_SCOPED_TRACE("halt selection vector aware");
-        {
-          auto if_else_sp = if_else_special(
-              literal(true), halt_selection_vector_unaware(literal(1)), literal(0));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-        {
-          auto if_else_sp = if_else_special(literal(true), literal(1),
-                                            halt_selection_vector_unaware(literal(0)));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
-      }
-      {
-        ARROW_SCOPED_TRACE("selection vector mis-aware");
-        auto if_else_sp =
-            if_else_special(literal(true), selection_vector_mis_aware(literal(1)),
-                            selection_vector_mis_aware(literal(0)));
-        AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("selection vector must exist");
-        {
-          auto if_else_sp = if_else_special(
-              literal(true), selection_vector_must_exist(literal(1)), literal(0));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: There is no selection vector",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-        {
-          auto if_else_sp = if_else_special(literal(true), literal(1),
-                                            selection_vector_must_exist(literal(0)));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
+        auto if_else_sp = if_else_special(cond, assert_sv_empty(if_true), if_false);
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
     }
-    {
-      ARROW_SCOPED_TRACE("if (false) then 1 else 0");
-      auto expected = ArrayFromJSON(int32(), "[0]");
+  }
+}
+
+TEST_F(IfElseSpecialFormTest, SelectionVectorAwareness) {
+  auto schema = arrow::schema({});
+  auto cond = literal(true);
+  auto if_true = literal(1);
+  auto if_false = literal(0);
+  for (const auto& if_else_sp : {if_else_special(cond, if_true, if_false),
+                                 if_else_special(sv_unaware(cond), if_true, if_false),
+                                 if_else_special(cond, sv_unaware(if_true), if_false),
+                                 if_else_special(cond, if_true, sv_unaware(if_false))}) {
+    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+    ASSERT_TRUE(bound.selection_vector_aware());
+  }
+}
+
+TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
+  auto schema = arrow::schema({field("b_null", boolean()), field("b_true", boolean()),
+                               field("b_false", boolean()), field("b", boolean()),
+                               field("i1", int32()), field("i2", int32())});
+  auto b_null = field_ref("b_null");
+  auto b_true = field_ref("b_true");
+  auto b_false = field_ref("b_false");
+  auto b = field_ref("b");
+  auto i1 = field_ref("i1");
+  auto i2 = field_ref("i2");
+  auto batch = ExecBatch(
       {
-        ARROW_SCOPED_TRACE("halt selection vector aware");
-        {
-          auto if_else_sp = if_else_special(
-              literal(false), halt_selection_vector_aware(literal(1)), literal(0));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
-        {
-          auto if_else_sp = if_else_special(literal(false), literal(1),
-                                            halt_selection_vector_aware(literal(0)));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-      }
-      {
-        ARROW_SCOPED_TRACE("halt selection vector aware");
-        {
-          auto if_else_sp = if_else_special(
-              literal(false), halt_selection_vector_unaware(literal(1)), literal(0));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
-        {
-          auto if_else_sp = if_else_special(literal(false), literal(1),
-                                            halt_selection_vector_unaware(literal(0)));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: Halting",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-      }
-      {
-        ARROW_SCOPED_TRACE("selection vector mis-aware");
-        auto if_else_sp =
-            if_else_special(literal(false), selection_vector_mis_aware(literal(1)),
-                            selection_vector_mis_aware(literal(0)));
-        AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("selection vector must exist");
-        {
-          auto if_else_sp = if_else_special(
-              literal(false), selection_vector_must_exist(literal(1)), literal(0));
-          AssertExprEqualIgnoreShape(expected, if_else_sp, schema, batch);
-        }
-        {
-          auto if_else_sp = if_else_special(literal(false), literal(1),
-                                            selection_vector_must_exist(literal(0)));
-          ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-          ASSERT_RAISES_WITH_MESSAGE(Invalid, "Invalid: There is no selection vector",
-                                     ExecuteScalarExpression(bound, batch));
-        }
-      }
+          *ArrayFromJSON(boolean(), "[null, null, null]"),
+          *ArrayFromJSON(boolean(), "[true, true, true]"),
+          *ArrayFromJSON(boolean(), "[false, false, false]"),
+          *ArrayFromJSON(boolean(), "[null, true, false]"),
+          *ArrayFromJSON(int32(), "[0, 1, -1]"),
+          *ArrayFromJSON(int32(), "[0, -1, 1]"),
+      },
+      3);
+
+  {
+    ARROW_SCOPED_TRACE("all null condition");
+    auto expected = ArrayFromJSON(int32(), "[null, null, null]");
+    for (const auto& cond :
+         {boolean_null, b_null, assert_sv_empty(boolean_null), assert_sv_empty(b_null)}) {
+      ARROW_SCOPED_TRACE(cond.ToString());
+      auto if_else_sp = if_else_special(cond, halt(i1), halt(i2));
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("all true condition");
+    auto expected = ArrayFromJSON(int32(), "[0, 1, -1]");
+    for (const auto& if_else_sp :
+         {if_else_special(literal(true), i1, halt(i2)),
+          if_else_special(b_true, i1, halt(i2)),
+          if_else_special(assert_sv_empty(literal(true)), assert_sv_empty(i1), halt(i2)),
+          if_else_special(assert_sv_empty(b_true), assert_sv_exist(i1), halt(i2)),
+          if_else_special(assert_sv_empty(b_true), assert_sv_empty(i1),
+                          sv_unaware(halt(i2)))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("all false condition");
+    auto expected = ArrayFromJSON(int32(), "[0, -1, 1]");
+    for (const auto& if_else_sp :
+         {if_else_special(literal(false), halt(i1), i2),
+          if_else_special(b_false, halt(i1), i2),
+          if_else_special(assert_sv_empty(literal(false)), halt(i1), assert_sv_empty(i2)),
+          if_else_special(assert_sv_empty(b_false), halt(i1), assert_sv_exist(i2)),
+          if_else_special(assert_sv_empty(b_false), sv_unaware(halt(i1)),
+                          assert_sv_empty(i2))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("even condition");
+    auto expected = ArrayFromJSON(int32(), "[null, 1, 1]");
+    for (const auto& if_else_sp :
+         {if_else_special(b, i1, i2),
+          if_else_special(assert_sv_empty(b), assert_sv_exist(i1), assert_sv_exist(i2)),
+          if_else_special(sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
   }
 }
 
 TEST_F(IfElseSpecialFormTest, Shortcut) {
+  {
+    ARROW_SCOPED_TRACE("scalar branch");
+    auto schema = arrow::schema({field("b_null", boolean()), field("b_true", boolean()),
+                                 field("b_false", boolean())});
+    auto b_null = field_ref("b_null");
+    auto b_true = field_ref("b_true");
+    auto b_false = field_ref("b_false");
+    auto batch = ExecBatch(
+        {
+            *ArrayFromJSON(boolean(), "[null, null, null]"),
+            *ArrayFromJSON(boolean(), "[true, true, true]"),
+            *ArrayFromJSON(boolean(), "[false, false, false]"),
+        },
+        3);
+    {
+      ARROW_SCOPED_TRACE("if (null) then 1 else 0");
+      auto expected = ArrayFromJSON(int32(), "[null, null, null]");
+      for (const auto& cond : {boolean_null, b_null}) {
+        for (const auto& if_else_sp :
+             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+    {
+      ARROW_SCOPED_TRACE("if (true) then 1 else 0");
+      auto expected = MakeScalar(1);
+      for (const auto& cond : {literal(true), b_true}) {
+        for (const auto& if_else_sp :
+             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+    {
+      ARROW_SCOPED_TRACE("if (false) then 1 else 0");
+      auto expected = MakeScalar(0);
+      for (const auto& cond : {literal(false), b_false}) {
+        for (const auto& if_else_sp :
+             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+  }
   {
     auto schema = arrow::schema({field("", int32())});
     std::vector<ExecBatch> batches = {
@@ -529,6 +533,8 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
   }
   {
     auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+    auto a = field_ref("a");
+    auto b = field_ref("b");
     std::vector<ExecBatch> batches = {
         ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
         ExecBatch(*RecordBatchFromJSON(schema, R"([
@@ -545,34 +551,32 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
     for (const auto& batch : batches) {
       {
         ARROW_SCOPED_TRACE("if (null) then a else b");
-        AssertIfElseEqualWithExpr(literal(MakeNullScalar(boolean())), field_ref("a"),
-                                  field_ref("b"), schema, batch);
+        AssertIfElseEqualWithExpr(boolean_null, a, b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then 0 else b");
-        AssertIfElseEqualWithExpr(literal(true), literal(0), field_ref("b"), schema,
-                                  batch);
+        AssertIfElseEqualWithExpr(literal(true), literal(0), b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then a else b");
-        AssertIfElseEqualWithExpr(literal(true), field_ref("a"), field_ref("b"), schema,
-                                  batch);
+        AssertIfElseEqualWithExpr(literal(true), a, b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else 1");
-        AssertIfElseEqualWithExpr(literal(false), field_ref("a"), literal(1), schema,
-                                  batch);
+        AssertIfElseEqualWithExpr(literal(false), a, literal(1), schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else b");
-        AssertIfElseEqualWithExpr(literal(false), field_ref("a"), field_ref("b"), schema,
-                                  batch);
+        AssertIfElseEqualWithExpr(literal(false), a, b, schema, batch);
       }
     }
   }
   {
     auto schema =
         arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
+    auto a = field_ref("a");
+    auto b = field_ref("b");
+    auto c = field_ref("c");
     std::vector<ExecBatch> batches = {
         ExecBatch(*RecordBatchFromJSON(schema, R"([
             [null, 1, 0],
@@ -613,12 +617,11 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
     for (const auto& batch : batches) {
       {
         ARROW_SCOPED_TRACE("if (a) then b else c");
-        AssertIfElseEqualWithExpr(field_ref("a"), field_ref("b"), field_ref("c"), schema,
-                                  batch);
+        AssertIfElseEqualWithExpr(a, b, c, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (a) then 1 else 0");
-        AssertIfElseEqualWithExpr(field_ref("a"), literal(1), literal(0), schema, batch);
+        AssertIfElseEqualWithExpr(a, literal(1), literal(0), schema, batch);
       }
     }
   }
@@ -627,7 +630,6 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
 // TODO: ChunkedArray.
 
 namespace {
-
 template <bool selection_vector_aware>
 Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
   DCHECK_EQ(span.num_values(), 1);

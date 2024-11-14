@@ -862,7 +862,7 @@ Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& argument
       {cond_expr, if_true_expr},
       {literal(true), if_false_expr},
   };
-  if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
+  if (IsSelectionVectorAwarePathAvailable({cond_expr, if_true_expr, if_false_expr}, input,
                                           exec_context)) {
     return SparseConditionalExecutor(std::move(branches), std::move(result_type))
         .Execute(input, exec_context);
