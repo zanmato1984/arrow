@@ -54,8 +54,6 @@ struct BodyMask;
 struct BranchMask : public std::enable_shared_from_this<BranchMask> {
   virtual ~BranchMask() = default;
 
-  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
-
   virtual Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                               ExecContext* exec_context) const = 0;
 
@@ -66,17 +64,26 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
       const Datum& datum, ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
+
+ protected:
+  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
 };
+
+template <typename T, typename... Args>
+std::shared_ptr<T> MakeShared(Args&&... args) {
+  struct EnableMakeShared : public T {
+    explicit EnableMakeShared(Args&&... args) : T(std::forward<Args>(args)...) {}
+  };
+  return std::make_shared<EnableMakeShared>(std::forward<Args>(args)...);
+}
 
 struct SparseAllPassBranchMask : public BranchMask {
   static Result<std::shared_ptr<SparseAllPassBranchMask>> Make(
       int64_t length, ExecContext* exec_context) {
-    auto branch_mask = std::make_shared<SparseAllPassBranchMask>(length);
+    auto branch_mask = MakeShared<SparseAllPassBranchMask>(length);
     RETURN_NOT_OK(branch_mask->Init(exec_context));
     return branch_mask;
   }
-
-  explicit SparseAllPassBranchMask(int64_t length) : length_(length) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -96,6 +103,9 @@ struct SparseAllPassBranchMask : public BranchMask {
 
   bool empty() const override { return false; }
 
+ protected:
+  explicit SparseAllPassBranchMask(int64_t length) : length_(length) {}
+
  private:
   int64_t length_;
 };
@@ -104,7 +114,7 @@ struct AllFailBranchMask : public BranchMask {
   static Result<std::shared_ptr<AllFailBranchMask>> Make(ExecContext* exec_context) {
     static auto branch_mask =
         [&exec_context]() -> Result<std::shared_ptr<AllFailBranchMask>> {
-      auto branch_mask = std::make_shared<AllFailBranchMask>();
+      auto branch_mask = MakeShared<AllFailBranchMask>();
       RETURN_NOT_OK(branch_mask->Init(exec_context));
       return branch_mask;
     }();
@@ -130,12 +140,13 @@ struct AllFailBranchMask : public BranchMask {
   }
 
   bool empty() const override { return true; }
+
+ protected:
+  AllFailBranchMask() = default;
 };
 
 struct BodyMask : public std::enable_shared_from_this<BodyMask> {
   virtual ~BodyMask() = default;
-
-  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
 
   virtual Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                               ExecContext* exec_context) const = 0;
@@ -147,17 +158,21 @@ struct BodyMask : public std::enable_shared_from_this<BodyMask> {
       ExecContext* exec_context) const = 0;
 
   virtual bool empty() const = 0;
+
+ protected:
+  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
 };
 
 template <typename Impl>
 struct TrivialBodyMask : public BodyMask {
   static Result<std::shared_ptr<Impl>> Make(std::shared_ptr<const BranchMask> branch_mask,
                                             ExecContext* exec_context) {
-    auto body_mask = std::make_shared<Impl>(std::move(branch_mask));
+    auto body_mask = MakeShared<Impl>(std::move(branch_mask));
     RETURN_NOT_OK(body_mask->Init(exec_context));
     return body_mask;
   }
 
+ protected:
   explicit TrivialBodyMask(std::shared_ptr<const BranchMask> branch_mask)
       : branch_mask_(std::move(branch_mask)) {}
 
@@ -188,7 +203,7 @@ struct AllNullBodyMask : public TrivialBodyMask<AllNullBodyMask> {
 
   bool empty() const override { return true; }
 
- private:
+ protected:
   using TrivialBodyMask::TrivialBodyMask;
 };
 
@@ -210,7 +225,7 @@ struct AllPassBodyMask : public TrivialBodyMask<AllPassBodyMask> {
 
   bool empty() const override { return false; }
 
- private:
+ protected:
   using TrivialBodyMask::TrivialBodyMask;
 };
 
@@ -234,7 +249,7 @@ struct AllFailBodyMask : public TrivialBodyMask<AllFailBodyMask> {
 
   bool empty() const override { return true; }
 
- private:
+ protected:
   using TrivialBodyMask::TrivialBodyMask;
 };
 
@@ -270,11 +285,12 @@ struct SparseBranchMask : public BranchMask {
 struct SparseBitmapBranchMask : public SparseBranchMask {
   static Result<std::shared_ptr<SparseBitmapBranchMask>> Make(
       std::shared_ptr<BooleanArray> bitmap, ExecContext* exec_context) {
-    auto branch_mask = std::make_shared<SparseBitmapBranchMask>(std::move(bitmap));
+    auto branch_mask = MakeShared<SparseBitmapBranchMask>(std::move(bitmap));
     RETURN_NOT_OK(branch_mask->Init(exec_context));
     return branch_mask;
   }
 
+ protected:
   explicit SparseBitmapBranchMask(std::shared_ptr<BooleanArray> bitmap)
       : SparseBranchMask(std::move(bitmap)) {}
 
@@ -289,12 +305,13 @@ struct SparseSelectionVectorBranchMask : public SparseBranchMask {
   static Result<std::shared_ptr<SparseSelectionVectorBranchMask>> Make(
       std::shared_ptr<SelectionVector> selection_vector, int64_t length,
       ExecContext* exec_context) {
-    auto branch_mask = std::make_shared<SparseSelectionVectorBranchMask>(
-        std::move(selection_vector), length);
+    auto branch_mask =
+        MakeShared<SparseSelectionVectorBranchMask>(std::move(selection_vector), length);
     RETURN_NOT_OK(branch_mask->Init(exec_context));
     return branch_mask;
   }
 
+ protected:
   SparseSelectionVectorBranchMask(std::shared_ptr<SelectionVector> selection_vector,
                                   int64_t length)
       : SparseBranchMask(std::move(selection_vector)), length_(length) {}
@@ -321,17 +338,9 @@ struct SparseBodyMask : public BodyMask {
 
   static Result<std::shared_ptr<SparseBodyMask>> Make(
       std::shared_ptr<BooleanArray> bitmap, ExecContext* exec_context) {
-    auto body_mask = std::make_shared<SparseBodyMask>(std::move(bitmap));
+    auto body_mask = MakeShared<SparseBodyMask>(std::move(bitmap));
     RETURN_NOT_OK(body_mask->Init(exec_context));
     return body_mask;
-  }
-
-  SparseBodyMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
-
-  Status Init(ExecContext* exec_context) override {
-    ARROW_ASSIGN_OR_RAISE(selection_vector_, SelectionVector::FromMask(
-                                                 *bitmap_, exec_context->memory_pool()));
-    return Status::OK();
   }
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
@@ -354,6 +363,15 @@ struct SparseBodyMask : public BodyMask {
   }
 
   bool empty() const override { return bitmap_->true_count() == 0; }
+
+ protected:
+  SparseBodyMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
+
+  Status Init(ExecContext* exec_context) override {
+    ARROW_ASSIGN_OR_RAISE(selection_vector_, SelectionVector::FromMask(
+                                                 *bitmap_, exec_context->memory_pool()));
+    return Status::OK();
+  }
 
  private:
   std::shared_ptr<BooleanArray> bitmap_ = nullptr;
@@ -397,12 +415,10 @@ Result<std::shared_ptr<const BodyMask>> SparseBranchMask::MakeBodyMask(
 struct DenseAllPassBranchMask : public BranchMask {
   static Result<std::shared_ptr<DenseAllPassBranchMask>> Make(int64_t length,
                                                               ExecContext* exec_context) {
-    auto branch_mask = std::make_shared<DenseAllPassBranchMask>(length);
+    auto branch_mask = MakeShared<DenseAllPassBranchMask>(length);
     RETURN_NOT_OK(branch_mask->Init(exec_context));
     return branch_mask;
   }
-
-  explicit DenseAllPassBranchMask(int64_t length) : length_(length) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -421,6 +437,9 @@ struct DenseAllPassBranchMask : public BranchMask {
       const Datum& datum, ExecContext* exec_context) const override;
 
   bool empty() const override { return false; }
+
+ protected:
+  explicit DenseAllPassBranchMask(int64_t length) : length_(length) {}
 
  private:
   int64_t length_;
@@ -441,13 +460,10 @@ Result<ExecBatch> TakeBySelectionVector(const ExecBatch& input,
 struct DenseBranchMask : public BranchMask {
   static Result<std::shared_ptr<DenseBranchMask>> Make(
       std::shared_ptr<SelectionVector> selection_vector, ExecContext* exec_context) {
-    auto branch_mask = std::make_shared<DenseBranchMask>(std::move(selection_vector));
+    auto branch_mask = MakeShared<DenseBranchMask>(std::move(selection_vector));
     RETURN_NOT_OK(branch_mask->Init(exec_context));
     return branch_mask;
   }
-
-  explicit DenseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
-      : selection_vector_(std::move(selection_vector)) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -467,6 +483,10 @@ struct DenseBranchMask : public BranchMask {
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
+ protected:
+  explicit DenseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
+      : selection_vector_(std::move(selection_vector)) {}
+
  private:
   std::shared_ptr<SelectionVector> selection_vector_;
 };
@@ -475,15 +495,10 @@ struct DenseBodyMask : public BodyMask {
   static Result<std::shared_ptr<DenseBodyMask>> Make(
       std::shared_ptr<SelectionVector> passed, std::shared_ptr<SelectionVector> failed,
       ExecContext* exec_context) {
-    auto body_mask =
-        std::make_shared<DenseBodyMask>(std::move(passed), std::move(failed));
+    auto body_mask = MakeShared<DenseBodyMask>(std::move(passed), std::move(failed));
     RETURN_NOT_OK(body_mask->Init(exec_context));
     return body_mask;
   }
-
-  DenseBodyMask(std::shared_ptr<SelectionVector> passed,
-                std::shared_ptr<SelectionVector> failed)
-      : passed_(std::move(passed)), failed_(std::move(failed)) {}
 
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
@@ -503,6 +518,11 @@ struct DenseBodyMask : public BodyMask {
   }
 
   bool empty() const override { return passed_->length() == 0; }
+
+ protected:
+  DenseBodyMask(std::shared_ptr<SelectionVector> passed,
+                std::shared_ptr<SelectionVector> failed)
+      : passed_(std::move(passed)), failed_(std::move(failed)) {}
 
  private:
   std::shared_ptr<SelectionVector> passed_;
