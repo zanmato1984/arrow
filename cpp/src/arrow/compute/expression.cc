@@ -208,7 +208,12 @@ std::string Expression::ToString() const {
   }
 
   if (auto sp = special()) {
-    return sp->special_form->name + "(special)";
+    std::string out = sp->special_form->name + "_special(";
+    for (const auto& arg : sp->arguments) {
+      out += arg.ToString() + ", ";
+    }
+    out.resize(out.size() - 2);
+    return out + ")";
   }
 
   auto call = CallNotNull(*this);
