@@ -313,22 +313,24 @@ struct SparseBodyMask : public BodyMask {
   static Result<std::shared_ptr<SparseBodyMask>> Make(
       std::shared_ptr<BooleanArray> cond_bitmap,
       std::shared_ptr<BooleanArray> body_bitmap, ExecContext* exec_context) {
-    auto body_mask =
-        std::make_shared<SparseBodyMask>(std::move(cond_bitmap), std::move(body_bitmap));
+    DCHECK_EQ(cond_bitmap->length(), body_bitmap->length());
+    ARROW_ASSIGN_OR_RAISE(auto datum, And(*cond_bitmap, *body_bitmap, exec_context));
+    auto bitmap = datum.array_as<BooleanArray>();
+    return Make(std::move(bitmap), exec_context);
+  }
+
+  static Result<std::shared_ptr<SparseBodyMask>> Make(
+      std::shared_ptr<BooleanArray> bitmap, ExecContext* exec_context) {
+    auto body_mask = std::make_shared<SparseBodyMask>(std::move(bitmap));
     RETURN_NOT_OK(body_mask->Init(exec_context));
     return body_mask;
   }
 
-  SparseBodyMask(std::shared_ptr<BooleanArray> cond_bitmap,
-                 std::shared_ptr<BooleanArray> body_bitmap)
-      : cond_bitmap_(std::move(cond_bitmap)), body_bitmap_(std::move(body_bitmap)) {}
+  SparseBodyMask(std::shared_ptr<BooleanArray> bitmap) : bitmap_(std::move(bitmap)) {}
 
   Status Init(ExecContext* exec_context) override {
-    DCHECK_EQ(cond_bitmap_->length(), body_bitmap_->length());
-    RETURN_NOT_OK(ComputeCanonicalBitmap(exec_context));
-    ARROW_ASSIGN_OR_RAISE(
-        selection_vector_,
-        SelectionVector::FromMask(*canonical_bitmap_, exec_context->memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(selection_vector_, SelectionVector::FromMask(
+                                                 *bitmap_, exec_context->memory_pool()));
     return Status::OK();
   }
 
@@ -346,26 +348,15 @@ struct SparseBodyMask : public BodyMask {
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask(
       ExecContext* exec_context) const override {
-    ARROW_ASSIGN_OR_RAISE(auto datum,
-                          KleeneAndNot(*cond_bitmap_, *body_bitmap_, exec_context));
-    auto not_bitmap = datum.array_as<BooleanArray>();
-    return SparseBitmapBranchMask::Make(std::move(not_bitmap), exec_context);
+    ARROW_ASSIGN_OR_RAISE(auto datum, Invert(*bitmap_, exec_context));
+    auto inverted = datum.array_as<BooleanArray>();
+    return SparseBitmapBranchMask::Make(std::move(inverted), exec_context);
   }
 
-  bool empty() const override { return canonical_bitmap_->true_count() == 0; }
+  bool empty() const override { return bitmap_->true_count() == 0; }
 
  private:
-  Status ComputeCanonicalBitmap(ExecContext* exec_context) {
-    ARROW_ASSIGN_OR_RAISE(auto datum,
-                          KleeneAnd(*cond_bitmap_, *body_bitmap_, exec_context));
-    canonical_bitmap_ = datum.array_as<BooleanArray>();
-    return Status::OK();
-  }
-
- private:
-  std::shared_ptr<BooleanArray> cond_bitmap_;
-  std::shared_ptr<BooleanArray> body_bitmap_;
-  std::shared_ptr<BooleanArray> canonical_bitmap_ = nullptr;
+  std::shared_ptr<BooleanArray> bitmap_ = nullptr;
   std::shared_ptr<SelectionVector> selection_vector_ = nullptr;
 };
 
@@ -388,13 +379,8 @@ Result<std::shared_ptr<const BodyMask>> SparseAllPassBranchMask::MakeBodyMask(
     auto scalar = datum.scalar_as<BooleanScalar>();
     return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
   }
-  ARROW_ASSIGN_OR_RAISE(
-      auto cond_bitmap,
-      MakeArrayFromScalar(BooleanScalar(true), length_, exec_context->memory_pool()));
-  auto body_bitmap = datum.array_as<BooleanArray>();
-  return SparseBodyMask::Make(
-      arrow::internal::checked_pointer_cast<BooleanArray>(cond_bitmap),
-      std::move(body_bitmap), exec_context);
+  auto bitmap = datum.array_as<BooleanArray>();
+  return SparseBodyMask::Make(std::move(bitmap), exec_context);
 }
 
 Result<std::shared_ptr<const BodyMask>> SparseBranchMask::MakeBodyMask(
@@ -761,7 +747,8 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
     }
 
     if (results.size() == 1) {
-      if (!results.selection_vectors()[0] || results.selection_vectors()[0]->length()) {
+      if (!results.selection_vectors()[0] ||
+          results.selection_vectors()[0]->length() == input.length) {
         return results.values()[0];
       }
       return Scatter({results.values()[0]},
