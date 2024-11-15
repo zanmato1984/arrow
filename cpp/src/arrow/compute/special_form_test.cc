@@ -31,8 +31,8 @@ namespace arrow::compute {
 
 namespace {
 
-Status HaltExec(KernelContext*, const ExecSpan&, ExecResult*) {
-  return Status::Invalid("Halting");
+Status UnreachableExec(KernelContext*, const ExecSpan&, ExecResult*) {
+  return Status::Invalid("Unreachable");
 }
 
 Status IdentityExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
@@ -62,11 +62,11 @@ static Status RegisterAuxilaryFunctions() {
   auto registry = GetFunctionRegistry();
 
   {
-    auto register_halt_func = [&](const std::string& name) -> Status {
+    auto register_unreachable_func = [&](const std::string& name) -> Status {
       auto func =
           std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-      ArrayKernelExec exec = HaltExec;
+      ArrayKernelExec exec = UnreachableExec;
       ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
       kernel.selection_vector_aware = true;
       kernel.can_write_into_slices = false;
@@ -77,7 +77,7 @@ static Status RegisterAuxilaryFunctions() {
       return Status::OK();
     };
 
-    RETURN_NOT_OK(register_halt_func("halt"));
+    RETURN_NOT_OK(register_unreachable_func("unreachable"));
   }
 
   {
@@ -136,7 +136,7 @@ Expression if_else_expr(Expression cond, Expression if_true, Expression if_false
   return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
 
-Expression halt(Expression arg) { return call("halt", {std::move(arg)}); }
+Expression unreachable(Expression arg) { return call("unreachable", {std::move(arg)}); }
 
 Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
 
@@ -296,8 +296,9 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
   auto a = field_ref("a");
   auto batch = ExecBatch({*ArrayFromJSON(boolean(), "[null, true, false]")}, 3);
   {
-    ARROW_SCOPED_TRACE("halt");
-    AssertExprRaisesWithMessage(halt(a), schema, batch, Invalid, "Invalid: Halting");
+    ARROW_SCOPED_TRACE("unreachable");
+    AssertExprRaisesWithMessage(unreachable(a), schema, batch, Invalid,
+                                "Invalid: Unreachable");
   }
   {
     ARROW_SCOPED_TRACE("selection vector awareness");
@@ -412,7 +413,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     for (const auto& cond :
          {boolean_null, b_null, assert_sv_empty(boolean_null), assert_sv_empty(b_null)}) {
       ARROW_SCOPED_TRACE(cond.ToString());
-      auto if_else_sp = if_else_special(cond, halt(i1), halt(i2));
+      auto if_else_sp = if_else_special(cond, unreachable(i1), unreachable(i2));
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
   }
@@ -420,12 +421,13 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     ARROW_SCOPED_TRACE("all true condition");
     auto expected = ArrayFromJSON(int32(), "[0, 1, -1]");
     for (const auto& if_else_sp :
-         {if_else_special(literal(true), i1, halt(i2)),
-          if_else_special(b_true, i1, halt(i2)),
-          if_else_special(assert_sv_empty(literal(true)), assert_sv_empty(i1), halt(i2)),
-          if_else_special(assert_sv_empty(b_true), assert_sv_exist(i1), halt(i2)),
+         {if_else_special(literal(true), i1, unreachable(i2)),
+          if_else_special(b_true, i1, unreachable(i2)),
+          if_else_special(assert_sv_empty(literal(true)), assert_sv_empty(i1),
+                          unreachable(i2)),
+          if_else_special(assert_sv_empty(b_true), assert_sv_exist(i1), unreachable(i2)),
           if_else_special(assert_sv_empty(b_true), assert_sv_empty(i1),
-                          sv_unaware(halt(i2)))}) {
+                          sv_unaware(unreachable(i2)))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
@@ -434,11 +436,12 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     ARROW_SCOPED_TRACE("all false condition");
     auto expected = ArrayFromJSON(int32(), "[0, -1, 1]");
     for (const auto& if_else_sp :
-         {if_else_special(literal(false), halt(i1), i2),
-          if_else_special(b_false, halt(i1), i2),
-          if_else_special(assert_sv_empty(literal(false)), halt(i1), assert_sv_empty(i2)),
-          if_else_special(assert_sv_empty(b_false), halt(i1), assert_sv_exist(i2)),
-          if_else_special(assert_sv_empty(b_false), sv_unaware(halt(i1)),
+         {if_else_special(literal(false), unreachable(i1), i2),
+          if_else_special(b_false, unreachable(i1), i2),
+          if_else_special(assert_sv_empty(literal(false)), unreachable(i1),
+                          assert_sv_empty(i2)),
+          if_else_special(assert_sv_empty(b_false), unreachable(i1), assert_sv_exist(i2)),
+          if_else_special(assert_sv_empty(b_false), sv_unaware(unreachable(i1)),
                           assert_sv_empty(i2))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
@@ -450,7 +453,109 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     for (const auto& if_else_sp :
          {if_else_special(b, i1, i2),
           if_else_special(assert_sv_empty(b), assert_sv_exist(i1), assert_sv_exist(i2)),
-          if_else_special(sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2))}) {
+          // TODO: This may not hold in the future.
+          if_else_special(sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2)),
+          if_else_special(b, sv_unaware(i1), assert_sv_empty(i2)),
+          if_else_special(b, assert_sv_empty(i1), sv_unaware(i2))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("nested");
+    auto expected = ArrayFromJSON(int32(), "[null, 1, 1]");
+    for (const auto& if_else_sp :
+         {if_else_special(b, if_else_special(b, i1, i2), if_else_special(b, i1, i2)),
+          // The nested if_else_special will see a selection vector.
+          if_else_special(b, assert_sv_exist(if_else_special(b, i1, i2)),
+                          assert_sv_exist(if_else_special(b, i1, i2))),
+          // The arguments of nested if_else_special will see a selection vector.
+          if_else_special(b,
+                          if_else_special(assert_sv_exist(literal(true)),
+                                          assert_sv_exist(i1), unreachable(i2)),
+                          if_else_special(assert_sv_exist(literal(false)),
+                                          unreachable(i1), assert_sv_exist(i2))),
+          if_else_special(b,
+                          if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                          assert_sv_exist(i2)),
+                          if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                          assert_sv_exist(i2))),
+          // Selection vector existences with some argument of the nested
+          // if_else_special being selection vector unaware.
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(sv_unaware(literal(true)),
+                                              assert_sv_empty(i1), unreachable(i2))),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+                                              unreachable(i1), assert_sv_exist(i2)))),
+          if_else_special(b,
+                          assert_sv_exist(if_else_special(
+                              sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2))),
+                          assert_sv_exist(if_else_special(
+                              assert_sv_exist(b), unreachable(i1), assert_sv_exist(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
+                                              sv_unaware(i1), unreachable(i2))),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+                                              unreachable(i1), assert_sv_exist(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_unaware(i1),
+                                              assert_sv_empty(i2))),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
+                                              assert_sv_empty(i1),
+                                              sv_unaware(unreachable(i2)))),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+                                              unreachable(i1), assert_sv_exist(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
+                                              sv_unaware(i2))),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+                                              assert_sv_exist(i1), unreachable(i2))),
+              assert_sv_exist(if_else_special(sv_unaware(literal(false)), unreachable(i1),
+                                              assert_sv_empty(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2))),
+              assert_sv_exist(if_else_special(sv_unaware(b), assert_sv_empty(i1),
+                                              assert_sv_empty(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+                                              assert_sv_exist(i1), unreachable(i2))),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
+                                              sv_unaware(unreachable(i1)),
+                                              assert_sv_empty(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2))),
+              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_unaware(i1),
+                                              assert_sv_empty(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+                                              assert_sv_exist(i1), unreachable(i2))),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
+                                              assert_sv_empty(unreachable(i1)),
+                                              sv_unaware(i2)))),
+          if_else_special(
+              b,
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2))),
+              assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
+                                              sv_unaware(i2))))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }

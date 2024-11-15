@@ -49,6 +49,8 @@ Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments
 
 namespace {
 
+// TODO: Consider evaluating cond (sparsely VS. densely) independently of the body.
+
 struct BodyMask;
 
 struct BranchMask : public std::enable_shared_from_this<BranchMask> {
