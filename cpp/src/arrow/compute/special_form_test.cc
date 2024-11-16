@@ -98,7 +98,7 @@ static Status RegisterAuxilaryFunctions() {
     };
 
     RETURN_NOT_OK(register_sv_awareness_func("sv_aware", true));
-    RETURN_NOT_OK(register_sv_awareness_func("sv_unaware", false));
+    RETURN_NOT_OK(register_sv_awareness_func("sv_suppress", false));
   }
 
   {
@@ -140,7 +140,7 @@ Expression unreachable(Expression arg) { return call("unreachable", {std::move(a
 
 Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
 
-Expression sv_unaware(Expression arg) { return call("sv_unaware", {std::move(arg)}); }
+Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
 
 Expression assert_sv_exist(Expression arg) {
   return call("assert_sv_exist", {std::move(arg)});
@@ -150,24 +150,34 @@ Expression assert_sv_empty(Expression arg) {
   return call("assert_sv_empty", {std::move(arg)});
 }
 
-Expression wrap_if_else_special_with_sv_aware(Expression cond, Expression if_true,
-                                              Expression if_false) {
-  return sv_aware(if_else_special(sv_aware(cond), sv_aware(if_true), sv_aware(if_false)));
-}
-
-Expression wrap_if_else_special_with_sv_unaware(Expression cond, Expression if_true,
-                                                Expression if_false) {
-  return sv_unaware(
-      if_else_special(sv_unaware(cond), sv_unaware(if_true), sv_unaware(if_false)));
-}
-
-std::vector<Expression> WrapSelectionVectorAwareness(Expression cond, Expression if_true,
-                                                     Expression if_false) {
-  return {
-      if_else_special(cond, if_true, if_false),
-      wrap_if_else_special_with_sv_aware(cond, if_true, if_false),
-      wrap_if_else_special_with_sv_unaware(cond, if_true, if_false),
+std::vector<Expression> SuppressSelectionVectorAwareForIfElse(
+    const Expression& cond, const Expression& if_true, const Expression& if_false) {
+  auto suppress_if_else_recursive =
+      [&](const Expression& expr) -> std::vector<Expression> {
+    if (const auto& sp = expr.special(); sp && sp->special_form->name == "if_else") {
+      const auto& cond = sp->arguments[0];
+      const auto& if_true = sp->arguments[1];
+      const auto& if_false = sp->arguments[2];
+      return SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
+    } else {
+      return {expr};
+    }
   };
+  auto suppressed_conds = suppress_if_else_recursive(cond);
+  auto suppressed_if_trues = suppress_if_else_recursive(if_true);
+  auto suppressed_if_falses = suppress_if_else_recursive(if_false);
+  std::vector<Expression> result;
+  for (const auto& suppressed_cond : suppressed_conds) {
+    for (const auto& suppressed_if_true : suppressed_if_trues) {
+      for (const auto& suppressed_if_false : suppressed_if_falses) {
+        result.emplace_back(
+            if_else_special(suppressed_cond, suppressed_if_true, suppressed_if_false));
+        result.emplace_back(if_else_special(suppressed_cond, suppressed_if_true,
+                                            sv_suppress(suppressed_if_false)));
+      }
+    }
+  }
+  return result;
 }
 
 void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
@@ -205,24 +215,21 @@ void AssertExprEqualIgnoreShape(const Expression& expr,
 #define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message) \
   { ASSERT_RAISES_WITH_MESSAGE(ENUM, message, ExecuteExpr(expr, schema, batch)); }
 
-void AssertExprsEqualIgnoreShape(const std::vector<Expression>& exprs,
-                                 const std::shared_ptr<Schema>& schema,
-                                 const ExecBatch& batch, const Datum& expected) {
-  for (const auto& expr : exprs) {
-    AssertExprEqualIgnoreShape(expr, schema, batch, expected);
+void AssertExprEqualExprs(const Expression& expr, const std::vector<Expression>& exprs,
+                          const std::shared_ptr<Schema>& schema, const ExecBatch& batch) {
+  ASSERT_OK_AND_ASSIGN(auto expected, ExecuteExpr(expr, schema, batch));
+  for (const auto& e : exprs) {
+    ARROW_SCOPED_TRACE(e.ToString());
+    AssertExprEqualIgnoreShape(e, schema, batch, expected);
   }
 }
 
-void AssertIfElseEqualWithExpr(const Expression& cond, const Expression& if_true,
-                               const Expression& if_false,
-                               const std::shared_ptr<Schema>& schema,
-                               const ExecBatch& batch) {
+void CheckIfElse(const Expression& cond, const Expression& if_true,
+                 const Expression& if_false, const std::shared_ptr<Schema>& schema,
+                 const ExecBatch& batch) {
   auto if_else = if_else_expr(cond, if_true, if_false);
-  ASSERT_OK_AND_ASSIGN(auto bound, if_else.Bind(*schema));
-  ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-  // Test using original/sv_aware(original)/sv_unaware(original).
-  auto exprs = WrapSelectionVectorAwareness(cond, if_true, if_false);
-  AssertExprsEqualIgnoreShape(exprs, schema, batch, result);
+  auto exprs = SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
+  AssertExprEqualExprs(if_else, exprs, schema, batch);
 }
 
 }  // namespace
@@ -307,7 +314,7 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       ASSERT_TRUE(bound.selection_vector_aware());
     }
     {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_unaware(a).Bind(*schema));
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_suppress(a).Bind(*schema));
       ASSERT_FALSE(bound.selection_vector_aware());
     }
     {
@@ -315,11 +322,11 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       ASSERT_TRUE(bound.selection_vector_aware());
     }
     {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_unaware(a)).Bind(*schema));
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_suppress(a)).Bind(*schema));
       ASSERT_FALSE(bound.selection_vector_aware());
     }
     {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_unaware(sv_aware(a)).Bind(*schema));
+      ASSERT_OK_AND_ASSIGN(auto bound, sv_suppress(sv_aware(a)).Bind(*schema));
       ASSERT_FALSE(bound.selection_vector_aware());
     }
   }
@@ -338,7 +345,7 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       }
       {
         auto if_else_sp =
-            if_else_special(sv_unaware(cond), assert_sv_exist(if_true), if_false);
+            if_else_special(sv_suppress(cond), assert_sv_exist(if_true), if_false);
         AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
                                     "Invalid: There is no selection vector");
       }
@@ -348,7 +355,7 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
                                     "Invalid: There is a selection vector");
       }
       {
-        auto if_else_sp = if_else_special(sv_unaware(cond), assert_sv_empty(if_true),
+        auto if_else_sp = if_else_special(sv_suppress(cond), assert_sv_empty(if_true),
                                           assert_sv_empty(if_false));
         AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
@@ -378,9 +385,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwareness) {
   auto if_true = literal(1);
   auto if_false = literal(0);
   for (const auto& if_else_sp : {if_else_special(cond, if_true, if_false),
-                                 if_else_special(sv_unaware(cond), if_true, if_false),
-                                 if_else_special(cond, sv_unaware(if_true), if_false),
-                                 if_else_special(cond, if_true, sv_unaware(if_false))}) {
+                                 if_else_special(sv_suppress(cond), if_true, if_false),
+                                 if_else_special(cond, sv_suppress(if_true), if_false),
+                                 if_else_special(cond, if_true, sv_suppress(if_false))}) {
     ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
     ASSERT_TRUE(bound.selection_vector_aware());
   }
@@ -427,7 +434,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                           unreachable(i2)),
           if_else_special(assert_sv_empty(b_true), assert_sv_exist(i1), unreachable(i2)),
           if_else_special(assert_sv_empty(b_true), assert_sv_empty(i1),
-                          sv_unaware(unreachable(i2)))}) {
+                          sv_suppress(unreachable(i2)))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
@@ -441,7 +448,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
           if_else_special(assert_sv_empty(literal(false)), unreachable(i1),
                           assert_sv_empty(i2)),
           if_else_special(assert_sv_empty(b_false), unreachable(i1), assert_sv_exist(i2)),
-          if_else_special(assert_sv_empty(b_false), sv_unaware(unreachable(i1)),
+          if_else_special(assert_sv_empty(b_false), sv_suppress(unreachable(i1)),
                           assert_sv_empty(i2))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
@@ -454,9 +461,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
          {if_else_special(b, i1, i2),
           if_else_special(assert_sv_empty(b), assert_sv_exist(i1), assert_sv_exist(i2)),
           // TODO: This may not hold in the future.
-          if_else_special(sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2)),
-          if_else_special(b, sv_unaware(i1), assert_sv_empty(i2)),
-          if_else_special(b, assert_sv_empty(i1), sv_unaware(i2))}) {
+          if_else_special(sv_suppress(b), assert_sv_empty(i1), assert_sv_empty(i2)),
+          if_else_special(b, sv_suppress(i1), assert_sv_empty(i2)),
+          if_else_special(b, assert_sv_empty(i1), sv_suppress(i2))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
@@ -484,24 +491,24 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
           // if_else_special being selection vector unaware.
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(sv_unaware(literal(true)),
+              assert_sv_exist(if_else_special(sv_suppress(literal(true)),
                                               assert_sv_empty(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(b,
                           assert_sv_exist(if_else_special(
-                              sv_unaware(b), assert_sv_empty(i1), assert_sv_empty(i2))),
+                              sv_suppress(b), assert_sv_empty(i1), assert_sv_empty(i2))),
                           assert_sv_exist(if_else_special(
                               assert_sv_exist(b), unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
-                                              sv_unaware(i1), unreachable(i2))),
+                                              sv_suppress(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_unaware(i1),
+              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_suppress(i1),
                                               assert_sv_empty(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2)))),
@@ -509,39 +516,39 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
               b,
               assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               assert_sv_empty(i1),
-                                              sv_unaware(unreachable(i2)))),
+                                              sv_suppress(unreachable(i2)))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
-                                              sv_unaware(i2))),
+                                              sv_suppress(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(sv_unaware(literal(false)), unreachable(i1),
-                                              assert_sv_empty(i2)))),
+              assert_sv_exist(if_else_special(sv_suppress(literal(false)),
+                                              unreachable(i1), assert_sv_empty(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
-              assert_sv_exist(if_else_special(sv_unaware(b), assert_sv_empty(i1),
+              assert_sv_exist(if_else_special(sv_suppress(b), assert_sv_empty(i1),
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
-                                              sv_unaware(unreachable(i1)),
+                                              sv_suppress(unreachable(i1)),
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
-              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_unaware(i1),
+              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_suppress(i1),
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
@@ -549,13 +556,13 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               assert_sv_exist(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               assert_sv_empty(unreachable(i1)),
-                                              sv_unaware(i2)))),
+                                              sv_suppress(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
               assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
-                                              sv_unaware(i2))))}) {
+                                              sv_suppress(i2))))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
@@ -582,7 +589,7 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
       auto expected = ArrayFromJSON(int32(), "[null, null, null]");
       for (const auto& cond : {boolean_null, b_null}) {
         for (const auto& if_else_sp :
-             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
           ARROW_SCOPED_TRACE(if_else_sp.ToString());
           ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
           AssertDatumsEqual(expected, result);
@@ -594,7 +601,7 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
       auto expected = MakeScalar(1);
       for (const auto& cond : {literal(true), b_true}) {
         for (const auto& if_else_sp :
-             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
           ARROW_SCOPED_TRACE(if_else_sp.ToString());
           ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
           AssertDatumsEqual(expected, result);
@@ -606,7 +613,46 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
       auto expected = MakeScalar(0);
       for (const auto& cond : {literal(false), b_false}) {
         for (const auto& if_else_sp :
-             WrapSelectionVectorAwareness(cond, literal(1), literal(0))) {
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+    {
+      ARROW_SCOPED_TRACE("if (if (null) true then false) then 1 else 0");
+      auto expected = ArrayFromJSON(int32(), "[null, null, null]");
+      for (const auto& nested_cond : {boolean_null, b_null}) {
+        auto cond = if_else_special(nested_cond, literal(true), literal(false));
+        for (const auto& if_else_sp :
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+    {
+      ARROW_SCOPED_TRACE("if (if (true) then true else false) then 1 else 0");
+      auto expected = MakeScalar(1);
+      for (const auto& nested_cond : {literal(true), b_true}) {
+        auto cond = if_else_special(nested_cond, nested_cond, literal(false));
+        for (const auto& if_else_sp :
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+          ARROW_SCOPED_TRACE(if_else_sp.ToString());
+          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+          AssertDatumsEqual(expected, result);
+        }
+      }
+    }
+    {
+      ARROW_SCOPED_TRACE("if (if (false) then true else false) then 1 else 0");
+      auto expected = MakeScalar(0);
+      for (const auto& nested_cond : {literal(false), b_false}) {
+        auto cond = if_else_special(nested_cond, literal(true), nested_cond);
+        for (const auto& if_else_sp :
+             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
           ARROW_SCOPED_TRACE(if_else_sp.ToString());
           ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
           AssertDatumsEqual(expected, result);
@@ -623,16 +669,16 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
     for (const auto& batch : batches) {
       {
         ARROW_SCOPED_TRACE("if (null) then 1 else 0");
-        AssertIfElseEqualWithExpr(literal(MakeNullScalar(boolean())), literal(1),
-                                  literal(0), schema, batch);
+        CheckIfElse(literal(MakeNullScalar(boolean())), literal(1), literal(0), schema,
+                    batch);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then 1 else 0");
-        AssertIfElseEqualWithExpr(literal(true), literal(1), literal(0), schema, batch);
+        CheckIfElse(literal(true), literal(1), literal(0), schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then 1 else 0");
-        AssertIfElseEqualWithExpr(literal(false), literal(1), literal(0), schema, batch);
+        CheckIfElse(literal(false), literal(1), literal(0), schema, batch);
       }
     }
   }
@@ -656,23 +702,23 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
     for (const auto& batch : batches) {
       {
         ARROW_SCOPED_TRACE("if (null) then a else b");
-        AssertIfElseEqualWithExpr(boolean_null, a, b, schema, batch);
+        CheckIfElse(boolean_null, a, b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then 0 else b");
-        AssertIfElseEqualWithExpr(literal(true), literal(0), b, schema, batch);
+        CheckIfElse(literal(true), literal(0), b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (true) then a else b");
-        AssertIfElseEqualWithExpr(literal(true), a, b, schema, batch);
+        CheckIfElse(literal(true), a, b, schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else 1");
-        AssertIfElseEqualWithExpr(literal(false), a, literal(1), schema, batch);
+        CheckIfElse(literal(false), a, literal(1), schema, batch);
       }
       {
         ARROW_SCOPED_TRACE("if (false) then a else b");
-        AssertIfElseEqualWithExpr(literal(false), a, b, schema, batch);
+        CheckIfElse(literal(false), a, b, schema, batch);
       }
     }
   }
@@ -721,12 +767,33 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
     };
     for (const auto& batch : batches) {
       {
-        ARROW_SCOPED_TRACE("if (a) then b else c");
-        AssertIfElseEqualWithExpr(a, b, c, schema, batch);
+        ARROW_SCOPED_TRACE("if (a) then 1 else 0");
+        CheckIfElse(a, literal(1), literal(0), schema, batch);
       }
       {
-        ARROW_SCOPED_TRACE("if (a) then 1 else 0");
-        AssertIfElseEqualWithExpr(a, literal(1), literal(0), schema, batch);
+        ARROW_SCOPED_TRACE("if (a) then b else c");
+        CheckIfElse(a, b, c, schema, batch);
+      }
+      for (const auto& nested_cond : {boolean_null, literal(true), literal(false), a}) {
+        for (const auto& nested_if_true :
+             {boolean_null, literal(true), literal(false), a}) {
+          for (const auto& nested_if_false :
+               {boolean_null, literal(true), literal(false), a}) {
+            auto nested_if_else_sp =
+                if_else_special(nested_cond, nested_if_true, nested_if_false);
+            for (const auto& if_true : {literal(0), literal(1), b}) {
+              for (const auto& if_false : {literal(0), literal(1), c}) {
+                ARROW_SCOPED_TRACE(
+                    if_else_special(nested_if_else_sp, if_true, if_false).ToString());
+                ASSERT_OK_AND_ASSIGN(
+                    auto r,
+                    ExecuteExpr(if_else_special(nested_if_else_sp, if_true, if_false),
+                                schema, batch));
+                CheckIfElse(nested_if_else_sp, if_true, if_false, schema, batch);
+              }
+            }
+          }
+        }
       }
     }
   }

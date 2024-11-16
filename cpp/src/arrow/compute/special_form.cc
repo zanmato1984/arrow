@@ -700,17 +700,24 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
                                        const BranchResults& results,
                                        ExecContext* exec_context) const {
     if (results.empty()) {
+      // return MakeNullScalar(result_type_);
       return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
     }
 
     if (results.size() == 1) {
-      return results.values()[0];
+      if (const auto& result = results.values()[0];
+          results.selection_vectors()[0] == nullptr ||
+          results.selection_vectors()[0]->length() ==
+              (input.selection_vector ? input.selection_vector->length()
+                                      : input.length)) {
+        return result;
+      }
     }
 
     std::vector<Datum> choose_args;
     choose_args.reserve(results.size() + 1);
-    ARROW_ASSIGN_OR_RAISE(auto indices, ComputeChooseIndices(results.selection_vectors(),
-                                                             input.length, exec_context));
+    ARROW_ASSIGN_OR_RAISE(auto indices, ChooseIndices(results.selection_vectors(),
+                                                      input.length, exec_context));
     choose_args.emplace_back(std::move(indices));
     choose_args.insert(choose_args.end(), results.values().begin(),
                        results.values().end());
@@ -718,7 +725,7 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
   }
 
  private:
-  Result<Datum> ComputeChooseIndices(
+  Result<Datum> ChooseIndices(
       const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
       int64_t length, ExecContext* exec_context) const {
     const int64_t validity_bytes = bit_util::BytesForBits(length);
@@ -765,6 +772,7 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
                                        const BranchResults& results,
                                        ExecContext* exec_context) const {
     if (results.empty()) {
+      // return MakeNullScalar(result_type_);
       return MakeArrayOfNull(result_type_, input.length, exec_context->memory_pool());
     }
 
@@ -773,9 +781,6 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
           results.selection_vectors()[0]->length() == input.length) {
         return results.values()[0];
       }
-      return Scatter({results.values()[0]},
-                     {MakeArray(results.selection_vectors()[0]->data())},
-                     ScatterOptions{/*max_index=*/input.length - 1});
     }
 
     ARROW_ASSIGN_OR_RAISE(
