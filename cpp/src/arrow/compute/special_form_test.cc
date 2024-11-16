@@ -774,11 +774,10 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
         ARROW_SCOPED_TRACE("if (a) then b else c");
         CheckIfElse(a, b, c, schema, batch);
       }
-      for (const auto& nested_cond : {boolean_null, literal(true), literal(false), a}) {
-        for (const auto& nested_if_true :
-             {boolean_null, literal(true), literal(false), a}) {
-          for (const auto& nested_if_false :
-               {boolean_null, literal(true), literal(false), a}) {
+      auto boolean_datums = {boolean_null, literal(true), literal(false), a};
+      for (const auto& nested_cond : boolean_datums) {
+        for (const auto& nested_if_true : boolean_datums) {
+          for (const auto& nested_if_false : boolean_datums) {
             auto nested_if_else_sp =
                 if_else_special(nested_cond, nested_if_true, nested_if_false);
             for (const auto& if_true : {literal(0), literal(1), b}) {
