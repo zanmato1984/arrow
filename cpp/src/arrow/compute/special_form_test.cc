@@ -130,22 +130,18 @@ static Status RegisterAuxilaryFunctions() {
   return Status::OK();
 }
 
-auto boolean_null = literal(MakeNullScalar(boolean()));
+auto kBooleanNull = literal(MakeNullScalar(boolean()));
+auto kIntNull = literal(MakeNullScalar(int32()));
 
 Expression if_else_expr(Expression cond, Expression if_true, Expression if_false) {
   return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
-
 Expression unreachable(Expression arg) { return call("unreachable", {std::move(arg)}); }
-
 Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
-
 Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
-
 Expression assert_sv_exist(Expression arg) {
   return call("assert_sv_exist", {std::move(arg)});
 }
-
 Expression assert_sv_empty(Expression arg) {
   return call("assert_sv_empty", {std::move(arg)});
 }
@@ -205,6 +201,9 @@ Result<Datum> ExecuteExpr(const Expression& expr, const std::shared_ptr<Schema>&
   return ExecuteScalarExpression(bound, batch);
 }
 
+#define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message) \
+  { ASSERT_RAISES_WITH_MESSAGE(ENUM, message, ExecuteExpr(expr, schema, batch)); }
+
 void AssertExprEqualIgnoreShape(const Expression& expr,
                                 const std::shared_ptr<Schema>& schema,
                                 const ExecBatch& batch, const Datum& expected) {
@@ -212,11 +211,10 @@ void AssertExprEqualIgnoreShape(const Expression& expr,
   AssertEqualIgnoreShape(expected, result);
 }
 
-#define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message) \
-  { ASSERT_RAISES_WITH_MESSAGE(ENUM, message, ExecuteExpr(expr, schema, batch)); }
-
-void AssertExprEqualExprs(const Expression& expr, const std::vector<Expression>& exprs,
-                          const std::shared_ptr<Schema>& schema, const ExecBatch& batch) {
+void AssertExprEqualExprsIgnoreShape(const Expression& expr,
+                                     const std::vector<Expression>& exprs,
+                                     const std::shared_ptr<Schema>& schema,
+                                     const ExecBatch& batch) {
   ASSERT_OK_AND_ASSIGN(auto expected, ExecuteExpr(expr, schema, batch));
   for (const auto& e : exprs) {
     ARROW_SCOPED_TRACE(e.ToString());
@@ -224,12 +222,13 @@ void AssertExprEqualExprs(const Expression& expr, const std::vector<Expression>&
   }
 }
 
-void CheckIfElse(const Expression& cond, const Expression& if_true,
-                 const Expression& if_false, const std::shared_ptr<Schema>& schema,
-                 const ExecBatch& batch) {
+void CheckIfElseIgnoreShape(const Expression& cond, const Expression& if_true,
+                            const Expression& if_false,
+                            const std::shared_ptr<Schema>& schema,
+                            const ExecBatch& batch) {
   auto if_else = if_else_expr(cond, if_true, if_false);
   auto exprs = SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
-  AssertExprEqualExprs(if_else, exprs, schema, batch);
+  AssertExprEqualExprsIgnoreShape(if_else, exprs, schema, batch);
 }
 
 }  // namespace
@@ -418,8 +417,8 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     ARROW_SCOPED_TRACE("all null condition");
     auto expected = ArrayFromJSON(int32(), "[null, null, null]");
     for (const auto& cond :
-         {boolean_null, b_null, assert_sv_empty(boolean_null), assert_sv_empty(b_null)}) {
-      ARROW_SCOPED_TRACE(cond.ToString());
+         {kBooleanNull, b_null, assert_sv_empty(kBooleanNull), assert_sv_empty(b_null)}) {
+      ARROW_SCOPED_TRACE("cond: " + cond.ToString());
       auto if_else_sp = if_else_special(cond, unreachable(i1), unreachable(i2));
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
     }
@@ -569,227 +568,215 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
   }
 }
 
-TEST_F(IfElseSpecialFormTest, Shortcut) {
+TEST_F(IfElseSpecialFormTest, ResultShape) {
+  auto schema = arrow::schema({field("b_null", boolean()), field("b_true", boolean()),
+                               field("b_false", boolean())});
+  auto b_null = field_ref("b_null");
+  auto b_true = field_ref("b_true");
+  auto b_false = field_ref("b_false");
+  auto batch = ExecBatch(
+      {
+          *ArrayFromJSON(boolean(), "[null, null, null]"),
+          *ArrayFromJSON(boolean(), "[true, true, true]"),
+          *ArrayFromJSON(boolean(), "[false, false, false]"),
+      },
+      3);
   {
-    ARROW_SCOPED_TRACE("scalar branch");
-    auto schema = arrow::schema({field("b_null", boolean()), field("b_true", boolean()),
-                                 field("b_false", boolean())});
-    auto b_null = field_ref("b_null");
-    auto b_true = field_ref("b_true");
-    auto b_false = field_ref("b_false");
-    auto batch = ExecBatch(
-        {
-            *ArrayFromJSON(boolean(), "[null, null, null]"),
-            *ArrayFromJSON(boolean(), "[true, true, true]"),
-            *ArrayFromJSON(boolean(), "[false, false, false]"),
-        },
-        3);
-    {
-      ARROW_SCOPED_TRACE("if (null) then 1 else 0");
-      auto expected = ArrayFromJSON(int32(), "[null, null, null]");
-      for (const auto& cond : {boolean_null, b_null}) {
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
-      }
-    }
-    {
-      ARROW_SCOPED_TRACE("if (true) then 1 else 0");
-      auto expected = MakeScalar(1);
-      for (const auto& cond : {literal(true), b_true}) {
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
-      }
-    }
-    {
-      ARROW_SCOPED_TRACE("if (false) then 1 else 0");
-      auto expected = MakeScalar(0);
-      for (const auto& cond : {literal(false), b_false}) {
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
-      }
-    }
-    {
-      ARROW_SCOPED_TRACE("if (if (null) true then false) then 1 else 0");
-      auto expected = ArrayFromJSON(int32(), "[null, null, null]");
-      for (const auto& nested_cond : {boolean_null, b_null}) {
-        auto cond = if_else_special(nested_cond, literal(true), literal(false));
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
-      }
-    }
-    {
-      ARROW_SCOPED_TRACE("if (if (true) then true else false) then 1 else 0");
-      auto expected = MakeScalar(1);
-      for (const auto& nested_cond : {literal(true), b_true}) {
-        auto cond = if_else_special(nested_cond, nested_cond, literal(false));
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
-      }
-    }
-    {
-      ARROW_SCOPED_TRACE("if (if (false) then true else false) then 1 else 0");
-      auto expected = MakeScalar(0);
-      for (const auto& nested_cond : {literal(false), b_false}) {
-        auto cond = if_else_special(nested_cond, literal(true), nested_cond);
-        for (const auto& if_else_sp :
-             SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
-          ARROW_SCOPED_TRACE(if_else_sp.ToString());
-          ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
-          AssertDatumsEqual(expected, result);
-        }
+    ARROW_SCOPED_TRACE("if (null) then 1 else 0");
+    auto expected = ArrayFromJSON(int32(), "[null, null, null]");
+    for (const auto& cond : {kBooleanNull, b_null}) {
+      ARROW_SCOPED_TRACE("cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
       }
     }
   }
   {
-    auto schema = arrow::schema({field("", int32())});
-    std::vector<ExecBatch> batches = {
-        ExecBatch({*ArrayFromJSON(int32(), "[]")}, 0),
-        ExecBatch({*ArrayFromJSON(int32(), "[1]")}, 1),
-    };
-    for (const auto& batch : batches) {
-      {
-        ARROW_SCOPED_TRACE("if (null) then 1 else 0");
-        CheckIfElse(literal(MakeNullScalar(boolean())), literal(1), literal(0), schema,
-                    batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (true) then 1 else 0");
-        CheckIfElse(literal(true), literal(1), literal(0), schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (false) then 1 else 0");
-        CheckIfElse(literal(false), literal(1), literal(0), schema, batch);
+    ARROW_SCOPED_TRACE("if (true) then 1 else 0");
+    auto expected = MakeScalar(1);
+    for (const auto& cond : {literal(true), b_true}) {
+      ARROW_SCOPED_TRACE("cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
       }
     }
   }
   {
-    auto schema = arrow::schema({field("a", int32()), field("b", int32())});
-    auto a = field_ref("a");
-    auto b = field_ref("b");
-    std::vector<ExecBatch> batches = {
-        ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
-            [1, 0],
-            [1, 0],
-            [1, 0]
-          ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
-            [1, 0],
-            [null, 0],
-            [1, null]
-          ])")),
-    };
-    for (const auto& batch : batches) {
-      {
-        ARROW_SCOPED_TRACE("if (null) then a else b");
-        CheckIfElse(boolean_null, a, b, schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (true) then 0 else b");
-        CheckIfElse(literal(true), literal(0), b, schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (true) then a else b");
-        CheckIfElse(literal(true), a, b, schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (false) then a else 1");
-        CheckIfElse(literal(false), a, literal(1), schema, batch);
-      }
-      {
-        ARROW_SCOPED_TRACE("if (false) then a else b");
-        CheckIfElse(literal(false), a, b, schema, batch);
+    ARROW_SCOPED_TRACE("if (false) then 1 else 0");
+    auto expected = MakeScalar(0);
+    for (const auto& cond : {literal(false), b_false}) {
+      ARROW_SCOPED_TRACE("cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
       }
     }
   }
   {
-    auto schema =
-        arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
-    auto a = field_ref("a");
-    auto b = field_ref("b");
-    auto c = field_ref("c");
-    std::vector<ExecBatch> batches = {
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ARROW_SCOPED_TRACE("if (if (null) true then false) then 1 else 0");
+    auto expected = ArrayFromJSON(int32(), "[null, null, null]");
+    for (const auto& nested_cond : {kBooleanNull, b_null}) {
+      auto cond = if_else_special(nested_cond, literal(true), literal(false));
+      ARROW_SCOPED_TRACE("nested cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
+      }
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("if (if (true) then true else false) then 1 else 0");
+    auto expected = MakeScalar(1);
+    for (const auto& nested_cond : {literal(true), b_true}) {
+      auto cond = if_else_special(nested_cond, nested_cond, literal(false));
+      ARROW_SCOPED_TRACE("nested cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
+      }
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("if (if (false) then true else false) then 1 else 0");
+    auto expected = MakeScalar(0);
+    for (const auto& nested_cond : {literal(false), b_false}) {
+      auto cond = if_else_special(nested_cond, literal(true), nested_cond);
+      ARROW_SCOPED_TRACE("nested cond: " + cond.ToString());
+      for (const auto& if_else_sp :
+           SuppressSelectionVectorAwareForIfElse(cond, literal(1), literal(0))) {
+        ARROW_SCOPED_TRACE(if_else_sp.ToString());
+        ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(if_else_sp, schema, batch));
+        AssertDatumsEqual(expected, result);
+      }
+    }
+  }
+  // TODO: Non-scalar branch bodies.
+}
+
+namespace {
+
+auto kCanonicalSchema =
+    arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
+
+auto kCanonicalA = field_ref("a");
+auto kCanonicalB = field_ref("b");
+auto kCanonicalC = field_ref("c");
+
+const auto kCanonicalBooleanDatums = {kBooleanNull, literal(true), literal(false),
+                                      kCanonicalA};
+const auto kCanonicalIntDatums = {kIntNull, literal(0), literal(1), kCanonicalB,
+                                  kCanonicalC};
+
+const std::vector<ExecBatch> kCanonicalBatches = {
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [null, 1, 0],
             [null, 1, 0],
             [null, 1, 0]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [null, 1, 0],
             [null, null, 0],
             [null, 1, null]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [true, 1, 0],
             [true, 1, 0],
             [true, 1, 0]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [true, 1, 0],
             [true, null, 0],
             [true, 1, null]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [false, 1, 0],
             [false, 1, 0],
             [false, 1, 0]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [false, 1, 0],
             [false, null, 0],
             [false, 1, null]
           ])")),
-        ExecBatch(*RecordBatchFromJSON(schema, R"([
+    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
             [false, 1, 0],
             [true, null, 0],
             [null, 1, null]
           ])")),
-    };
-    for (const auto& batch : batches) {
-      {
-        ARROW_SCOPED_TRACE("if (a) then 1 else 0");
-        CheckIfElse(a, literal(1), literal(0), schema, batch);
+};
+
+}  // namespace
+
+TEST_F(IfElseSpecialFormTest, Simple) {
+  const auto& schema = kCanonicalSchema;
+  const auto& boolean_datums = kCanonicalBooleanDatums;
+  const auto& int_datums = kCanonicalIntDatums;
+  const auto& batches = kCanonicalBatches;
+  for (const auto& cond : boolean_datums) {
+    for (const auto& if_true : int_datums) {
+      for (const auto& if_false : int_datums) {
+        for (const auto& batch : batches) {
+          CheckIfElseIgnoreShape(cond, if_true, if_false, schema, batch);
+        }
       }
-      {
-        ARROW_SCOPED_TRACE("if (a) then b else c");
-        CheckIfElse(a, b, c, schema, batch);
+    }
+  }
+}
+
+TEST_F(IfElseSpecialFormTest, NestedSimple) {
+  const auto& schema = kCanonicalSchema;
+  const auto& a = kCanonicalA;
+  const auto& b = kCanonicalB;
+  const auto& c = kCanonicalC;
+  const auto& batch = kCanonicalBatches.back();
+  for (const auto& cond : {
+           if_else_special(a, kBooleanNull, a),
+           if_else_special(a, a, literal(true)),
+           if_else_special(a, a, a),
+       }) {
+    for (const auto& if_true : {
+             if_else_special(a, kIntNull, b),
+             if_else_special(a, b, literal(1)),
+             if_else_special(a, b, b),
+         }) {
+      for (const auto& if_false : {
+               if_else_special(a, kIntNull, c),
+               if_else_special(a, c, literal(1)),
+               if_else_special(a, c, c),
+           }) {
+        CheckIfElseIgnoreShape(cond, if_true, if_false, schema, batch);
       }
-      auto boolean_datums = {boolean_null, literal(true), literal(false), a};
-      for (const auto& nested_cond : boolean_datums) {
-        for (const auto& nested_if_true : boolean_datums) {
-          for (const auto& nested_if_false : boolean_datums) {
-            auto nested_if_else_sp =
-                if_else_special(nested_cond, nested_if_true, nested_if_false);
-            for (const auto& if_true : {literal(0), literal(1), b}) {
-              for (const auto& if_false : {literal(0), literal(1), c}) {
-                ARROW_SCOPED_TRACE(
-                    if_else_special(nested_if_else_sp, if_true, if_false).ToString());
-                ASSERT_OK_AND_ASSIGN(
-                    auto r,
-                    ExecuteExpr(if_else_special(nested_if_else_sp, if_true, if_false),
-                                schema, batch));
-                CheckIfElse(nested_if_else_sp, if_true, if_false, schema, batch);
-              }
+    }
+  }
+}
+
+// TODO: Deprecate this test due to slowness.
+TEST_F(IfElseSpecialFormTest, NestedConditionComplex) {
+  const auto& batches = kCanonicalBatches;
+  const auto& schema = kCanonicalSchema;
+  const auto& boolean_datums = kCanonicalBooleanDatums;
+  const auto& int_datums = kCanonicalIntDatums;
+  for (const auto& nested_cond : boolean_datums) {
+    for (const auto& nested_if_true : boolean_datums) {
+      for (const auto& nested_if_false : boolean_datums) {
+        auto nested_if_else_sp =
+            if_else_special(nested_cond, nested_if_true, nested_if_false);
+        for (const auto& if_true : int_datums) {
+          for (const auto& if_false : int_datums) {
+            for (const auto& batch : batches) {
+              CheckIfElseIgnoreShape(nested_if_else_sp, if_true, if_false, schema, batch);
             }
           }
         }
@@ -798,6 +785,8 @@ TEST_F(IfElseSpecialFormTest, Shortcut) {
   }
 }
 
+// TODO: Complex nested true and false branches.
+// TODO: Complex double/triple nested tests.
 // TODO: ChunkedArray.
 
 namespace {
