@@ -344,9 +344,25 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       }
       {
         auto if_else_sp =
-            if_else_special(sv_suppress(cond), assert_sv_exist(if_true), if_false);
+            if_else_special(cond, sv_suppress(if_true), assert_sv_exist(if_false));
         AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
                                     "Invalid: There is no selection vector");
+      }
+      {
+        auto if_else_sp =
+            if_else_special(cond, assert_sv_exist(if_true), sv_suppress(if_false));
+        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
+                                    "Invalid: There is no selection vector");
+      }
+      {
+        auto if_else_sp =
+            if_else_special(cond, sv_suppress(if_true), assert_sv_empty(if_false));
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+      }
+      {
+        auto if_else_sp =
+            if_else_special(cond, assert_sv_empty(if_true), sv_suppress(if_false));
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
         auto if_else_sp = if_else_special(cond, assert_sv_empty(if_true), if_false);
@@ -354,9 +370,9 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
                                     "Invalid: There is a selection vector");
       }
       {
-        auto if_else_sp = if_else_special(sv_suppress(cond), assert_sv_empty(if_true),
-                                          assert_sv_empty(if_false));
-        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+        auto if_else_sp = if_else_special(cond, if_true, assert_sv_empty(if_false));
+        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
+                                    "Invalid: There is a selection vector");
       }
     }
     {
@@ -459,8 +475,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     for (const auto& if_else_sp :
          {if_else_special(b, i1, i2),
           if_else_special(assert_sv_empty(b), assert_sv_exist(i1), assert_sv_exist(i2)),
-          // TODO: This may not hold in the future.
-          if_else_special(sv_suppress(b), assert_sv_empty(i1), assert_sv_empty(i2)),
+          if_else_special(sv_suppress(b), assert_sv_exist(i1), assert_sv_exist(i2)),
           if_else_special(b, sv_suppress(i1), assert_sv_empty(i2)),
           if_else_special(b, assert_sv_empty(i1), sv_suppress(i2))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
@@ -486,41 +501,41 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                           assert_sv_exist(i2)),
                           if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                           assert_sv_exist(i2))),
-          // Selection vector existences with some argument of the nested
-          // if_else_special being selection vector unaware.
+          // Selection vector existences with some argument of the nested if_else_special
+          // being selection vector unaware.
           if_else_special(
               b,
               assert_sv_exist(if_else_special(sv_suppress(literal(true)),
-                                              assert_sv_empty(i1), unreachable(i2))),
+                                              assert_sv_exist(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(b,
                           assert_sv_exist(if_else_special(
-                              sv_suppress(b), assert_sv_empty(i1), assert_sv_empty(i2))),
+                              sv_suppress(b), assert_sv_exist(i1), assert_sv_exist(i2))),
                           assert_sv_exist(if_else_special(
                               assert_sv_exist(b), unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               sv_suppress(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_suppress(i1),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), sv_suppress(i1),
                                               assert_sv_empty(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_empty(i1),
                                               sv_suppress(unreachable(i2)))),
               assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_empty(i1),
                                               sv_suppress(i2))),
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2)))),
@@ -529,38 +544,38 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
               assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
               assert_sv_exist(if_else_special(sv_suppress(literal(false)),
-                                              unreachable(i1), assert_sv_empty(i2)))),
+                                              unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
-              assert_sv_exist(if_else_special(sv_suppress(b), assert_sv_empty(i1),
-                                              assert_sv_empty(i2)))),
+              assert_sv_exist(if_else_special(sv_suppress(b), assert_sv_exist(i1),
+                                              assert_sv_exist(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               sv_suppress(unreachable(i1)),
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
-              assert_sv_exist(if_else_special(assert_sv_empty(b), sv_suppress(i1),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), sv_suppress(i1),
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
                                               assert_sv_empty(unreachable(i1)),
                                               sv_suppress(i2)))),
           if_else_special(
               b,
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
                                               assert_sv_exist(i2))),
-              assert_sv_exist(if_else_special(assert_sv_empty(b), assert_sv_empty(i1),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_empty(i1),
                                               sv_suppress(i2))))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
@@ -681,40 +696,40 @@ const auto kCanonicalIntDatums = {kIntNull, literal(0), literal(1), kCanonicalB,
 
 const std::vector<ExecBatch> kCanonicalBatches = {
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [null, 1, 0],
-            [null, 1, 0],
-            [null, 1, 0]
-          ])")),
+        [null, 1, 0],
+        [null, 1, 0],
+        [null, 1, 0]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [null, 1, 0],
-            [null, null, 0],
-            [null, 1, null]
-          ])")),
+        [null, 1, 0],
+        [null, null, 0],
+        [null, 1, null]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [true, 1, 0],
-            [true, 1, 0],
-            [true, 1, 0]
-          ])")),
+        [true, 1, 0],
+        [true, 1, 0],
+        [true, 1, 0]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [true, 1, 0],
-            [true, null, 0],
-            [true, 1, null]
-          ])")),
+        [true, 1, 0],
+        [true, null, 0],
+        [true, 1, null]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [false, 1, 0],
-            [false, 1, 0],
-            [false, 1, 0]
-          ])")),
+        [false, 1, 0],
+        [false, 1, 0],
+        [false, 1, 0]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [false, 1, 0],
-            [false, null, 0],
-            [false, 1, null]
-          ])")),
+        [false, 1, 0],
+        [false, null, 0],
+        [false, 1, null]
+      ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-            [false, 1, 0],
-            [true, null, 0],
-            [null, 1, null]
-          ])")),
+        [false, 1, 0],
+        [true, null, 0],
+        [null, 1, null]
+      ])")),
 };
 
 }  // namespace
@@ -740,7 +755,11 @@ TEST_F(IfElseSpecialFormTest, NestedSimple) {
   const auto& a = kCanonicalA;
   const auto& b = kCanonicalB;
   const auto& c = kCanonicalC;
-  const auto& batch = kCanonicalBatches.back();
+  ExecBatch batch(*RecordBatchFromJSON(kCanonicalSchema, R"([
+      [false, 1, 0],
+      [true, null, 0],
+      [null, 1, null]
+    ])"));
   for (const auto& cond : {
            if_else_special(a, kBooleanNull, a),
            if_else_special(a, a, literal(true)),
