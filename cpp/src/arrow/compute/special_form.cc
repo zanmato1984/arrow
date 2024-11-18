@@ -56,19 +56,27 @@ struct BodyMask;
 struct BranchMask : public std::enable_shared_from_this<BranchMask> {
   virtual ~BranchMask() = default;
 
+  Result<std::shared_ptr<const BodyMask>> ApplyCond(const Expression& expr,
+                                                    const ExecBatch& input,
+                                                    ExecContext* exec_context) const {
+    ARROW_ASSIGN_OR_RAISE(auto datum, Apply(expr, input, exec_context));
+    DCHECK(datum.type()->id() == Type::BOOL);
+    return MakeBodyMask(std::move(datum), exec_context);
+  }
+
   virtual Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                               ExecContext* exec_context) const = 0;
 
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const = 0;
 
-  virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const = 0;
-
   virtual bool empty() const = 0;
 
  protected:
   virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
+
+  virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const = 0;
 };
 
 template <typename T, typename... Args>
@@ -100,13 +108,13 @@ struct SparseAllPassBranchMask : public BranchMask {
     return nullptr;
   }
 
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const override;
-
   bool empty() const override { return false; }
 
  protected:
   explicit SparseAllPassBranchMask(int64_t length) : length_(length) {}
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const override;
 
  private:
   int64_t length_;
@@ -135,16 +143,16 @@ struct AllFailBranchMask : public BranchMask {
     return Status::Invalid("AllFailBranchMask::GetSelectionVector should not be called");
   }
 
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid("AllFailBranchMask::MakeBodyMask should not be called");
-  }
-
   bool empty() const override { return true; }
 
  protected:
   AllFailBranchMask() = default;
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const override {
+    DCHECK(false);
+    return Status::Invalid("AllFailBranchMask::MakeBodyMask should not be called");
+  }
 };
 
 struct BodyMask : public std::enable_shared_from_this<BodyMask> {
@@ -268,9 +276,6 @@ struct SparseBranchMask : public BranchMask {
     return selection_vector_;
   }
 
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const override;
-
   bool empty() const override { return selection_vector_->length() == 0; }
 
  protected:
@@ -278,6 +283,9 @@ struct SparseBranchMask : public BranchMask {
 
   SparseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const override;
 
  protected:
   std::shared_ptr<BooleanArray> bitmap_ = nullptr;
@@ -393,7 +401,7 @@ Result<std::shared_ptr<BodyMask>> BodyMaskFromScalar(
 }
 
 Result<std::shared_ptr<const BodyMask>> SparseAllPassBranchMask::MakeBodyMask(
-    const Datum& datum, ExecContext* exec_context) const {
+    Datum datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
@@ -404,7 +412,7 @@ Result<std::shared_ptr<const BodyMask>> SparseAllPassBranchMask::MakeBodyMask(
 }
 
 Result<std::shared_ptr<const BodyMask>> SparseBranchMask::MakeBodyMask(
-    const Datum& datum, ExecContext* exec_context) const {
+    Datum datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
@@ -435,13 +443,13 @@ struct DenseAllPassBranchMask : public BranchMask {
     return nullptr;
   }
 
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const override;
-
   bool empty() const override { return false; }
 
  protected:
   explicit DenseAllPassBranchMask(int64_t length) : length_(length) {}
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const override;
 
  private:
   int64_t length_;
@@ -480,14 +488,14 @@ struct DenseBranchMask : public BranchMask {
     return selection_vector_;
   }
 
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
-      const Datum& datum, ExecContext* exec_context) const override;
-
   bool empty() const override { return selection_vector_->length() == 0; }
 
  protected:
   explicit DenseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
+      Datum datum, ExecContext* exec_context) const override;
 
  private:
   std::shared_ptr<SelectionVector> selection_vector_;
@@ -532,7 +540,7 @@ struct DenseBodyMask : public BodyMask {
 };
 
 Result<std::shared_ptr<const BodyMask>> DenseAllPassBranchMask::MakeBodyMask(
-    const Datum& datum, ExecContext* exec_context) const {
+    Datum datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
 
   if (datum.is_scalar()) {
@@ -571,7 +579,7 @@ Result<std::shared_ptr<const BodyMask>> DenseAllPassBranchMask::MakeBodyMask(
 }
 
 Result<std::shared_ptr<const BodyMask>> DenseBranchMask::MakeBodyMask(
-    const Datum& datum, ExecContext* exec_context) const {
+    Datum datum, ExecContext* exec_context) const {
   DCHECK_EQ(datum.type()->id(), Type::BOOL);
 
   if (datum.is_scalar()) {
@@ -632,10 +640,8 @@ struct ConditionalExecutor {
       if (branch_mask->empty()) {
         break;
       }
-      ARROW_ASSIGN_OR_RAISE(auto cond,
-                            branch_mask->Apply(branch.cond, input, exec_context));
       ARROW_ASSIGN_OR_RAISE(auto body_mask,
-                            branch_mask->MakeBodyMask(cond, exec_context));
+                            branch_mask->ApplyCond(branch.cond, input, exec_context));
       if (body_mask->empty()) {
         ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask(exec_context));
         continue;
