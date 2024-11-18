@@ -105,15 +105,15 @@ struct SparseAllPassBranchMask : public BranchMask {
     return ExecuteScalarExpression(expr, input_with_sel_vec, exec_context);
   }
 
-  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
-      ExecContext* exec_context) const override {
-    return nullptr;
-  }
-
   bool empty() const override { return false; }
 
  protected:
   explicit SparseAllPassBranchMask(int64_t length) : length_(length) {}
+
+  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
+      ExecContext* exec_context) const override {
+    return nullptr;
+  }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const override;
@@ -139,16 +139,16 @@ struct AllFailBranchMask : public BranchMask {
     return Status::Invalid("AllFailBranchMask::Apply should not be called");
   }
 
+  bool empty() const override { return true; }
+
+ protected:
+  AllFailBranchMask() = default;
+
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
     DCHECK(false);
     return Status::Invalid("AllFailBranchMask::GetSelectionVector should not be called");
   }
-
-  bool empty() const override { return true; }
-
- protected:
-  AllFailBranchMask() = default;
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const override {
@@ -285,11 +285,6 @@ struct SparseBranchMask : public BranchMask {
     return ExecuteScalarExpression(expr, input_with_sel_vec, exec_context);
   }
 
-  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
-      ExecContext* exec_context) const override {
-    return selection_vector_;
-  }
-
   bool empty() const override { return selection_vector_->length() == 0; }
 
  protected:
@@ -297,6 +292,11 @@ struct SparseBranchMask : public BranchMask {
 
   SparseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
+
+  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
+      ExecContext* exec_context) const override {
+    return selection_vector_;
+  }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const override;
@@ -452,15 +452,15 @@ struct DenseAllPassBranchMask : public BranchMask {
     return ExecuteScalarExpression(expr, input_with_sel_vec, exec_context);
   }
 
-  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
-      ExecContext* exec_context) const override {
-    return nullptr;
-  }
-
   bool empty() const override { return false; }
 
  protected:
   explicit DenseAllPassBranchMask(int64_t length) : length_(length) {}
+
+  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
+      ExecContext* exec_context) const override {
+    return nullptr;
+  }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const override;
@@ -497,16 +497,16 @@ struct DenseBranchMask : public BranchMask {
     return ExecuteScalarExpression(expr, dense_input, exec_context);
   }
 
-  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
-      ExecContext* exec_context) const override {
-    return selection_vector_;
-  }
-
   bool empty() const override { return selection_vector_->length() == 0; }
 
  protected:
   explicit DenseBranchMask(std::shared_ptr<SelectionVector> selection_vector)
       : selection_vector_(std::move(selection_vector)) {}
+
+  Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
+      ExecContext* exec_context) const override {
+    return selection_vector_;
+  }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const override;
