@@ -64,19 +64,21 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
     return MakeBodyMask(std::move(datum), exec_context);
   }
 
+  virtual bool empty() const = 0;
+
+ protected:
+  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
+
   virtual Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                               ExecContext* exec_context) const = 0;
 
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const = 0;
 
-  virtual bool empty() const = 0;
-
- protected:
-  virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
-
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMask(
       Datum datum, ExecContext* exec_context) const = 0;
+
+  friend struct BodyMask;
 };
 
 template <typename T, typename... Args>
@@ -171,6 +173,18 @@ struct BodyMask : public std::enable_shared_from_this<BodyMask> {
 
  protected:
   virtual Status Init(ExecContext* exec_context) { return Status::OK(); }
+
+  Result<Datum> DelegateApply(const std::shared_ptr<const BranchMask>& branch_mask,
+                              const Expression& expr, const ExecBatch& input,
+                              ExecContext* exec_context) const {
+    return branch_mask->Apply(expr, input, exec_context);
+  }
+
+  Result<std::shared_ptr<SelectionVector>> DelegateGetSelectionVector(
+      const std::shared_ptr<const BranchMask>& branch_mask,
+      ExecContext* exec_context) const {
+    return branch_mask->GetSelectionVector(exec_context);
+  }
 };
 
 template <typename Impl>
@@ -220,12 +234,12 @@ struct AllNullBodyMask : public TrivialBodyMask<AllNullBodyMask> {
 struct AllPassBodyMask : public TrivialBodyMask<AllPassBodyMask> {
   Result<Datum> Apply(const Expression& expr, const ExecBatch& input,
                       ExecContext* exec_context) const override {
-    return branch_mask_->Apply(expr, input, exec_context);
+    return DelegateApply(branch_mask_, expr, input, exec_context);
   }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector(
       ExecContext* exec_context) const override {
-    return branch_mask_->GetSelectionVector(exec_context);
+    return DelegateGetSelectionVector(branch_mask_, exec_context);
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask(
