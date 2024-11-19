@@ -86,7 +86,7 @@ static void BM_IfElseArray(
   auto schema =
       arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
   random::RandomArrayGenerator rag(42);
-  int64_t num_rows = 65536;
+  int64_t num_rows = 4096;
   auto cond = rag.Boolean(num_rows, 0.5, 0.0);
   auto if_true = rag.Int32(num_rows, 0, 42);
   auto if_false = rag.Int32(num_rows, 0, 42);
