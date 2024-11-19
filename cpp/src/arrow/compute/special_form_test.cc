@@ -29,153 +29,7 @@
 
 namespace arrow::compute {
 
-// TODO: Move them into class.
 namespace {
-
-Status UnreachableExec(KernelContext*, const ExecSpan&, ExecResult*) {
-  return Status::Invalid("Unreachable");
-}
-
-Status IdentityExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
-  DCHECK_EQ(span.num_values(), 1);
-  const auto& arg = span[0];
-  DCHECK(arg.is_array());
-  *out->array_data_mutable() = *arg.array.ToArrayData();
-  return Status::OK();
-}
-
-template <bool sv_existence>
-Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
-                                 ExecResult* out) {
-  if constexpr (sv_existence) {
-    if (!span.selection_vector) {
-      return Status::Invalid("There is no selection vector");
-    }
-  } else {
-    if (span.selection_vector) {
-      return Status::Invalid("There is a selection vector");
-    }
-  }
-  return IdentityExec(kernel_ctx, span, out);
-}
-
-static Status RegisterAuxilaryFunctions() {
-  auto registry = GetFunctionRegistry();
-
-  {
-    auto register_unreachable_func = [&](const std::string& name) -> Status {
-      auto func =
-          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
-
-      ArrayKernelExec exec = UnreachableExec;
-      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-      kernel.selection_vector_aware = true;
-      kernel.can_write_into_slices = false;
-      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-      RETURN_NOT_OK(func->AddKernel(kernel));
-      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-      return Status::OK();
-    };
-
-    RETURN_NOT_OK(register_unreachable_func("unreachable"));
-  }
-
-  {
-    auto register_sv_awareness_func = [&](const std::string& name,
-                                          bool sv_awareness) -> Status {
-      auto func =
-          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
-
-      ArrayKernelExec exec = IdentityExec;
-      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-      kernel.selection_vector_aware = sv_awareness;
-      kernel.can_write_into_slices = false;
-      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-      RETURN_NOT_OK(func->AddKernel(kernel));
-      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-      return Status::OK();
-    };
-
-    RETURN_NOT_OK(register_sv_awareness_func("sv_aware", true));
-    RETURN_NOT_OK(register_sv_awareness_func("sv_suppress", false));
-  }
-
-  {
-    auto register_assert_sv_func = [&](const std::string& name,
-                                       bool sv_existence) -> Status {
-      auto func =
-          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
-
-      ArrayKernelExec exec;
-      if (sv_existence) {
-        exec = AssertSelectionVectorExec<true>;
-      } else {
-        exec = AssertSelectionVectorExec<false>;
-      }
-      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-      kernel.selection_vector_aware = true;
-      kernel.can_write_into_slices = false;
-      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-      RETURN_NOT_OK(func->AddKernel(kernel));
-      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-      return Status::OK();
-    };
-
-    RETURN_NOT_OK(register_assert_sv_func("assert_sv_exist", /*sv_existence=*/true));
-    RETURN_NOT_OK(register_assert_sv_func("assert_sv_empty", /*sv_existence=*/false));
-  }
-
-  return Status::OK();
-}
-
-auto kBooleanNull = literal(MakeNullScalar(boolean()));
-auto kIntNull = literal(MakeNullScalar(int32()));
-
-Expression if_else_expr(Expression cond, Expression if_true, Expression if_false) {
-  return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
-}
-Expression unreachable(Expression arg) { return call("unreachable", {std::move(arg)}); }
-Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
-Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
-Expression assert_sv_exist(Expression arg) {
-  return call("assert_sv_exist", {std::move(arg)});
-}
-Expression assert_sv_empty(Expression arg) {
-  return call("assert_sv_empty", {std::move(arg)});
-}
-
-std::vector<Expression> SuppressSelectionVectorAwareForIfElse(
-    const Expression& cond, const Expression& if_true, const Expression& if_false) {
-  auto suppress_if_else_recursive =
-      [&](const Expression& expr) -> std::vector<Expression> {
-    if (const auto& sp = expr.special(); sp && sp->special_form->name == "if_else") {
-      const auto& cond = sp->arguments[0];
-      const auto& if_true = sp->arguments[1];
-      const auto& if_false = sp->arguments[2];
-      return SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
-    } else {
-      return {expr};
-    }
-  };
-  auto suppressed_conds = suppress_if_else_recursive(cond);
-  auto suppressed_if_trues = suppress_if_else_recursive(if_true);
-  auto suppressed_if_falses = suppress_if_else_recursive(if_false);
-  std::vector<Expression> result;
-  for (const auto& suppressed_cond : suppressed_conds) {
-    for (const auto& suppressed_if_true : suppressed_if_trues) {
-      for (const auto& suppressed_if_false : suppressed_if_falses) {
-        result.emplace_back(
-            if_else_special(suppressed_cond, suppressed_if_true, suppressed_if_false));
-        result.emplace_back(if_else_special(suppressed_cond, suppressed_if_true,
-                                            sv_suppress(suppressed_if_false)));
-      }
-    }
-  }
-  return result;
-}
 
 void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
   if (expected.kind() == result.kind()) {
@@ -223,13 +77,20 @@ void AssertExprEqualExprsIgnoreShape(const Expression& expr,
   }
 }
 
-void CheckIfElseIgnoreShape(const Expression& cond, const Expression& if_true,
-                            const Expression& if_false,
-                            const std::shared_ptr<Schema>& schema,
-                            const ExecBatch& batch) {
-  auto if_else = if_else_expr(cond, if_true, if_false);
-  auto exprs = SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
-  AssertExprEqualExprsIgnoreShape(if_else, exprs, schema, batch);
+auto kBooleanNull = literal(MakeNullScalar(boolean()));
+auto kIntNull = literal(MakeNullScalar(int32()));
+
+Expression if_else_regular(Expression cond, Expression if_true, Expression if_false) {
+  return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
+}
+Expression unreachable(Expression arg) { return call("unreachable", {std::move(arg)}); }
+Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
+Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
+Expression assert_sv_exist(Expression arg) {
+  return call("assert_sv_exist", {std::move(arg)});
+}
+Expression assert_sv_empty(Expression arg) {
+  return call("assert_sv_empty", {std::move(arg)});
 }
 
 }  // namespace
@@ -296,6 +157,145 @@ TEST(IfElseSpecialForm, Basic) {
 class IfElseSpecialFormTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() { ASSERT_OK(RegisterAuxilaryFunctions()); }
+
+ protected:
+  static Status UnreachableExec(KernelContext*, const ExecSpan&, ExecResult*) {
+    return Status::Invalid("Unreachable");
+  }
+
+  static Status IdentityExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+    DCHECK_EQ(span.num_values(), 1);
+    const auto& arg = span[0];
+    DCHECK(arg.is_array());
+    *out->array_data_mutable() = *arg.array.ToArrayData();
+    return Status::OK();
+  }
+
+  template <bool sv_existence>
+  static Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
+                                          ExecResult* out) {
+    if constexpr (sv_existence) {
+      if (!span.selection_vector) {
+        return Status::Invalid("There is no selection vector");
+      }
+    } else {
+      if (span.selection_vector) {
+        return Status::Invalid("There is a selection vector");
+      }
+    }
+    return IdentityExec(kernel_ctx, span, out);
+  }
+
+  static Status RegisterAuxilaryFunctions() {
+    auto registry = GetFunctionRegistry();
+
+    {
+      auto register_unreachable_func = [&](const std::string& name) -> Status {
+        auto func =
+            std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+        ArrayKernelExec exec = UnreachableExec;
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+        kernel.selection_vector_aware = true;
+        kernel.can_write_into_slices = false;
+        kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+        kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+        RETURN_NOT_OK(func->AddKernel(kernel));
+        RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+        return Status::OK();
+      };
+
+      RETURN_NOT_OK(register_unreachable_func("unreachable"));
+    }
+
+    {
+      auto register_sv_awareness_func = [&](const std::string& name,
+                                            bool sv_awareness) -> Status {
+        auto func =
+            std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+        ArrayKernelExec exec = IdentityExec;
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+        kernel.selection_vector_aware = sv_awareness;
+        kernel.can_write_into_slices = false;
+        kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+        kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+        RETURN_NOT_OK(func->AddKernel(kernel));
+        RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+        return Status::OK();
+      };
+
+      RETURN_NOT_OK(register_sv_awareness_func("sv_aware", true));
+      RETURN_NOT_OK(register_sv_awareness_func("sv_suppress", false));
+    }
+
+    {
+      auto register_assert_sv_func = [&](const std::string& name,
+                                         bool sv_existence) -> Status {
+        auto func =
+            std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+
+        ArrayKernelExec exec;
+        if (sv_existence) {
+          exec = AssertSelectionVectorExec<true>;
+        } else {
+          exec = AssertSelectionVectorExec<false>;
+        }
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+        kernel.selection_vector_aware = true;
+        kernel.can_write_into_slices = false;
+        kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+        kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+        RETURN_NOT_OK(func->AddKernel(kernel));
+        RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+        return Status::OK();
+      };
+
+      RETURN_NOT_OK(register_assert_sv_func("assert_sv_exist", /*sv_existence=*/true));
+      RETURN_NOT_OK(register_assert_sv_func("assert_sv_empty", /*sv_existence=*/false));
+    }
+
+    return Status::OK();
+  }
+
+  static std::vector<Expression> SuppressSelectionVectorAwareForIfElse(
+      const Expression& cond, const Expression& if_true, const Expression& if_false) {
+    auto suppress_if_else_recursive =
+        [&](const Expression& expr) -> std::vector<Expression> {
+      if (const auto& sp = expr.special(); sp && sp->special_form->name == "if_else") {
+        const auto& cond = sp->arguments[0];
+        const auto& if_true = sp->arguments[1];
+        const auto& if_false = sp->arguments[2];
+        return SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
+      } else {
+        return {expr};
+      }
+    };
+    auto suppressed_conds = suppress_if_else_recursive(cond);
+    auto suppressed_if_trues = suppress_if_else_recursive(if_true);
+    auto suppressed_if_falses = suppress_if_else_recursive(if_false);
+    std::vector<Expression> result;
+    for (const auto& suppressed_cond : suppressed_conds) {
+      for (const auto& suppressed_if_true : suppressed_if_trues) {
+        for (const auto& suppressed_if_false : suppressed_if_falses) {
+          result.emplace_back(
+              if_else_special(suppressed_cond, suppressed_if_true, suppressed_if_false));
+          result.emplace_back(if_else_special(suppressed_cond, suppressed_if_true,
+                                              sv_suppress(suppressed_if_false)));
+        }
+      }
+    }
+    return result;
+  }
+
+  static void CheckIfElseIgnoreShape(const Expression& cond, const Expression& if_true,
+                                     const Expression& if_false,
+                                     const std::shared_ptr<Schema>& schema,
+                                     const ExecBatch& batch) {
+    auto if_else = if_else_regular(cond, if_true, if_false);
+    auto exprs = SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
+    AssertExprEqualExprsIgnoreShape(if_else, exprs, schema, batch);
+  }
 };
 
 TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
@@ -396,16 +396,32 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
 }
 
 TEST_F(IfElseSpecialFormTest, SelectionVectorAwareness) {
-  auto schema = arrow::schema({});
-  auto cond = literal(true);
-  auto if_true = literal(1);
-  auto if_false = literal(0);
-  for (const auto& if_else_sp : {if_else_special(cond, if_true, if_false),
-                                 if_else_special(sv_suppress(cond), if_true, if_false),
-                                 if_else_special(cond, sv_suppress(if_true), if_false),
-                                 if_else_special(cond, if_true, sv_suppress(if_false))}) {
-    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+  {
+    ARROW_SCOPED_TRACE("literal");
+    ASSERT_TRUE(kBooleanNull.selection_vector_aware());
+    ASSERT_TRUE(kIntNull.selection_vector_aware());
+  }
+  {
+    ARROW_SCOPED_TRACE("field ref");
+    auto schema = arrow::schema({field("a", int32())});
+    ASSERT_OK_AND_ASSIGN(auto bound, field_ref("a").Bind(*schema));
     ASSERT_TRUE(bound.selection_vector_aware());
+  }
+  {
+    ARROW_SCOPED_TRACE("if else special");
+    auto schema = arrow::schema({});
+    auto cond = literal(true);
+    auto if_true = literal(1);
+    auto if_false = literal(0);
+    for (const auto& if_else_sp :
+         {if_else_special(cond, if_true, if_false),
+          if_else_special(sv_suppress(cond), if_true, if_false),
+          if_else_special(cond, sv_suppress(if_true), if_false),
+          if_else_special(cond, if_true, sv_suppress(if_false))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+      ASSERT_TRUE(bound.selection_vector_aware());
+    }
   }
 }
 
