@@ -29,6 +29,7 @@
 
 namespace arrow::compute {
 
+// TODO: Move them into class.
 namespace {
 
 Status UnreachableExec(KernelContext*, const ExecSpan&, ExecResult*) {
