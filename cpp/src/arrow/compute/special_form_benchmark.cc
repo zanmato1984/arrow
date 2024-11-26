@@ -20,6 +20,7 @@
 #include "arrow/compute/exec.h"
 #include "arrow/compute/expression.h"
 #include "arrow/compute/function.h"
+#include "arrow/compute/function_internal.h"
 #include "arrow/compute/kernels/codegen_internal.h"
 #include "arrow/compute/registry.h"
 #include "arrow/testing/generator.h"
@@ -32,10 +33,39 @@ namespace compute {
 
 namespace {
 
-Status IdentityExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+struct PayloadOptions : public FunctionOptions {
+  explicit PayloadOptions(int64_t load = 0);
+  static constexpr char const kTypeName[] = "PayloadOptions";
+  static PayloadOptions Defaults() { return PayloadOptions(); }
+  int64_t load = 0;
+};
+
+static auto kPayloadOptionsType = internal::GetFunctionOptionsType<PayloadOptions>(
+    arrow::internal::DataMember("load", &PayloadOptions::load));
+
+PayloadOptions::PayloadOptions(int64_t load)
+    : FunctionOptions(kPayloadOptionsType), load(load) {}
+
+const PayloadOptions* GetDefaultPayloadOptions() {
+  static const auto kDefaultPayloadOptions = PayloadOptions::Defaults();
+  return &kDefaultPayloadOptions;
+}
+
+using PayloadState = internal::OptionsWrapper<PayloadOptions>;
+
+Status PayloadExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
   ARROW_CHECK_EQ(span.num_values(), 1);
   const auto& arg = span[0];
   ARROW_CHECK(arg.is_array());
+
+  int64_t load = PayloadState::Get(ctx).load;
+  int64_t load_length =
+      span.selection_vector ? span.selection_vector->length() : arg.length();
+  for (int64_t i = 0; i < load_length; ++i) {
+    volatile int64_t j = load;
+    while (j-- > 0) {
+    }
+  }
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }
@@ -44,13 +74,18 @@ Status RegisterAuxilaryFunctions() {
   auto registry = GetFunctionRegistry();
 
   {
-    auto register_sv_awareness_func = [&](const std::string& name,
-                                          bool sv_awareness) -> Status {
-      auto func =
-          std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+    if (registry->CanAddFunctionOptionsType(kPayloadOptionsType).ok()) {
+      RETURN_NOT_OK(registry->AddFunctionOptionsType(kPayloadOptionsType));
+    }
+  }
+  {
+    auto register_payload_func = [&](const std::string& name,
+                                     bool sv_awareness) -> Status {
+      auto func = std::make_shared<ScalarFunction>(
+          name, Arity::Unary(), FunctionDoc::Empty(), GetDefaultPayloadOptions());
 
-      ArrayKernelExec exec = IdentityExec;
-      ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+      ScalarKernel kernel({InputType::Any()}, internal::FirstType, PayloadExec,
+                          PayloadState::Init);
       kernel.selection_vector_aware = sv_awareness;
       kernel.can_write_into_slices = false;
       kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
@@ -62,7 +97,8 @@ Status RegisterAuxilaryFunctions() {
       return Status::OK();
     };
 
-    RETURN_NOT_OK(register_sv_awareness_func("sv_suppress", false));
+    RETURN_NOT_OK(register_payload_func("payload_sv_aware", true));
+    RETURN_NOT_OK(register_payload_func("payload_sv_unaware", false));
   }
 
   return Status::OK();
@@ -72,7 +108,14 @@ Expression if_else_regular(Expression cond, Expression if_true, Expression if_fa
   return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
 
-Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
+Expression sv_suppress(Expression arg) {
+  return call("payload_sv_unaware", {std::move(arg)});
+}
+
+Expression heavy(Expression arg) {
+  return call("payload_sv_aware", {std::move(arg)},
+              std::make_shared<PayloadOptions>(/*load=*/1024));
+}
 
 Expression sv_unaware_if_else_regular(Expression cond, Expression if_true,
                                       Expression if_false) {
@@ -87,7 +130,6 @@ Expression sv_unaware_if_else_special(Expression cond, Expression if_true,
 }
 
 auto kBooleanNull = literal(MakeNullScalar(boolean()));
-auto kIntNull = literal(MakeNullScalar(int32()));
 
 void BenchmarkIfElse(
     benchmark::State& state,
@@ -160,10 +202,10 @@ void BenchmarkIfElseWithCondArray(
     std::function<Expression(Expression, Expression, Expression)> if_else_func,
     int64_t num_rows, double true_probability, double null_probability) {
   random::RandomArrayGenerator rag(42);
-  auto cond = rag.Boolean(num_rows, true_probability, null_probability);
+  auto b = rag.Boolean(num_rows, true_probability, null_probability);
   auto schema = arrow::schema({field("b", boolean())});
 
-  ExecBatch batch{std::vector<Datum>{cond}, cond->length()};
+  ExecBatch batch{std::vector<Datum>{std::move(b)}, num_rows};
 
   BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), literal(1), literal(0),
                   schema, batch);
@@ -208,6 +250,39 @@ const std::vector<std::vector<int64_t>> kNumRowsAndNullProbabilityArgs{
   BENCHMARK_IF_ELSE(BM_IfElseNullProbability, name, if_else, \
                     kNumRowsAndNullProbabilityArgNames, kNumRowsAndNullProbabilityArgs)
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, null_probability);
+#undef BM
+
+namespace {
+
+template <typename... Args>
+void BM_IfElseWithOneHeavySide(
+    benchmark::State& state,
+    std::function<Expression(Expression, Expression, Expression)> if_else_func,
+    Args&&...) {
+  const double heavy_ratio = state.range(0) / 100.0;
+  constexpr int64_t num_rows = 65536;
+
+  random::RandomArrayGenerator rag(42);
+  auto b =
+      rag.Boolean(num_rows, /*true_probability=*/heavy_ratio, /*null_probability=*/0.0);
+  auto i = ConstantArrayGenerator::Int32(num_rows, 42);
+  auto schema = arrow::schema({field("b", boolean()), field("i", int32())});
+
+  ExecBatch batch{std::vector<Datum>{std::move(b), std::move(i)}, num_rows};
+
+  BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), heavy(field_ref("i")),
+                  literal(0), schema, batch);
+}
+
+}  // namespace
+
+const std::vector<std::string> kHeavyRatioArgNames{"heavy_ratio"};
+const std::vector<int64_t> kHeavyRatioArgs{{0, 25, 50, 75, 100}};
+
+#define BM(name, if_else, ...)                                                     \
+  BENCHMARK_IF_ELSE(BM_IfElseWithOneHeavySide, name, if_else, kHeavyRatioArgNames, \
+                    {kHeavyRatioArgs})
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, one_heavy_side);
 #undef BM
 
 }  // namespace compute
