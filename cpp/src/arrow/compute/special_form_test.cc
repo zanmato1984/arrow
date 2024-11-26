@@ -194,8 +194,7 @@ class IfElseSpecialFormTest : public ::testing::Test {
         auto func =
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-        ArrayKernelExec exec = UnreachableExec;
-        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, UnreachableExec);
         kernel.selection_vector_aware = true;
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
@@ -214,8 +213,7 @@ class IfElseSpecialFormTest : public ::testing::Test {
         auto func =
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-        ArrayKernelExec exec = IdentityExec;
-        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, IdentityExec);
         kernel.selection_vector_aware = sv_awareness;
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
