@@ -74,45 +74,141 @@ Expression if_else_regular(Expression cond, Expression if_true, Expression if_fa
 
 Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
 
-}  // namespace
+Expression sv_unaware_if_else_regular(Expression cond, Expression if_true,
+                                      Expression if_false) {
+  return if_else_regular(std::move(cond), sv_suppress(std::move(if_true)),
+                         sv_suppress(std::move(if_false)));
+}
 
-template <typename... Args>
-static void BM_IfElseArray(
+Expression sv_unaware_if_else_special(Expression cond, Expression if_true,
+                                      Expression if_false) {
+  return if_else_special(std::move(cond), sv_suppress(std::move(if_true)),
+                         sv_suppress(std::move(if_false)));
+}
+
+auto kBooleanNull = literal(MakeNullScalar(boolean()));
+auto kIntNull = literal(MakeNullScalar(int32()));
+
+void BenchmarkIfElse(
     benchmark::State& state,
     std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Args&&...) {
+    Expression cond, Expression if_true, Expression if_false,
+    const std::shared_ptr<Schema>& schema, const ExecBatch& batch) {
   ARROW_CHECK_OK(RegisterAuxilaryFunctions());
 
-  auto schema =
-      arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
-  random::RandomArrayGenerator rag(42);
-  int64_t num_rows = 4096;
-  auto cond = rag.Boolean(num_rows, 0.5, 0.0);
-  auto if_true = rag.Int32(num_rows, 0, 42);
-  auto if_false = rag.Int32(num_rows, 0, 42);
-  auto if_else = if_else_func(field_ref("a"), field_ref("b"), field_ref("c"));
+  auto if_else = if_else_func(std::move(cond), std::move(if_true), std::move(if_false));
   auto bound = if_else.Bind(*schema).ValueOrDie();
-  ExecBatch batch{
-      std::vector<Datum>{std::move(cond), std::move(if_true), std::move(if_false)},
-      num_rows};
   for (auto _ : state) {
     ARROW_CHECK_OK(ExecuteScalarExpression(bound, batch).status());
   }
-  state.SetItemsProcessed(num_rows * state.iterations());
+
+  state.SetItemsProcessed(batch.length * state.iterations());
 }
 
-BENCHMARK_CAPTURE(BM_IfElseArray, "regular_sv_aware", {if_else_regular});
-BENCHMARK_CAPTURE(BM_IfElseArray, "special_sv_aware", {if_else_special});
-BENCHMARK_CAPTURE(BM_IfElseArray, "regular_sv_unaware",
-                  {[](Expression cond, Expression if_true, Expression if_false) {
-                    return if_else_regular(sv_suppress(cond), sv_suppress(if_true),
-                                           sv_suppress(if_false));
-                  }});
-BENCHMARK_CAPTURE(BM_IfElseArray, "special_sv_unaware",
-                  {[](Expression cond, Expression if_true, Expression if_false) {
-                    return if_else_special(sv_suppress(cond), sv_suppress(if_true),
-                                           sv_suppress(if_false));
-                  }});
+}  // namespace
+
+template <typename... Args>
+static void BM_IfElseTrivialCond(
+    benchmark::State& state,
+    std::function<Expression(Expression, Expression, Expression)> if_else_func,
+    Expression cond, Args&&...) {
+  const int64_t num_rows = state.range(0);
+
+  auto schema = arrow::schema({field("i1", int32()), field("i2", int32())});
+
+  auto i1 = ConstantArrayGenerator::Int32(num_rows, 1);
+  auto i2 = ConstantArrayGenerator::Int32(num_rows, 0);
+  ExecBatch batch{std::vector<Datum>{std::move(i1), std::move(i2)}, num_rows};
+
+  BenchmarkIfElse(state, std::move(if_else_func), std::move(cond), field_ref("i1"),
+                  field_ref("i2"), schema, batch);
+}
+
+#ifdef BM
+#  error("BM is defined")
+#else
+#  define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, name, ...)    \
+    BM(name##_regular, if_else_regular, __VA_ARGS__);                       \
+    BM(name##_special, if_else_special, __VA_ARGS__);                       \
+    BM(name##_regular_sv_unaware, sv_unaware_if_else_regular, __VA_ARGS__); \
+    BM(name##_special_sv_unaware, sv_unaware_if_else_special, __VA_ARGS__);
+#endif
+
+const std::vector<std::string> kNumRowsArgNames{"num_rows"};
+const std::vector<int64_t> kNumRowsArg = benchmark::CreateRange(1, 64 * 1024, 32);
+
+#define BENCHMARK_IF_ELSE(BM, name, if_else, arg_names, args) \
+  BENCHMARK_CAPTURE(BM, name, if_else)->ArgNames(arg_names)->ArgsProduct({args})
+
+#define BENCHMARK_IF_ELSE_ARGS(BM, name, if_else, arg_names, args, ...) \
+  BENCHMARK_CAPTURE(BM, name, if_else, __VA_ARGS__)                     \
+      ->ArgNames(arg_names)                                             \
+      ->ArgsProduct(args)
+
+#define BM(name, if_else, ...)                                                  \
+  BENCHMARK_IF_ELSE_ARGS(BM_IfElseTrivialCond, name, if_else, kNumRowsArgNames, \
+                         {kNumRowsArg}, __VA_ARGS__)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_null, kBooleanNull)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_true, literal(true))
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_false, literal(false))
+#undef BM
+
+namespace {
+
+void BenchmarkIfElseWithCondArray(
+    benchmark::State& state,
+    std::function<Expression(Expression, Expression, Expression)> if_else_func,
+    int64_t num_rows, double true_probability, double null_probability) {
+  random::RandomArrayGenerator rag(42);
+  auto cond = rag.Boolean(num_rows, true_probability, null_probability);
+  auto schema = arrow::schema({field("b", boolean())});
+
+  ExecBatch batch{std::vector<Datum>{cond}, cond->length()};
+
+  BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), literal(1), literal(0),
+                  schema, batch);
+}
+
+}  // namespace
+
+template <typename... Args>
+static void BM_IfElseNumRows(
+    benchmark::State& state,
+    std::function<Expression(Expression, Expression, Expression)> if_else_func,
+    Args&&...) {
+  const int64_t num_rows = state.range(0);
+
+  BenchmarkIfElseWithCondArray(state, std::move(if_else_func), num_rows,
+                               /*true_probability=*/0.5, /*null_probability=*/0.0);
+}
+
+#define BM(name, if_else, ...) \
+  BENCHMARK_IF_ELSE(BM_IfElseNumRows, name, if_else, kNumRowsArgNames, {kNumRowsArg})
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, num_rows)
+#undef BM
+
+template <typename... Args>
+static void BM_IfElseNullProbability(
+    benchmark::State& state,
+    std::function<Expression(Expression, Expression, Expression)> if_else_func,
+    Args&&...) {
+  const int64_t num_rows = state.range(0);
+  const double null_probability = state.range(1) / 100.0;
+
+  BenchmarkIfElseWithCondArray(state, std::move(if_else_func), num_rows,
+                               /*true_probability=*/0.5, null_probability);
+}
+
+const std::vector<std::string> kNumRowsAndNullProbabilityArgNames{"num_rows",
+                                                                  "null_probability"};
+const std::vector<std::vector<int64_t>> kNumRowsAndNullProbabilityArgs{
+    {4 * 1024, 64 * 1024}, {0, 50, 90, 100}};
+
+#define BM(name, if_else, ...)                               \
+  BENCHMARK_IF_ELSE(BM_IfElseNullProbability, name, if_else, \
+                    kNumRowsAndNullProbabilityArgNames, kNumRowsAndNullProbabilityArgs)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, null_probability);
+#undef BM
 
 }  // namespace compute
 
