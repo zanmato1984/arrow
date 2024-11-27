@@ -682,13 +682,14 @@ Result<Expression> BindNonRecursive(Expression::Special special,
     // special form so not recursive.
     special.selection_vector_aware = special.special_form->selection_vector_aware;
 
-    ARROW_ASSIGN_OR_RAISE(special.type, special.exec->Bind(types));
+    ARROW_ASSIGN_OR_RAISE(special.type,
+                          special.exec->Bind(special.arguments, exec_context));
     return Status::OK();
   };
 
   // First try and bind exactly
   Result<std::unique_ptr<SpecialFormExec>> maybe_exact_match =
-      special.special_form->DispatchExact(types);
+      special.special_form->DispatchExact(types, exec_context);
   if (maybe_exact_match.ok()) {
     special.exec = std::move(*maybe_exact_match);
     if (FinishBind().ok()) {
@@ -704,7 +705,8 @@ Result<Expression> BindNonRecursive(Expression::Special special,
   // first.  Since DispatchBest generally prefers up-casting the best way to do this is
   // first down-cast the literals as much as possible
   types = GetTypesWithSmallestLiteralRepresentation(special.arguments);
-  ARROW_ASSIGN_OR_RAISE(special.exec, special.special_form->DispatchBest(&types));
+  ARROW_ASSIGN_OR_RAISE(special.exec,
+                        special.special_form->DispatchBest(&types, exec_context));
 
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] == special.arguments[i].type()) continue;
@@ -899,7 +901,7 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
   }
 
   if (auto special = expr.special()) {
-    return special->exec->Execute(special->arguments, input, exec_context);
+    return special->exec->Execute(input, exec_context);
   }
 
   auto call = CallNotNull(expr);
