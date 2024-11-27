@@ -33,8 +33,6 @@
 namespace arrow {
 namespace compute {
 
-class SpecialForm;
-
 /// \defgroup expression-core Expressions to describe data transformations
 ///
 /// @{
@@ -64,12 +62,13 @@ class ARROW_EXPORT Expression {
   };
 
   struct Special {
-    std::vector<Expression> arguments;
     std::shared_ptr<SpecialForm> special_form;
+    std::vector<Expression> arguments;
     // Cached hash value
     size_t hash;
 
     // post-Bind properties:
+    std::shared_ptr<SpecialFormExec> exec;
     TypeHolder type;
     bool selection_vector_aware;
 

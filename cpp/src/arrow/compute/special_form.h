@@ -19,39 +19,35 @@
 
 namespace arrow::compute {
 
-class ARROW_EXPORT SpecialForm {
+class ARROW_EXPORT SpecialFormExec {
  public:
-  explicit SpecialForm(std::string name, bool selection_vector_aware = false)
-      : name(std::move(name)), selection_vector_aware(selection_vector_aware) {}
-  virtual ~SpecialForm() = default;
+  virtual ~SpecialFormExec() = default;
 
-  virtual Result<TypeHolder> Resolve(std::vector<Expression>* arguments,
-                                     ExecContext* exec_context) const = 0;
+  virtual Result<TypeHolder> Bind(const std::vector<TypeHolder>& types) const = 0;
 
   virtual Result<Datum> Execute(const std::vector<Expression>& arguments,
                                 const ExecBatch& input,
                                 ExecContext* exec_context) const = 0;
+};
+
+class ARROW_EXPORT SpecialForm {
+ public:
+  explicit SpecialForm(std::string name, bool selection_vector_aware = false)
+      : name(std::move(name)), selection_vector_aware(selection_vector_aware) {}
+
+  virtual ~SpecialForm() = default;
+
+  virtual Result<std::unique_ptr<SpecialFormExec>> DispatchExact(
+      const std::vector<TypeHolder>& types) const;
+
+  virtual Result<std::unique_ptr<SpecialFormExec>> DispatchBest(
+      std::vector<TypeHolder>* values) const;
 
  public:
   const std::string name;
   const bool selection_vector_aware = false;
 };
 
-class ARROW_EXPORT SpecialFormState {
- public:
-  virtual ~SpecialFormState() = default;
-};
-
-class IfElseSpecialForm : public SpecialForm {
- public:
-  IfElseSpecialForm()
-      : SpecialForm(/*name=*/"if_else", /*selection_vector_aware=*/true) {}
-
-  Result<TypeHolder> Resolve(std::vector<Expression>* arguments,
-                             ExecContext* exec_context) const override;
-
-  Result<Datum> Execute(const std::vector<Expression>& arguments, const ExecBatch& input,
-                        ExecContext* exec_context) const override;
-};
+std::shared_ptr<SpecialForm> GetIfElseSpecialForm();
 
 }  // namespace arrow::compute

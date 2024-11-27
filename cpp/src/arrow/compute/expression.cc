@@ -94,8 +94,8 @@ Expression call(std::string function, std::vector<Expression> arguments,
 
 Expression if_else_special(Expression cond, Expression if_true, Expression if_false) {
   Expression::Special special;
+  special.special_form = GetIfElseSpecialForm();
   special.arguments = {std::move(cond), std::move(if_true), std::move(if_false)};
-  special.special_form = std::make_shared<IfElseSpecialForm>();
   return Expression(std::move(special));
 }
 
@@ -675,11 +675,62 @@ Result<Expression> BindNonRecursive(Expression::Special special,
   DCHECK(std::all_of(special.arguments.begin(), special.arguments.end(),
                      [](const Expression& argument) { return argument.IsBound(); }));
 
-  ARROW_ASSIGN_OR_RAISE(special.type,
-                        special.special_form->Resolve(&special.arguments, exec_context));
-  // Selection vector awareness-es of the subexpressions is fully taken over by the
-  // special form so not recursive.
-  special.selection_vector_aware = special.special_form->selection_vector_aware;
+  std::vector<TypeHolder> types = GetTypes(special.arguments);
+
+  auto FinishBind = [&] {
+    // Selection vector awareness-es of the subexpressions is fully taken over by the
+    // special form so not recursive.
+    special.selection_vector_aware = special.special_form->selection_vector_aware;
+
+    ARROW_ASSIGN_OR_RAISE(special.type, special.exec->Bind(types));
+    return Status::OK();
+  };
+
+  // First try and bind exactly
+  Result<std::unique_ptr<SpecialFormExec>> maybe_exact_match =
+      special.special_form->DispatchExact(types);
+  if (maybe_exact_match.ok()) {
+    special.exec = std::move(*maybe_exact_match);
+    if (FinishBind().ok()) {
+      return Expression(std::move(special));
+    }
+  }
+
+  if (!insert_implicit_casts) {
+    return maybe_exact_match.status();
+  }
+
+  // If exact binding fails, and we are allowed to cast, then prefer casting literals
+  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
+  // first down-cast the literals as much as possible
+  types = GetTypesWithSmallestLiteralRepresentation(special.arguments);
+  ARROW_ASSIGN_OR_RAISE(special.exec, special.special_form->DispatchBest(&types));
+
+  for (size_t i = 0; i < types.size(); ++i) {
+    if (types[i] == special.arguments[i].type()) continue;
+
+    if (const Datum* lit = special.arguments[i].literal()) {
+      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
+      special.arguments[i] = literal(std::move(new_lit));
+      continue;
+    }
+
+    // construct an implicit cast Expression with which to replace this argument
+    Expression::Call implicit_cast;
+    implicit_cast.function_name = "cast";
+    implicit_cast.arguments = {std::move(special.arguments[i])};
+
+    // TODO(wesm): Use TypeHolder in options
+    implicit_cast.options = std::make_shared<compute::CastOptions>(
+        compute::CastOptions::Safe(types[i].GetSharedPtr()));
+
+    ARROW_ASSIGN_OR_RAISE(
+        special.arguments[i],
+        BindNonRecursive(std::move(implicit_cast),
+                         /*insert_implicit_casts=*/false, exec_context));
+  }
+
+  RETURN_NOT_OK(FinishBind());
   return Expression(std::move(special));
 }
 
@@ -848,7 +899,7 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
   }
 
   if (auto special = expr.special()) {
-    return special->special_form->Execute(special->arguments, input, exec_context);
+    return special->exec->Execute(special->arguments, input, exec_context);
   }
 
   auto call = CallNotNull(expr);
