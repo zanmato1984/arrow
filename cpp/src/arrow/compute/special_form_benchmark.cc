@@ -149,6 +149,21 @@ void BenchmarkIfElse(
 
 }  // namespace
 
+#ifdef BM
+#  error("BM is defined")
+#else
+#  define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, name, ...)      \
+    BM(name##_regular, if_else_regular, ##__VA_ARGS__);                       \
+    BM(name##_special, if_else_special, ##__VA_ARGS__);                       \
+    BM(name##_regular_sv_unaware, sv_unaware_if_else_regular, ##__VA_ARGS__); \
+    BM(name##_special_sv_unaware, sv_unaware_if_else_special, ##__VA_ARGS__);
+#endif
+
+#define BENCHMARK_IF_ELSE(BM, name, if_else, arg_names, args, ...) \
+  BENCHMARK_CAPTURE(BM, name, if_else, ##__VA_ARGS__)              \
+      ->ArgNames(arg_names)                                        \
+      ->ArgsProduct(args)
+
 template <typename... Args>
 static void BM_IfElseTrivialCond(
     benchmark::State& state,
@@ -166,30 +181,12 @@ static void BM_IfElseTrivialCond(
                   field_ref("i2"), schema, batch);
 }
 
-#ifdef BM
-#  error("BM is defined")
-#else
-#  define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, name, ...)    \
-    BM(name##_regular, if_else_regular, __VA_ARGS__);                       \
-    BM(name##_special, if_else_special, __VA_ARGS__);                       \
-    BM(name##_regular_sv_unaware, sv_unaware_if_else_regular, __VA_ARGS__); \
-    BM(name##_special_sv_unaware, sv_unaware_if_else_special, __VA_ARGS__);
-#endif
-
 const std::vector<std::string> kNumRowsArgNames{"num_rows"};
 const std::vector<int64_t> kNumRowsArg = benchmark::CreateRange(1, 64 * 1024, 32);
 
-#define BENCHMARK_IF_ELSE(BM, name, if_else, arg_names, args) \
-  BENCHMARK_CAPTURE(BM, name, if_else)->ArgNames(arg_names)->ArgsProduct({args})
-
-#define BENCHMARK_IF_ELSE_ARGS(BM, name, if_else, arg_names, args, ...) \
-  BENCHMARK_CAPTURE(BM, name, if_else, __VA_ARGS__)                     \
-      ->ArgNames(arg_names)                                             \
-      ->ArgsProduct(args)
-
-#define BM(name, if_else, ...)                                                  \
-  BENCHMARK_IF_ELSE_ARGS(BM_IfElseTrivialCond, name, if_else, kNumRowsArgNames, \
-                         {kNumRowsArg}, __VA_ARGS__)
+#define BM(name, if_else, ...)                                             \
+  BENCHMARK_IF_ELSE(BM_IfElseTrivialCond, name, if_else, kNumRowsArgNames, \
+                    {kNumRowsArg}, ##__VA_ARGS__)
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_null, kBooleanNull)
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_true, literal(true))
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_false, literal(false))
@@ -252,8 +249,6 @@ const std::vector<std::vector<int64_t>> kNumRowsAndNullProbabilityArgs{
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, null_probability);
 #undef BM
 
-namespace {
-
 template <typename... Args>
 void BM_IfElseWithOneHeavySide(
     benchmark::State& state,
@@ -273,8 +268,6 @@ void BM_IfElseWithOneHeavySide(
   BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), heavy(field_ref("i")),
                   literal(0), schema, batch);
 }
-
-}  // namespace
 
 const std::vector<std::string> kHeavyRatioArgNames{"heavy_ratio"};
 const std::vector<int64_t> kHeavyRatioArgs{{0, 25, 50, 75, 100}};
