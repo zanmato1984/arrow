@@ -750,10 +750,12 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
 
 bool IsSelectionVectorAwarePathAvailable(const ExecBatch& input,
                                          ExecContext* exec_context) {
-  bool exceeds_chunksize = input.length > exec_context->exec_chunksize();
-  return std::all_of(input.values.begin(), input.values.end(), [&](const Datum& value) {
-    return value.is_scalar() || (value.is_array() && !exceeds_chunksize);
-  });
+  return std::all_of(input.values.begin(), input.values.end(),
+                     [exceeds_chunksize = input.length > exec_context->exec_chunksize()](
+                         const Datum& value) {
+                       return value.is_scalar() ||
+                              (value.is_array() && !exceeds_chunksize);
+                     });
 }
 
 class IfElseSpecialExec : public SpecialExec {

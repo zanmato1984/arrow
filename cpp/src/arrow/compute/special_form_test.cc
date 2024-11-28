@@ -51,29 +51,35 @@ void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
 }
 
 Result<Datum> ExecuteExpr(const Expression& expr, const std::shared_ptr<Schema>& schema,
-                          const ExecBatch& batch) {
-  ARROW_ASSIGN_OR_RAISE(auto bound, expr.Bind(*schema));
-  return ExecuteScalarExpression(bound, batch);
+                          const ExecBatch& batch,
+                          ExecContext* exec_context = default_exec_context()) {
+  ARROW_ASSIGN_OR_RAISE(auto bound, expr.Bind(*schema, exec_context));
+  return ExecuteScalarExpression(bound, batch, exec_context);
 }
 
-#define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message) \
-  { ASSERT_RAISES_WITH_MESSAGE(ENUM, message, ExecuteExpr(expr, schema, batch)); }
+#define AssertExprRaisesWithMessage(expr, schema, batch, ENUM, message, ...)     \
+  {                                                                              \
+    ASSERT_RAISES_WITH_MESSAGE(ENUM, message,                                    \
+                               ExecuteExpr(expr, schema, batch, ##__VA_ARGS__)); \
+  }
 
 void AssertExprEqualIgnoreShape(const Expression& expr,
                                 const std::shared_ptr<Schema>& schema,
-                                const ExecBatch& batch, const Datum& expected) {
-  ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(expr, schema, batch));
+                                const ExecBatch& batch, const Datum& expected,
+                                ExecContext* exec_context = default_exec_context()) {
+  ASSERT_OK_AND_ASSIGN(auto result, ExecuteExpr(expr, schema, batch, exec_context));
   AssertEqualIgnoreShape(expected, result);
 }
 
 void AssertExprEqualExprsIgnoreShape(const Expression& expr,
                                      const std::vector<Expression>& exprs,
                                      const std::shared_ptr<Schema>& schema,
-                                     const ExecBatch& batch) {
-  ASSERT_OK_AND_ASSIGN(auto expected, ExecuteExpr(expr, schema, batch));
+                                     const ExecBatch& batch,
+                                     ExecContext* exec_context = default_exec_context()) {
+  ASSERT_OK_AND_ASSIGN(auto expected, ExecuteExpr(expr, schema, batch, exec_context));
   for (const auto& e : exprs) {
     ARROW_SCOPED_TRACE(e.ToString());
-    AssertExprEqualIgnoreShape(e, schema, batch, expected);
+    AssertExprEqualIgnoreShape(e, schema, batch, expected, exec_context);
   }
 }
 
@@ -151,6 +157,20 @@ TEST(IfElseSpecialForm, Basic) {
     auto if_else_sp = if_else_special(cond, if_true, if_false);
     auto expected = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5]");
     AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+  }
+}
+
+TEST(IfElseSpecialForm, ImplicitCast) {
+  auto schema = arrow::schema({field("i8", int8()), field("i32", int32())});
+  for (const auto& if_else_sp :
+       {if_else_special(literal(true), field_ref("i8"), field_ref("i32")),
+        if_else_special(literal(true), field_ref("i32"), field_ref("i8")),
+        // Literal will be downcast.
+        if_else_special(literal(true), field_ref("i32"),
+                        literal(static_cast<int64_t>(0)))}) {
+    ARROW_SCOPED_TRACE(if_else_sp.ToString());
+    ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
+    ASSERT_EQ(bound.type()->id(), Type::INT32);
   }
 }
 
@@ -289,10 +309,11 @@ class IfElseSpecialFormTest : public ::testing::Test {
   static void CheckIfElseIgnoreShape(const Expression& cond, const Expression& if_true,
                                      const Expression& if_false,
                                      const std::shared_ptr<Schema>& schema,
-                                     const ExecBatch& batch) {
+                                     const ExecBatch& batch,
+                                     ExecContext* exec_context = default_exec_context()) {
     auto if_else = if_else_regular(cond, if_true, if_false);
     auto exprs = SuppressSelectionVectorAwareForIfElse(cond, if_true, if_false);
-    AssertExprEqualExprsIgnoreShape(if_else, exprs, schema, batch);
+    AssertExprEqualExprsIgnoreShape(if_else, exprs, schema, batch, exec_context);
   }
 };
 
@@ -594,6 +615,93 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               sv_suppress(i2))))}) {
       ARROW_SCOPED_TRACE(if_else_sp.ToString());
       AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+}
+
+TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePassUnavailable) {
+  ExecContext exec_context;
+  constexpr int64_t num_rows = 8;
+  auto schema = arrow::schema({field("b", boolean()), field("i", int32())});
+  auto b = field_ref("b");
+  auto i = field_ref("i");
+  auto batch = ExecBatch(
+      {
+          *ArrayFromJSON(boolean(),
+                         "[true, false, true, false, true, false, true, false]"),
+          *ArrayFromJSON(int32(), "[42, 42, 42, 42, 42, 42, 42, 42]"),
+      },
+      num_rows);
+  {
+    ARROW_SCOPED_TRACE("batch_size == exec_chunksize");
+    exec_context.set_exec_chunksize(num_rows);
+    {
+      ARROW_SCOPED_TRACE("all scalar bodies");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(literal(1)),
+                                        assert_sv_exist(literal(0)));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("array true body");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(i),
+                                        assert_sv_exist(literal(0)));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("array false body");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(literal(1)),
+                                        assert_sv_exist(i));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("all array bodies");
+      auto if_else_sp =
+          if_else_special(field_ref("b"), assert_sv_exist(i), assert_sv_exist(i));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("batch_size > exec_chunksize");
+    exec_context.set_exec_chunksize(num_rows - 1);
+    {
+      ARROW_SCOPED_TRACE("all scalar bodies");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(literal(1)),
+                                        assert_sv_exist(literal(0)));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("array true body");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_empty(i),
+                                        assert_sv_empty(literal(0)));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("array false body");
+      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_empty(literal(1)),
+                                        assert_sv_empty(i));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("all array bodies");
+      auto if_else_sp =
+          if_else_special(field_ref("b"), assert_sv_empty(i), assert_sv_empty(i));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
   }
 }
