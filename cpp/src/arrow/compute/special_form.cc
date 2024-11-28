@@ -26,8 +26,6 @@
 
 namespace arrow::compute {
 
-namespace internal {
-
 namespace {
 
 // TODO: Clean free functions.
@@ -508,13 +506,13 @@ struct Branch {
 
 template <typename Impl>
 struct ConditionalExecutor {
-  explicit ConditionalExecutor(std::vector<Branch> branches, TypeHolder result_type)
-      : branches(std::move(branches)), result_type_(std::move(result_type)) {}
+  ConditionalExecutor(const std::vector<Branch>& branches, const TypeHolder& result_type)
+      : branches(branches), result_type(result_type) {}
 
   ARROW_DISALLOW_COPY_AND_ASSIGN(ConditionalExecutor);
   ARROW_DEFAULT_MOVE_AND_ASSIGN(ConditionalExecutor);
 
-  Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const {
+  Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const&& {
     DCHECK(!branches.empty());
 
     BranchResults results;
@@ -533,7 +531,7 @@ struct ConditionalExecutor {
       ARROW_ASSIGN_OR_RAISE(auto body_result,
                             static_cast<const Impl*>(this)->ApplyBody(
                                 body_mask, branch.body, input, exec_context));
-      DCHECK(body_result.type()->Equals(*result_type_));
+      DCHECK(body_result.type()->Equals(*result_type));
       ARROW_ASSIGN_OR_RAISE(auto selection_vector, body_mask->GetSelectionVector());
       results.Emplace(std::move(body_result), std::move(selection_vector));
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
@@ -589,8 +587,8 @@ struct ConditionalExecutor {
   }
 
  protected:
-  std::vector<Branch> branches;
-  TypeHolder result_type_;
+  const std::vector<Branch>& branches;
+  const TypeHolder& result_type;
 };
 
 struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalExecutor> {
@@ -606,8 +604,7 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
                                        const BranchResults& results,
                                        ExecContext* exec_context) const {
     if (results.empty()) {
-      // return MakeNullScalar(result_type_);
-      return MakeArrayOfNull(result_type_.GetSharedPtr(), input.length,
+      return MakeArrayOfNull(result_type.GetSharedPtr(), input.length,
                              exec_context->memory_pool());
     }
 
@@ -677,8 +674,7 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
                                        const BranchResults& results,
                                        ExecContext* exec_context) const {
     if (results.empty()) {
-      // return MakeNullScalar(result_type_);
-      return MakeArrayOfNull(result_type_.GetSharedPtr(), input.length,
+      return MakeArrayOfNull(result_type.GetSharedPtr(), input.length,
                              exec_context->memory_pool());
     }
 
@@ -752,52 +748,31 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
   }
 };
 
-bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& arguments,
-                                         const ExecBatch& input,
+bool IsSelectionVectorAwarePathAvailable(const ExecBatch& input,
                                          ExecContext* exec_context) {
-  for (const auto& expr : arguments) {
-    if (!expr.selection_vector_aware()) {
-      return false;
-    }
-  }
-  for (const auto& value : input.values) {
-    if (value.is_scalar()) {
-      continue;
-    }
-    if (value.is_array() && input.length <= exec_context->exec_chunksize()) {
-      continue;
-    }
-    return false;
-  }
-  return true;
+  bool exceeds_chunksize = input.length > exec_context->exec_chunksize();
+  return std::all_of(input.values.begin(), input.values.end(), [&](const Datum& value) {
+    return value.is_scalar() || (value.is_array() && !exceeds_chunksize);
+  });
 }
-
-}  // namespace
 
 class IfElseSpecialExec : public SpecialExec {
  public:
-  explicit IfElseSpecialExec(const Kernel* kernel) : kernel(kernel) {}
+  explicit IfElseSpecialExec(std::shared_ptr<Function> function, const Kernel* kernel)
+      : function(std::move(function)), kernel(kernel), branches(2) {}
 
   Result<TypeHolder> Bind(const std::vector<Expression>& arguments,
                           ExecContext* exec_context) override {
-    DCHECK_EQ(arguments.size(), 3);
     DCHECK(std::all_of(arguments.begin(), arguments.end(),
                        [](const Expression& argument) { return argument.IsBound(); }));
-    cond = arguments[0];
-    DCHECK_EQ(cond.type()->id(), Type::BOOL);
-    if_true = arguments[1];
-    if_false = arguments[2];
-    DCHECK(if_true.type()->Equals(*if_false.type()));
 
-    branches = {
-        {cond, if_true},
-        {literal(true), if_false},
-    };
+    DCHECK_EQ(arguments.size(), 3);
+    const auto& cond = arguments[0];
+    const auto& if_true = arguments[1];
+    const auto& if_false = arguments[2];
 
     {
       auto types = GetTypes(arguments);
-      ARROW_ASSIGN_OR_RAISE(auto function,
-                            exec_context->func_registry()->GetFunction("if_else"));
       KernelContext kernel_context(exec_context, kernel);
       std::unique_ptr<KernelState> kernel_state;
       if (kernel->init) {
@@ -810,12 +785,23 @@ class IfElseSpecialExec : public SpecialExec {
           type, kernel->signature->out_type().Resolve(&kernel_context, types));
     }
 
+    DCHECK_EQ(cond.type()->id(), Type::BOOL);
+    DCHECK_EQ(type, *if_true.type());
+    DCHECK_EQ(type, *if_false.type());
+
+    all_bodies_selection_vector_aware =
+        if_true.selection_vector_aware() && if_false.selection_vector_aware();
+
+    branches[0] = {cond, if_true};
+    branches[1] = {literal(true), if_false};
+
     return type;
   }
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    if (IsSelectionVectorAwarePathAvailable({if_true, if_false}, input, exec_context)) {
+    if (all_bodies_selection_vector_aware &&
+        IsSelectionVectorAwarePathAvailable(input, exec_context)) {
       return SparseConditionalExecutor(branches, type).Execute(input, exec_context);
     } else {
       return DenseConditionalExecutor(branches, type).Execute(input, exec_context);
@@ -823,11 +809,14 @@ class IfElseSpecialExec : public SpecialExec {
   }
 
  private:
+  // For Bind.
+  std::shared_ptr<Function> function;
   const Kernel* kernel;
 
-  Expression cond, if_true, if_false;
-  std::vector<Branch> branches;
+  // Post-bind, for Execute.
   TypeHolder type;
+  bool all_bodies_selection_vector_aware;
+  std::vector<Branch> branches;
 };
 
 class IfElseSpecialForm : public SpecialForm {
@@ -840,7 +829,7 @@ class IfElseSpecialForm : public SpecialForm {
     ARROW_ASSIGN_OR_RAISE(auto function,
                           exec_context->func_registry()->GetFunction(name));
     ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchExact(types));
-    return std::make_unique<IfElseSpecialExec>(kernel);
+    return std::make_unique<IfElseSpecialExec>(std::move(function), kernel);
   }
 
   Result<std::unique_ptr<SpecialExec>> DispatchBest(
@@ -848,14 +837,14 @@ class IfElseSpecialForm : public SpecialForm {
     ARROW_ASSIGN_OR_RAISE(auto function,
                           exec_context->func_registry()->GetFunction(name));
     ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchBest(types));
-    return std::make_unique<IfElseSpecialExec>(kernel);
+    return std::make_unique<IfElseSpecialExec>(std::move(function), kernel);
   }
 };
 
-}  // namespace internal
+}  // namespace
 
 std::shared_ptr<SpecialForm> GetIfElseSpecialForm() {
-  static auto instance = std::make_shared<internal::IfElseSpecialForm>();
+  static auto instance = std::make_shared<IfElseSpecialForm>();
   return instance;
 }
 
