@@ -601,11 +601,16 @@ template <typename DispatchExactFn, typename DispatchBestFn, typename FinishBind
 Status DispatchForBind(DispatchExactFn&& dispatch_exact, DispatchBestFn&& dispatch_best,
                        FinishBind&& finish_bind, std::vector<Expression>& arguments,
                        bool insert_implicit_casts, ExecContext* exec_context) {
+  DCHECK(std::all_of(arguments.begin(), arguments.end(),
+                     [](const Expression& argument) { return argument.IsBound(); }));
+
+  std::vector<TypeHolder> types = GetTypes(arguments);
+
   // First try and bind exactly
-  auto maybe_exact_match = dispatch_exact();
+  auto maybe_exact_match = dispatch_exact(types);
   if (maybe_exact_match.ok()) {
     auto output = std::move(*maybe_exact_match);
-    if (finish_bind(std::move(output)).ok()) {
+    if (finish_bind(types, std::move(output)).ok()) {
       return Status::OK();
     }
   }
@@ -617,7 +622,7 @@ Status DispatchForBind(DispatchExactFn&& dispatch_exact, DispatchBestFn&& dispat
   // If exact binding fails, and we are allowed to cast, then prefer casting literals
   // first.  Since DispatchBest generally prefers up-casting the best way to do this is
   // first down-cast the literals as much as possible
-  auto types = GetTypesWithSmallestLiteralRepresentation(arguments);
+  types = GetTypesWithSmallestLiteralRepresentation(arguments);
   ARROW_ASSIGN_OR_RAISE(auto output, dispatch_best(&types));
   // ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
 
@@ -644,19 +649,15 @@ Status DispatchForBind(DispatchExactFn&& dispatch_exact, DispatchBestFn&& dispat
                                        /*insert_implicit_casts=*/false, exec_context));
   }
 
-  return finish_bind(std::move(output));
+  return finish_bind(types, std::move(output));
 }
 
 // Produce a bound Expression from unbound Call and bound arguments.
 Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
                                     compute::ExecContext* exec_context) {
-  DCHECK(std::all_of(call.arguments.begin(), call.arguments.end(),
-                     [](const Expression& argument) { return argument.IsBound(); }));
-
-  std::vector<TypeHolder> types = GetTypes(call.arguments);
   ARROW_ASSIGN_OR_RAISE(call.function, GetFunction(call, exec_context));
 
-  auto FinishBind = [&](const Kernel* kernel) {
+  auto FinishBind = [&](const std::vector<TypeHolder>& types, const Kernel* kernel) {
     call.kernel = kernel;
 
     compute::KernelContext kernel_context(exec_context, call.kernel);
@@ -681,7 +682,9 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
   };
 
   RETURN_NOT_OK(DispatchForBind(
-      [&]() -> Result<const Kernel*> { return call.function->DispatchExact(types); },
+      [&](const std::vector<TypeHolder>& types) -> Result<const Kernel*> {
+        return call.function->DispatchExact(types);
+      },
       [&](std::vector<TypeHolder>* types) -> Result<const Kernel*> {
         return call.function->DispatchBest(types);
       },
@@ -697,7 +700,8 @@ Result<Expression> BindNonRecursive(Expression::Special special,
   DCHECK(std::all_of(special.arguments.begin(), special.arguments.end(),
                      [](const Expression& argument) { return argument.IsBound(); }));
 
-  auto FinishBind = [&](std::unique_ptr<SpecialExec>&& special_exec) {
+  auto FinishBind = [&](const std::vector<TypeHolder>& types,
+                        std::unique_ptr<SpecialExec>&& special_exec) {
     special.special_exec = std::move(special_exec);
 
     // Selection vector awareness-es of the subexpressions is fully taken over by the
@@ -711,9 +715,8 @@ Result<Expression> BindNonRecursive(Expression::Special special,
   };
 
   RETURN_NOT_OK(DispatchForBind(
-      [&]() -> Result<std::unique_ptr<SpecialExec>> {
-        return special.special_form->DispatchExact(GetTypes(special.arguments),
-                                                   exec_context);
+      [&](const std::vector<TypeHolder>& types) -> Result<std::unique_ptr<SpecialExec>> {
+        return special.special_form->DispatchExact(types, exec_context);
       },
       [&](std::vector<TypeHolder>* types) -> Result<std::unique_ptr<SpecialExec>> {
         return special.special_form->DispatchBest(types, exec_context);
