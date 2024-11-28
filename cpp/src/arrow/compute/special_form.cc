@@ -18,6 +18,7 @@
 #include "arrow/compute/special_form.h"
 
 #include "arrow/array/builder_primitive.h"
+#include "arrow/chunk_resolver.h"
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/exec.h"
 #include "arrow/compute/expression.h"
@@ -67,6 +68,12 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
       const std::shared_ptr<BooleanArray>& bitmap, ExecContext* exec_context) const = 0;
 
+  virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromSparseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const = 0;
+
+  virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const = 0;
+
  private:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromSparseDatum(
       const Datum& datum, ExecContext* exec_context) const {
@@ -74,8 +81,11 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
     if (datum.is_scalar()) {
       return MakeBodyMaskFromScalar(datum.scalar_as<BooleanScalar>(), exec_context);
     }
-    DCHECK(datum.is_array());
-    return MakeBodyMaskFromSparseBitmap(datum.array_as<BooleanArray>(), exec_context);
+    if (datum.is_array()) {
+      return MakeBodyMaskFromSparseBitmap(datum.array_as<BooleanArray>(), exec_context);
+    }
+    DCHECK(datum.is_chunked_array());
+    return MakeBodyMaskFromSparseBitmap(datum.chunked_array(), exec_context);
   }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseDatum(
@@ -84,8 +94,11 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
     if (datum.is_scalar()) {
       return MakeBodyMaskFromScalar(datum.scalar_as<BooleanScalar>(), exec_context);
     }
-    DCHECK(datum.is_array());
-    return MakeBodyMaskFromDenseBitmap(datum.array_as<BooleanArray>(), exec_context);
+    if (datum.is_array()) {
+      return MakeBodyMaskFromDenseBitmap(datum.array_as<BooleanArray>(), exec_context);
+    }
+    DCHECK(datum.is_chunked_array());
+    return MakeBodyMaskFromDenseBitmap(datum.chunked_array(), exec_context);
   }
 
   friend struct NestedBodyMask;
@@ -144,6 +157,14 @@ struct AllPassBranchMask : public BranchMask {
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override;
 
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromSparseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
+      ExecContext* exec_context) const override;
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
+      ExecContext* exec_context) const override;
+
  private:
   int64_t length_;
 };
@@ -187,6 +208,22 @@ struct AllFailBranchMask : public BranchMask {
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
       const std::shared_ptr<BooleanArray>& bitmap,
+      ExecContext* exec_context) const override {
+    DCHECK(false);
+    return Status::Invalid(
+        "AllFailBranchMask::MakeBodyMaskFromDenseBitmap should not be called");
+  }
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromSparseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
+      ExecContext* exec_context) const override {
+    DCHECK(false);
+    return Status::Invalid(
+        "AllFailBranchMask::MakeBodyMaskFromSparseBitmap should not be called");
+  }
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
       ExecContext* exec_context) const override {
     DCHECK(false);
     return Status::Invalid(
@@ -344,6 +381,14 @@ struct ConditionalBranchMask : public BranchMask {
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override;
 
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromSparseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
+      ExecContext* exec_context) const override;
+
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDenseBitmap(
+      const std::shared_ptr<ChunkedArray>& bitmap,
+      ExecContext* exec_context) const override;
+
  protected:
   std::shared_ptr<SelectionVector> selection_vector_ = nullptr;
   int64_t length_ = 0;
@@ -439,6 +484,44 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromDense
   return MakeBodyMaskFromSparseBitmap(bitmap, exec_context);
 }
 
+Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromSparseBitmap(
+    const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const {
+  DCHECK_EQ(bitmap->length(), length_);
+
+  Int32Builder body_builder(exec_context->memory_pool());
+  Int32Builder rest_builder(exec_context->memory_pool());
+  RETURN_NOT_OK(body_builder.Reserve(length_));
+  RETURN_NOT_OK(rest_builder.Reserve(length_));
+
+  int32_t i = 0;
+  for (const auto& chunk : bitmap->chunks()) {
+    DCHECK_EQ(chunk->type()->id(), Type::BOOL);
+    ArraySpan span(*chunk->data());
+    VisitArraySpanInline<BooleanType>(
+        span,
+        [&](bool mask) {
+          if (mask) {
+            body_builder.UnsafeAppend(i);
+          } else {
+            rest_builder.UnsafeAppend(i);
+          }
+          ++i;
+        },
+        [&]() { ++i; });
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  auto body = std::make_shared<SelectionVector>(body_arr->data());
+  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+}
+
+Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromDenseBitmap(
+    const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const {
+  return MakeBodyMaskFromSparseBitmap(bitmap, exec_context);
+}
+
 Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromScalar(
     const BooleanScalar& scalar, ExecContext* exec_context) const {
   return BodyMaskFromScalar(scalar, shared_from_this(), exec_context);
@@ -485,6 +568,81 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
   for (int i = 0; i < selection_vector_->length(); ++i) {
     if (!bitmap->IsNull(i)) {
       if (bitmap->Value(i)) {
+        body_builder.UnsafeAppend(selection_vector_->indices()[i]);
+      } else {
+        rest_builder.UnsafeAppend(selection_vector_->indices()[i]);
+      }
+    }
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  auto body = std::make_shared<SelectionVector>(body_arr->data());
+  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+}
+
+Result<std::shared_ptr<const BodyMask>>
+ConditionalBranchMask::MakeBodyMaskFromSparseBitmap(
+    const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const {
+  DCHECK_EQ(bitmap->length(), length_);
+
+  std::vector<const BooleanArray*> boolean_arrays(bitmap->num_chunks());
+  std::transform(bitmap->chunks().begin(), bitmap->chunks().end(), boolean_arrays.begin(),
+                 [](const auto& chunk) {
+                   DCHECK_EQ(chunk->type()->id(), Type::BOOL);
+                   return checked_cast<const BooleanArray*>(chunk.get());
+                 });
+
+  Int32Builder body_builder(exec_context->memory_pool());
+  Int32Builder rest_builder(exec_context->memory_pool());
+  RETURN_NOT_OK(body_builder.Reserve(length_));
+  RETURN_NOT_OK(rest_builder.Reserve(length_));
+
+  arrow::internal::ChunkResolver resolver(bitmap->chunks());
+  arrow::internal::ChunkLocation location;
+  for (int i = 0; i < selection_vector_->length(); ++i) {
+    auto index = selection_vector_->indices()[i];
+    location = resolver.ResolveWithHint(index, location);
+    if (boolean_arrays[location.chunk_index]->IsValid(location.index_in_chunk)) {
+      if (boolean_arrays[location.chunk_index]->Value(location.index_in_chunk)) {
+        body_builder.UnsafeAppend(index);
+      } else {
+        rest_builder.UnsafeAppend(index);
+      }
+    }
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  auto body = std::make_shared<SelectionVector>(body_arr->data());
+  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+}
+
+Result<std::shared_ptr<const BodyMask>>
+ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
+    const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const {
+  DCHECK_EQ(bitmap->length(), selection_vector_->length());
+
+  std::vector<const BooleanArray*> boolean_arrays(bitmap->num_chunks());
+  std::transform(bitmap->chunks().begin(), bitmap->chunks().end(), boolean_arrays.begin(),
+                 [](const auto& chunk) {
+                   DCHECK_EQ(chunk->type()->id(), Type::BOOL);
+                   return checked_cast<const BooleanArray*>(chunk.get());
+                 });
+
+  Int32Builder body_builder(exec_context->memory_pool());
+  Int32Builder rest_builder(exec_context->memory_pool());
+  RETURN_NOT_OK(body_builder.Reserve(selection_vector_->length()));
+  RETURN_NOT_OK(body_builder.Reserve(selection_vector_->length()));
+
+  arrow::internal::ChunkResolver resolver(bitmap->chunks());
+  arrow::internal::ChunkLocation location;
+  for (int i = 0; i < selection_vector_->length(); ++i) {
+    location = resolver.ResolveWithHint(i, location);
+    if (boolean_arrays[location.chunk_index]->IsValid(location.index_in_chunk)) {
+      if (boolean_arrays[location.chunk_index]->Value(location.index_in_chunk)) {
         body_builder.UnsafeAppend(selection_vector_->indices()[i]);
       } else {
         rest_builder.UnsafeAppend(selection_vector_->indices()[i]);

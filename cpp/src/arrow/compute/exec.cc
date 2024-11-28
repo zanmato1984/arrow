@@ -370,6 +370,7 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   value_offsets_.resize(args_->size(), 0);
   max_chunksize_ = std::min(length_, max_chunksize);
   selection_vector_ = batch.selection_vector.get();
+  // TODO: Consider split selection_vector as the iterator splits the batch.
   return Status::OK();
 }
 

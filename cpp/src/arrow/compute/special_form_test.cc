@@ -720,14 +720,17 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
-      ARROW_SCOPED_TRACE("nested exec_chunksize < batch_size");
+      ARROW_SCOPED_TRACE("exec_chunksize < batch_size");
       exec_context.set_exec_chunksize(num_rows - 2);
       auto if_else_sp = if_else_special(
           b,
           assert_sv_empty(if_else_special(assert_sv_empty(b), assert_sv_empty(i),
                                           assert_sv_empty(i))),
-          assert_sv_empty(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
-                                          assert_sv_exist(i))));
+          assert_sv_empty(if_else_special(
+              assert_sv_empty(b),
+              assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
+                                              assert_sv_exist(i))),
+              assert_sv_exist(i))));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -1033,6 +1036,7 @@ TEST(IfElseSpecialForm, Reference) {
     ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
     std::cout << result.ToString() << std::endl;
   }
+  // TODO: The result shape of exec_chunksize, chunked input, and preallocate.
 }
 
 }  // namespace arrow::compute
