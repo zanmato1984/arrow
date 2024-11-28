@@ -774,9 +774,9 @@ bool IsSelectionVectorAwarePathAvailable(const std::vector<Expression>& argument
 
 }  // namespace
 
-class IfElseSpecialFormExec : public SpecialFormExec {
+class IfElseSpecialExec : public SpecialExec {
  public:
-  explicit IfElseSpecialFormExec(const Kernel* kernel) : kernel(kernel) {}
+  explicit IfElseSpecialExec(const Kernel* kernel) : kernel(kernel) {}
 
   Result<TypeHolder> Bind(const std::vector<Expression>& arguments,
                           ExecContext* exec_context) override {
@@ -835,86 +835,22 @@ class IfElseSpecialForm : public SpecialForm {
   IfElseSpecialForm()
       : SpecialForm(/*name=*/"if_else", /*selection_vector_aware=*/true) {}
 
-  Result<std::unique_ptr<SpecialFormExec>> DispatchExact(
+  Result<std::unique_ptr<SpecialExec>> DispatchExact(
       const std::vector<TypeHolder>& types, ExecContext* exec_context) const override {
     ARROW_ASSIGN_OR_RAISE(auto function,
                           exec_context->func_registry()->GetFunction(name));
     ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchExact(types));
-    return std::make_unique<IfElseSpecialFormExec>(kernel);
-    // KernelContext kernel_context(exec_context, kernel);
-    // std::unique_ptr<KernelState> kernel_state;
-    // if (kernel->init) {
-    //   const FunctionOptions* options = function->default_options();
-    //   ARROW_ASSIGN_OR_RAISE(kernel_state,
-    //                         kernel->init(&kernel_context, {kernel, types, options}));
-    //   kernel_context.SetState(kernel_state.get());
-    // }
-    // return kernel->signature->out_type().Resolve(&kernel_context, types);
+    return std::make_unique<IfElseSpecialExec>(kernel);
   }
 
-  Result<std::unique_ptr<SpecialFormExec>> DispatchBest(
+  Result<std::unique_ptr<SpecialExec>> DispatchBest(
       std::vector<TypeHolder>* types, ExecContext* exec_context) const override {
     ARROW_ASSIGN_OR_RAISE(auto function,
                           exec_context->func_registry()->GetFunction(name));
     ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchBest(types));
-    return std::make_unique<IfElseSpecialFormExec>(kernel);
-    // KernelContext kernel_context(exec_context, kernel);
-    // std::unique_ptr<KernelState> kernel_state;
-    // if (kernel->init) {
-    //   const FunctionOptions* options = function->default_options();
-    //   ARROW_ASSIGN_OR_RAISE(kernel_state,
-    //                         kernel->init(&kernel_context, {kernel, types, options}));
-    //   kernel_context.SetState(kernel_state.get());
-    // }
-    // return kernel->signature->out_type().Resolve(&kernel_context, types);
+    return std::make_unique<IfElseSpecialExec>(kernel);
   }
 };
-
-// Result<TypeHolder> IfElseSpecialForm::Resolve(std::vector<Expression>* arguments,
-//                                               ExecContext* exec_context) const {
-//   ARROW_ASSIGN_OR_RAISE(auto function,
-//                         exec_context->func_registry()->GetFunction("if_else"));
-//   std::vector<TypeHolder> types = GetTypes(*arguments);
-
-//   // TODO: Resolve choose/scatter function.
-
-//   // TODO: DispatchBest and implicit cast.
-//   ARROW_ASSIGN_OR_RAISE(auto maybe_exact_match, function->DispatchExact(types));
-//   KernelContext kernel_context(exec_context, maybe_exact_match);
-//   if (maybe_exact_match->init) {
-//     const FunctionOptions* options = function->default_options();
-//     ARROW_ASSIGN_OR_RAISE(
-//         auto kernel_state,
-//         maybe_exact_match->init(&kernel_context, {maybe_exact_match, types, options}));
-//     kernel_context.SetState(kernel_state.get());
-//   }
-//   return maybe_exact_match->signature->out_type().Resolve(&kernel_context, types);
-// }
-
-// Result<Datum> IfElseSpecialForm::Execute(const std::vector<Expression>& arguments,
-//                                          const ExecBatch& input,
-//                                          ExecContext* exec_context) const {
-//   DCHECK_EQ(arguments.size(), 3);
-//   const auto& cond_expr = arguments[0];
-//   DCHECK_EQ(cond_expr.type()->id(), Type::BOOL);
-//   const auto& if_true_expr = arguments[1];
-//   const auto& if_false_expr = arguments[2];
-//   DCHECK_EQ(if_true_expr.type()->id(), if_false_expr.type()->id());
-//   auto result_type = if_true_expr.type()->GetSharedPtr();
-
-//   std::vector<Branch> branches = {
-//       {cond_expr, if_true_expr},
-//       {literal(true), if_false_expr},
-//   };
-//   if (IsSelectionVectorAwarePathAvailable({if_true_expr, if_false_expr}, input,
-//                                           exec_context)) {
-//     return SparseConditionalExecutor(std::move(branches), std::move(result_type))
-//         .Execute(input, exec_context);
-//   } else {
-//     return DenseConditionalExecutor(std::move(branches), std::move(result_type))
-//         .Execute(input, exec_context);
-//   }
-// }
 
 }  // namespace internal
 

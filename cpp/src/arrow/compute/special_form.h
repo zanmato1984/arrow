@@ -19,9 +19,9 @@
 
 namespace arrow::compute {
 
-class ARROW_EXPORT SpecialFormExec {
+class ARROW_EXPORT SpecialExec {
  public:
-  virtual ~SpecialFormExec() = default;
+  virtual ~SpecialExec() = default;
 
   virtual Result<TypeHolder> Bind(const std::vector<Expression>& arguments,
                                   ExecContext* exec_context) = 0;
@@ -37,10 +37,10 @@ class ARROW_EXPORT SpecialForm {
 
   virtual ~SpecialForm() = default;
 
-  virtual Result<std::unique_ptr<SpecialFormExec>> DispatchExact(
+  virtual Result<std::unique_ptr<SpecialExec>> DispatchExact(
       const std::vector<TypeHolder>& types, ExecContext* exec_context) const = 0;
 
-  virtual Result<std::unique_ptr<SpecialFormExec>> DispatchBest(
+  virtual Result<std::unique_ptr<SpecialExec>> DispatchBest(
       std::vector<TypeHolder>* types, ExecContext* exec_context) const = 0;
 
  public:

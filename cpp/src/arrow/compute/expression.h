@@ -68,7 +68,7 @@ class ARROW_EXPORT Expression {
     size_t hash;
 
     // post-Bind properties:
-    std::shared_ptr<SpecialFormExec> exec;
+    std::shared_ptr<SpecialExec> special_exec;
     TypeHolder type;
     bool selection_vector_aware;
 
