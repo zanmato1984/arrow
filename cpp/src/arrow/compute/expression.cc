@@ -591,6 +591,62 @@ inline std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
   return types;
 }
 
+Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
+                                    compute::ExecContext* exec_context);
+Result<Expression> BindNonRecursive(Expression::Special special,
+                                    bool insert_implicit_casts,
+                                    compute::ExecContext* exec_context);
+
+template <typename DispatchExactFn, typename DispatchBestFn, typename FinishBind>
+Status DispatchForBind(DispatchExactFn&& dispatch_exact, DispatchBestFn&& dispatch_best,
+                       FinishBind&& finish_bind, std::vector<Expression>& arguments,
+                       bool insert_implicit_casts, ExecContext* exec_context) {
+  // First try and bind exactly
+  auto maybe_exact_match = dispatch_exact();
+  if (maybe_exact_match.ok()) {
+    auto output = std::move(*maybe_exact_match);
+    if (finish_bind(std::move(output)).ok()) {
+      return Status::OK();
+    }
+  }
+
+  if (!insert_implicit_casts) {
+    return maybe_exact_match.status();
+  }
+
+  // If exact binding fails, and we are allowed to cast, then prefer casting literals
+  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
+  // first down-cast the literals as much as possible
+  auto types = GetTypesWithSmallestLiteralRepresentation(arguments);
+  ARROW_ASSIGN_OR_RAISE(auto output, dispatch_best(&types));
+  // ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
+
+  for (size_t i = 0; i < types.size(); ++i) {
+    if (types[i] == arguments[i].type()) continue;
+
+    if (const Datum* lit = arguments[i].literal()) {
+      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
+      arguments[i] = literal(std::move(new_lit));
+      continue;
+    }
+
+    // construct an implicit cast Expression with which to replace this argument
+    Expression::Call implicit_cast;
+    implicit_cast.function_name = "cast";
+    implicit_cast.arguments = {std::move(arguments[i])};
+
+    // TODO(wesm): Use TypeHolder in options
+    implicit_cast.options = std::make_shared<compute::CastOptions>(
+        compute::CastOptions::Safe(types[i].GetSharedPtr()));
+
+    ARROW_ASSIGN_OR_RAISE(
+        arguments[i], BindNonRecursive(std::move(implicit_cast),
+                                       /*insert_implicit_casts=*/false, exec_context));
+  }
+
+  return finish_bind(std::move(output));
+}
+
 // Produce a bound Expression from unbound Call and bound arguments.
 Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
                                     compute::ExecContext* exec_context) {
@@ -600,7 +656,9 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
   std::vector<TypeHolder> types = GetTypes(call.arguments);
   ARROW_ASSIGN_OR_RAISE(call.function, GetFunction(call, exec_context));
 
-  auto FinishBind = [&] {
+  auto FinishBind = [&](const Kernel* kernel) {
+    call.kernel = kernel;
+
     compute::KernelContext kernel_context(exec_context, call.kernel);
     if (call.kernel->init) {
       const FunctionOptions* options =
@@ -622,117 +680,46 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
     return Status::OK();
   };
 
-  // First try and bind exactly
-  Result<const Kernel*> maybe_exact_match = call.function->DispatchExact(types);
-  if (maybe_exact_match.ok()) {
-    call.kernel = *maybe_exact_match;
-    if (FinishBind().ok()) {
-      return Expression(std::move(call));
-    }
-  }
+  RETURN_NOT_OK(DispatchForBind(
+      [&]() -> Result<const Kernel*> { return call.function->DispatchExact(types); },
+      [&](std::vector<TypeHolder>* types) -> Result<const Kernel*> {
+        return call.function->DispatchBest(types);
+      },
+      FinishBind, call.arguments, insert_implicit_casts, exec_context));
 
-  if (!insert_implicit_casts) {
-    return maybe_exact_match.status();
-  }
-
-  // If exact binding fails, and we are allowed to cast, then prefer casting literals
-  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
-  // first down-cast the literals as much as possible
-  types = GetTypesWithSmallestLiteralRepresentation(call.arguments);
-  ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
-
-  for (size_t i = 0; i < types.size(); ++i) {
-    if (types[i] == call.arguments[i].type()) continue;
-
-    if (const Datum* lit = call.arguments[i].literal()) {
-      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
-      call.arguments[i] = literal(std::move(new_lit));
-      continue;
-    }
-
-    // construct an implicit cast Expression with which to replace this argument
-    Expression::Call implicit_cast;
-    implicit_cast.function_name = "cast";
-    implicit_cast.arguments = {std::move(call.arguments[i])};
-
-    // TODO(wesm): Use TypeHolder in options
-    implicit_cast.options = std::make_shared<compute::CastOptions>(
-        compute::CastOptions::Safe(types[i].GetSharedPtr()));
-
-    ARROW_ASSIGN_OR_RAISE(
-        call.arguments[i],
-        BindNonRecursive(std::move(implicit_cast),
-                         /*insert_implicit_casts=*/false, exec_context));
-  }
-
-  RETURN_NOT_OK(FinishBind());
   return Expression(std::move(call));
 }
 
+// Produce a bound Expression from unbound Special and bound arguments.
 Result<Expression> BindNonRecursive(Expression::Special special,
                                     bool insert_implicit_casts,
                                     compute::ExecContext* exec_context) {
   DCHECK(std::all_of(special.arguments.begin(), special.arguments.end(),
                      [](const Expression& argument) { return argument.IsBound(); }));
 
-  std::vector<TypeHolder> types = GetTypes(special.arguments);
+  auto FinishBind = [&](std::unique_ptr<SpecialExec>&& special_exec) {
+    special.special_exec = std::move(special_exec);
 
-  auto FinishBind = [&] {
     // Selection vector awareness-es of the subexpressions is fully taken over by the
     // special form so not recursive.
     special.selection_vector_aware = special.special_form->selection_vector_aware;
 
     ARROW_ASSIGN_OR_RAISE(special.type,
                           special.special_exec->Bind(special.arguments, exec_context));
+
     return Status::OK();
   };
 
-  // First try and bind exactly
-  Result<std::unique_ptr<SpecialExec>> maybe_exact_match =
-      special.special_form->DispatchExact(types, exec_context);
-  if (maybe_exact_match.ok()) {
-    special.special_exec = std::move(*maybe_exact_match);
-    if (FinishBind().ok()) {
-      return Expression(std::move(special));
-    }
-  }
+  RETURN_NOT_OK(DispatchForBind(
+      [&]() -> Result<std::unique_ptr<SpecialExec>> {
+        return special.special_form->DispatchExact(GetTypes(special.arguments),
+                                                   exec_context);
+      },
+      [&](std::vector<TypeHolder>* types) -> Result<std::unique_ptr<SpecialExec>> {
+        return special.special_form->DispatchBest(types, exec_context);
+      },
+      FinishBind, special.arguments, insert_implicit_casts, exec_context));
 
-  if (!insert_implicit_casts) {
-    return maybe_exact_match.status();
-  }
-
-  // If exact binding fails, and we are allowed to cast, then prefer casting literals
-  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
-  // first down-cast the literals as much as possible
-  types = GetTypesWithSmallestLiteralRepresentation(special.arguments);
-  ARROW_ASSIGN_OR_RAISE(special.special_exec,
-                        special.special_form->DispatchBest(&types, exec_context));
-
-  for (size_t i = 0; i < types.size(); ++i) {
-    if (types[i] == special.arguments[i].type()) continue;
-
-    if (const Datum* lit = special.arguments[i].literal()) {
-      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
-      special.arguments[i] = literal(std::move(new_lit));
-      continue;
-    }
-
-    // construct an implicit cast Expression with which to replace this argument
-    Expression::Call implicit_cast;
-    implicit_cast.function_name = "cast";
-    implicit_cast.arguments = {std::move(special.arguments[i])};
-
-    // TODO(wesm): Use TypeHolder in options
-    implicit_cast.options = std::make_shared<compute::CastOptions>(
-        compute::CastOptions::Safe(types[i].GetSharedPtr()));
-
-    ARROW_ASSIGN_OR_RAISE(
-        special.arguments[i],
-        BindNonRecursive(std::move(implicit_cast),
-                         /*insert_implicit_casts=*/false, exec_context));
-  }
-
-  RETURN_NOT_OK(FinishBind());
   return Expression(std::move(special));
 }
 
