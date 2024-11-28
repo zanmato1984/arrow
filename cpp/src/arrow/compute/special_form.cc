@@ -504,6 +504,14 @@ struct Branch {
   Expression body;
 };
 
+static bool IsSelectionVectorAwarePathAvailable(const ExecBatch& input,
+                                                ExecContext* exec_context) {
+  return input.length <= exec_context->exec_chunksize() &&
+         std::all_of(input.values.begin(), input.values.end(), [](const Datum& value) {
+           return value.is_scalar() || value.is_array();
+         });
+}
+
 template <typename Impl>
 struct ConditionalExecutor {
   ConditionalExecutor(const std::vector<Branch>& branches, const TypeHolder& result_type)
@@ -580,7 +588,8 @@ struct ConditionalExecutor {
   Result<std::shared_ptr<const BodyMask>> ApplyCond(
       const std::shared_ptr<const BranchMask>& branch_mask, const Expression& cond,
       const ExecBatch& input, ExecContext* exec_context) const {
-    if (cond.selection_vector_aware()) {
+    if (cond.selection_vector_aware() &&
+        IsSelectionVectorAwarePathAvailable(input, exec_context)) {
       return branch_mask->ApplyCondSparse(cond, input, exec_context);
     }
     return branch_mask->ApplyCondDense(cond, input, exec_context);
@@ -747,14 +756,6 @@ struct DenseConditionalExecutor : public ConditionalExecutor<DenseConditionalExe
     return std::make_shared<ChunkedArray>(std::move(chunks));
   }
 };
-
-bool IsSelectionVectorAwarePathAvailable(const ExecBatch& input,
-                                         ExecContext* exec_context) {
-  return input.length <= exec_context->exec_chunksize() &&
-         std::all_of(input.values.begin(), input.values.end(), [](const Datum& value) {
-           return value.is_scalar() || value.is_array();
-         });
-}
 
 class IfElseSpecialExec : public SpecialExec {
  public:

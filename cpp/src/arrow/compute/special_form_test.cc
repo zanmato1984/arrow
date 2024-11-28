@@ -627,8 +627,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
   auto i = field_ref("i");
   auto batch = ExecBatch(
       {
-          *ArrayFromJSON(boolean(),
-                         "[true, false, true, false, true, false, true, false]"),
+          *ArrayFromJSON(boolean(), "[true, true, true, true, true, true, true, false]"),
           *ArrayFromJSON(int32(), "[42, 42, 42, 42, 42, 42, 42, 42]"),
       },
       num_rows);
@@ -639,32 +638,31 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       exec_context.set_exec_chunksize(chunksize);
       {
         ARROW_SCOPED_TRACE("all scalar bodies");
-        auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(literal(1)),
-                                          assert_sv_exist(literal(0)));
+        auto if_else_sp =
+            if_else_special(b, assert_sv_exist(literal(1)), assert_sv_exist(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
         ARROW_SCOPED_TRACE("array true body");
-        auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(i),
-                                          assert_sv_exist(literal(0)));
+        auto if_else_sp =
+            if_else_special(b, assert_sv_exist(i), assert_sv_exist(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
         ARROW_SCOPED_TRACE("array false body");
-        auto if_else_sp = if_else_special(field_ref("b"), assert_sv_exist(literal(1)),
-                                          assert_sv_exist(i));
+        auto if_else_sp =
+            if_else_special(b, assert_sv_exist(literal(1)), assert_sv_exist(i));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
         ARROW_SCOPED_TRACE("all array bodies");
-        auto if_else_sp =
-            if_else_special(field_ref("b"), assert_sv_exist(i), assert_sv_exist(i));
+        auto if_else_sp = if_else_special(b, assert_sv_exist(i), assert_sv_exist(i));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -676,32 +674,60 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
     exec_context.set_exec_chunksize(num_rows - 1);
     {
       ARROW_SCOPED_TRACE("all scalar bodies");
-      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_empty(literal(1)),
-                                        assert_sv_empty(literal(0)));
+      auto if_else_sp =
+          if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
       ARROW_SCOPED_TRACE("array true body");
-      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_empty(i),
-                                        assert_sv_empty(literal(0)));
+      auto if_else_sp =
+          if_else_special(b, assert_sv_empty(i), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
       ARROW_SCOPED_TRACE("array false body");
-      auto if_else_sp = if_else_special(field_ref("b"), assert_sv_empty(literal(1)),
-                                        assert_sv_empty(i));
+      auto if_else_sp =
+          if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(i));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
       ARROW_SCOPED_TRACE("all array bodies");
-      auto if_else_sp =
-          if_else_special(field_ref("b"), assert_sv_empty(i), assert_sv_empty(i));
+      auto if_else_sp = if_else_special(b, assert_sv_empty(i), assert_sv_empty(i));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+  }
+  {
+    ARROW_SCOPED_TRACE("nested");
+    {
+      ARROW_SCOPED_TRACE("exec_chunksize == batch_size");
+      exec_context.set_exec_chunksize(num_rows);
+      auto if_else_sp = if_else_special(
+          b,
+          assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
+                                          assert_sv_exist(i))),
+          assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
+                                          assert_sv_exist(i))));
+      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
+      ASSERT_TRUE(bound.selection_vector_aware());
+      ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
+    }
+    {
+      ARROW_SCOPED_TRACE("nested exec_chunksize < batch_size");
+      exec_context.set_exec_chunksize(num_rows - 2);
+      auto if_else_sp = if_else_special(
+          b,
+          assert_sv_empty(if_else_special(assert_sv_empty(b), assert_sv_empty(i),
+                                          assert_sv_empty(i))),
+          assert_sv_empty(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
+                                          assert_sv_exist(i))));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
