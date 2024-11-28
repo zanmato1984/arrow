@@ -38,10 +38,10 @@ class ARROW_EXPORT SpecialForm {
   virtual ~SpecialForm() = default;
 
   virtual Result<std::unique_ptr<SpecialFormExec>> DispatchExact(
-      const std::vector<TypeHolder>& types, ExecContext* exec_context) const;
+      const std::vector<TypeHolder>& types, ExecContext* exec_context) const = 0;
 
   virtual Result<std::unique_ptr<SpecialFormExec>> DispatchBest(
-      std::vector<TypeHolder>* types, ExecContext* exec_context) const;
+      std::vector<TypeHolder>* types, ExecContext* exec_context) const = 0;
 
  public:
   const std::string name;
