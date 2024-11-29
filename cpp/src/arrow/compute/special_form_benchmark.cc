@@ -60,7 +60,7 @@ Status PayloadExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
 
   int64_t load = PayloadState::Get(ctx).load;
   int64_t load_length =
-      span.selection_vector ? span.selection_vector->length() : arg.length();
+      span.selection_vector.indices() ? span.selection_vector.length() : arg.length();
   for (int64_t i = 0; i < load_length; ++i) {
     volatile int64_t j = load;
     while (j-- > 0) {
