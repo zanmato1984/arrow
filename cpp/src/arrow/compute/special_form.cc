@@ -537,7 +537,7 @@ ConditionalBranchMask::MakeBodyMaskFromSparseBitmap(
   RETURN_NOT_OK(body_builder.Reserve(length_));
   RETURN_NOT_OK(rest_builder.Reserve(length_));
 
-  for (int i = 0; i < selection_vector_->length(); ++i) {
+  for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     auto index = selection_vector_->indices()[i];
     if (!bitmap->IsNull(index)) {
       if (bitmap->Value(index)) {
@@ -565,7 +565,7 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
   RETURN_NOT_OK(body_builder.Reserve(bitmap->true_count()));
   RETURN_NOT_OK(rest_builder.Reserve(bitmap->false_count()));
 
-  for (int i = 0; i < selection_vector_->length(); ++i) {
+  for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     if (!bitmap->IsNull(i)) {
       if (bitmap->Value(i)) {
         body_builder.UnsafeAppend(selection_vector_->indices()[i]);
@@ -601,7 +601,7 @@ ConditionalBranchMask::MakeBodyMaskFromSparseBitmap(
 
   arrow::internal::ChunkResolver resolver(bitmap->chunks());
   arrow::internal::ChunkLocation location;
-  for (int i = 0; i < selection_vector_->length(); ++i) {
+  for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     auto index = selection_vector_->indices()[i];
     location = resolver.ResolveWithHint(index, location);
     if (boolean_arrays[location.chunk_index]->IsValid(location.index_in_chunk)) {
@@ -639,7 +639,7 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
 
   arrow::internal::ChunkResolver resolver(bitmap->chunks());
   arrow::internal::ChunkLocation location;
-  for (int i = 0; i < selection_vector_->length(); ++i) {
+  for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     location = resolver.ResolveWithHint(i, location);
     if (boolean_arrays[location.chunk_index]->IsValid(location.index_in_chunk)) {
       if (boolean_arrays[location.chunk_index]->Value(location.index_in_chunk)) {
@@ -661,14 +661,6 @@ struct Branch {
   Expression cond;
   Expression body;
 };
-
-static bool IsSelectionVectorAwarePathAvailable(const ExecBatch& input,
-                                                ExecContext* exec_context) {
-  return input.length <= exec_context->exec_chunksize() &&
-         std::all_of(input.values.begin(), input.values.end(), [](const Datum& value) {
-           return value.is_scalar() || value.is_array();
-         });
-}
 
 template <typename Impl>
 struct ConditionalExecutor {
@@ -746,8 +738,7 @@ struct ConditionalExecutor {
   Result<std::shared_ptr<const BodyMask>> ApplyCond(
       const std::shared_ptr<const BranchMask>& branch_mask, const Expression& cond,
       const ExecBatch& input, ExecContext* exec_context) const {
-    if (cond.selection_vector_aware() &&
-        IsSelectionVectorAwarePathAvailable(input, exec_context)) {
+    if (cond.selection_vector_aware()) {
       return branch_mask->ApplyCondSparse(cond, input, exec_context);
     }
     return branch_mask->ApplyCondDense(cond, input, exec_context);
@@ -815,7 +806,7 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
       DCHECK_NE(selection_vectors[index], nullptr);
       DCHECK_GT(selection_vectors[index]->length(), 0);
       auto row_ids = selection_vectors[index]->indices();
-      for (int32_t i = 0; i < selection_vectors[index]->length(); ++i) {
+      for (int64_t i = 0; i < selection_vectors[index]->length(); ++i) {
         const int32_t row_id = row_ids[i];
         DCHECK_EQ(bit_util::GetBit(validity_data, row_id), false);
         bit_util::SetBitTo(validity_data, row_id, true);
@@ -959,8 +950,7 @@ class IfElseSpecialExec : public SpecialExec {
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    if (all_bodies_selection_vector_aware &&
-        IsSelectionVectorAwarePathAvailable(input, exec_context)) {
+    if (all_bodies_selection_vector_aware) {
       return SparseConditionalExecutor(branches, type).Execute(input, exec_context);
     } else {
       return DenseConditionalExecutor(branches, type).Execute(input, exec_context);

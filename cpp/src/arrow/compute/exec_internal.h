@@ -85,6 +85,7 @@ class ARROW_EXPORT ExecSpanIterator {
   bool have_all_scalars_ = false;
   bool promote_if_all_scalars_ = true;
   const std::vector<Datum>* args_;
+  SelectionVector* selection_vector_ = NULLPTR;
   std::vector<int> chunk_indexes_;
   std::vector<int64_t> value_positions_;
 
@@ -96,7 +97,6 @@ class ARROW_EXPORT ExecSpanIterator {
   int64_t position_ = 0;
   int64_t length_ = 0;
   int64_t max_chunksize_;
-  SelectionVector* selection_vector_ = NULLPTR;
 };
 
 // "Push" / listener API like IPC reader so that consumers can receive

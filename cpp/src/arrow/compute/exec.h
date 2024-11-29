@@ -146,11 +146,31 @@ class ARROW_EXPORT SelectionVector {
 
   std::shared_ptr<ArrayData> data() const { return data_; }
   const int32_t* indices() const { return indices_; }
-  int32_t length() const;
+  int64_t length() const;
 
  private:
   std::shared_ptr<ArrayData> data_;
   const int32_t* indices_;
+};
+
+class ARROW_EXPORT SelectionVectorSpan {
+ public:
+  explicit SelectionVectorSpan(const int32_t* indices = NULLPTR, int64_t length = 0,
+                               int64_t offset = 0)
+      : indices_(indices), length_(length), offset_(offset) {}
+
+  void SetSlice(int64_t offset, int64_t length);
+
+  const int32_t* indices() const { return indices_ + offset_; }
+
+  int64_t length() const { return length_; }
+
+  int64_t offset() const { return offset_; }
+
+ private:
+  const int32_t* indices_;
+  int64_t length_;
+  int64_t offset_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
@@ -427,7 +447,7 @@ struct ARROW_EXPORT ExecSpan {
 
   int64_t length = 0;
   std::vector<ExecValue> values;
-  SelectionVector* selection_vector = NULLPTR;
+  SelectionVectorSpan selection_vector;
 };
 
 /// \defgroup compute-call-function One-shot calls to compute functions

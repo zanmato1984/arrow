@@ -195,11 +195,11 @@ class IfElseSpecialFormTest : public ::testing::Test {
   static Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
                                           ExecResult* out) {
     if constexpr (sv_existence) {
-      if (!span.selection_vector) {
+      if (!span.selection_vector.indices()) {
         return Status::Invalid("There is no selection vector");
       }
     } else {
-      if (span.selection_vector) {
+      if (span.selection_vector.indices()) {
         return Status::Invalid("There is a selection vector");
       }
     }
@@ -352,11 +352,11 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
   {
     ARROW_SCOPED_TRACE("assert selection vector existence");
     {
-      ARROW_SCOPED_TRACE("if (a) then 1 else 0");
+      ARROW_SCOPED_TRACE("if (a) then a else a");
       auto cond = a;
-      auto if_true = literal(1);
-      auto if_false = literal(0);
-      auto expected = ArrayFromJSON(int32(), "[null, 1, 0]");
+      auto if_true = a;
+      auto if_false = a;
+      auto expected = ArrayFromJSON(boolean(), "[null, true, false]");
       {
         auto if_else_sp =
             if_else_special(cond, assert_sv_exist(if_true), assert_sv_exist(if_false));
@@ -396,7 +396,7 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       }
     }
     {
-      ARROW_SCOPED_TRACE("if (true) then 1 else 0");
+      ARROW_SCOPED_TRACE("if (true) then a else false");
       auto cond = literal(true);
       auto if_true = a;
       auto if_false = literal(false);
@@ -519,6 +519,20 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
     }
   }
   {
+    ARROW_SCOPED_TRACE("literal bodies");
+    auto expected = ArrayFromJSON(int32(), "[null, 1, 1]");
+    for (const auto& if_else_sp :
+         {if_else_special(assert_sv_empty(b), assert_sv_empty(literal(1)),
+                          assert_sv_exist(i2)),
+          if_else_special(assert_sv_empty(b), assert_sv_exist(i1),
+                          assert_sv_empty(literal(1))),
+          if_else_special(assert_sv_empty(b), assert_sv_empty(literal(1)),
+                          assert_sv_empty(literal(1)))}) {
+      ARROW_SCOPED_TRACE(if_else_sp.ToString());
+      AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
+    }
+  }
+  {
     ARROW_SCOPED_TRACE("nested");
     auto expected = ArrayFromJSON(int32(), "[null, 1, 1]");
     for (const auto& if_else_sp :
@@ -528,9 +542,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                           assert_sv_exist(if_else_special(b, i1, i2))),
           // The arguments of nested if_else_special will see a selection vector.
           if_else_special(b,
-                          if_else_special(assert_sv_exist(literal(true)),
+                          if_else_special(assert_sv_empty(literal(true)),
                                           assert_sv_exist(i1), unreachable(i2)),
-                          if_else_special(assert_sv_exist(literal(false)),
+                          if_else_special(assert_sv_empty(literal(false)),
                                           unreachable(i1), assert_sv_exist(i2))),
           if_else_special(b,
                           if_else_special(assert_sv_exist(b), assert_sv_exist(i1),
@@ -543,7 +557,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
               b,
               assert_sv_exist(if_else_special(sv_suppress(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(b,
                           assert_sv_exist(if_else_special(
@@ -552,9 +566,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                               assert_sv_exist(b), unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               sv_suppress(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
@@ -564,10 +578,10 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               assert_sv_empty(i1),
                                               sv_suppress(unreachable(i2)))),
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
@@ -577,9 +591,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(sv_suppress(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               unreachable(i1), assert_sv_exist(i2)))),
           if_else_special(
               b,
@@ -589,9 +603,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               assert_sv_exist(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               sv_suppress(unreachable(i1)),
                                               assert_sv_empty(i2)))),
           if_else_special(
@@ -602,9 +616,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
                                               assert_sv_empty(i2)))),
           if_else_special(
               b,
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(true)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(true)),
                                               assert_sv_exist(i1), unreachable(i2))),
-              assert_sv_exist(if_else_special(assert_sv_exist(literal(false)),
+              assert_sv_exist(if_else_special(assert_sv_empty(literal(false)),
                                               assert_sv_empty(unreachable(i1)),
                                               sv_suppress(i2)))),
           if_else_special(
@@ -619,7 +633,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistence) {
   }
 }
 
-TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
+TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
   ExecContext exec_context;
   constexpr int64_t num_rows = 8;
   auto schema = arrow::schema({field("b", boolean()), field("i", int32())});
@@ -637,9 +651,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       ARROW_SCOPED_TRACE("exec_chunksize: " + std::to_string(chunksize));
       exec_context.set_exec_chunksize(chunksize);
       {
-        ARROW_SCOPED_TRACE("all scalar bodies");
+        ARROW_SCOPED_TRACE("all literal bodies");
         auto if_else_sp =
-            if_else_special(b, assert_sv_exist(literal(1)), assert_sv_exist(literal(0)));
+            if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -647,7 +661,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       {
         ARROW_SCOPED_TRACE("array true body");
         auto if_else_sp =
-            if_else_special(b, assert_sv_exist(i), assert_sv_exist(literal(0)));
+            if_else_special(b, assert_sv_exist(i), assert_sv_empty(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -655,7 +669,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       {
         ARROW_SCOPED_TRACE("array false body");
         auto if_else_sp =
-            if_else_special(b, assert_sv_exist(literal(1)), assert_sv_exist(i));
+            if_else_special(b, assert_sv_empty(literal(1)), assert_sv_exist(i));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
         ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -673,7 +687,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
     ARROW_SCOPED_TRACE("exec_chunksize < batch_size");
     exec_context.set_exec_chunksize(num_rows - 1);
     {
-      ARROW_SCOPED_TRACE("all scalar bodies");
+      ARROW_SCOPED_TRACE("all literal bodies");
       auto if_else_sp =
           if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
@@ -683,7 +697,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
     {
       ARROW_SCOPED_TRACE("array true body");
       auto if_else_sp =
-          if_else_special(b, assert_sv_empty(i), assert_sv_empty(literal(0)));
+          if_else_special(b, assert_sv_exist(i), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -691,14 +705,14 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
     {
       ARROW_SCOPED_TRACE("array false body");
       auto if_else_sp =
-          if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(i));
+          if_else_special(b, assert_sv_empty(literal(1)), assert_sv_exist(i));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
       ARROW_SCOPED_TRACE("all array bodies");
-      auto if_else_sp = if_else_special(b, assert_sv_empty(i), assert_sv_empty(i));
+      auto if_else_sp = if_else_special(b, assert_sv_exist(i), assert_sv_exist(i));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
       ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
@@ -724,10 +738,10 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       exec_context.set_exec_chunksize(num_rows - 2);
       auto if_else_sp = if_else_special(
           b,
-          assert_sv_empty(if_else_special(assert_sv_empty(b), assert_sv_empty(i),
-                                          assert_sv_empty(i))),
-          assert_sv_empty(if_else_special(
-              assert_sv_empty(b),
+          assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
+                                          assert_sv_exist(i))),
+          assert_sv_exist(if_else_special(
+              assert_sv_exist(b),
               assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
                                               assert_sv_exist(i))),
               assert_sv_exist(i))));
@@ -736,8 +750,9 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorAwarePathAvailability) {
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
   }
-  // TODO: Chunked array bodies.
 }
+
+// TODO: Selection vector existence of chunked array.
 
 TEST_F(IfElseSpecialFormTest, ResultShape) {
   auto schema = arrow::schema({field("b_null", boolean()), field("b_true", boolean()),
@@ -972,7 +987,7 @@ Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out)
   DCHECK(out->is_array_span());
   DCHECK_EQ(out->length(), 1);
   if constexpr (!selection_vector_aware) {
-    if (span.selection_vector != nullptr) {
+    if (span.selection_vector.length() > 0) {
       return Status::Invalid("There is a selection vector");
     }
   }
