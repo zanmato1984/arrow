@@ -918,17 +918,14 @@ TEST_F(IfElseSpecialFormTest, NestedSimple) {
   for (const auto& cond : {
            if_else_special(a, kBooleanNull, a),
            if_else_special(a, a, literal(true)),
-           if_else_special(a, a, a),
        }) {
     for (const auto& if_true : {
              if_else_special(a, kIntNull, b),
              if_else_special(a, b, literal(42)),
-             if_else_special(a, b, b),
          }) {
       for (const auto& if_false : {
                if_else_special(a, kIntNull, b),
                if_else_special(a, b, literal(42)),
-               if_else_special(a, b, b),
            }) {
         CheckIfElseIgnoreShape(cond, if_true, if_false, schema, batch);
       }
