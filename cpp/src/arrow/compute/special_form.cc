@@ -115,6 +115,10 @@ struct BodyMask : public std::enable_shared_from_this<BodyMask> {
   virtual Result<Datum> ApplyDense(const Expression& expr, const ExecBatch& input,
                                    ExecContext* exec_context) const = 0;
 
+  virtual Result<Datum> GetCond() const {
+    return Status::NotImplemented("GetCond is not implemented");
+  }
+
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const = 0;
 
   virtual Result<std::shared_ptr<const BranchMask>> NextBranchMask() const = 0;
@@ -276,6 +280,8 @@ struct AllNullBodyMask : public NestedBodyMask {
     return Status::Invalid("AllNullBodyMask::GetSelectionVector should not be called");
   }
 
+  Result<Datum> GetCond() const override { return MakeNullScalar(boolean()); }
+
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
     return std::make_shared<AllFailBranchMask>();
   }
@@ -295,6 +301,8 @@ struct AllPassBodyMask : public NestedBodyMask {
                            ExecContext* exec_context) const override {
     return DelegateApplyDense(expr, input, exec_context);
   }
+
+  Result<Datum> GetCond() const override { return MakeScalar(true); }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     return DelegateGetSelectionVector();
@@ -396,8 +404,11 @@ struct ConditionalBranchMask : public BranchMask {
 
 struct ConditionalBodyMask : public BodyMask {
   ConditionalBodyMask(std::shared_ptr<SelectionVector> body,
-                      std::shared_ptr<SelectionVector> rest, int64_t length)
-      : body_(std::move(body)), rest_(std::move(rest)), length_(length) {}
+                      std::shared_ptr<SelectionVector> rest, int64_t length, Datum cond)
+      : body_(std::move(body)),
+        rest_(std::move(rest)),
+        length_(length),
+        cond_(std::move(cond)) {}
 
   bool empty() const override { return body_->length() == 0; }
 
@@ -419,6 +430,8 @@ struct ConditionalBodyMask : public BodyMask {
     return body_;
   }
 
+  Result<Datum> GetCond() const override { return cond_; }
+
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
     if (!rest_) {
       return std::make_shared<AllFailBranchMask>();
@@ -430,6 +443,7 @@ struct ConditionalBodyMask : public BodyMask {
   std::shared_ptr<SelectionVector> body_;
   std::shared_ptr<SelectionVector> rest_;
   int64_t length_;
+  Datum cond_;
 };
 
 Result<std::shared_ptr<BodyMask>> BodyMaskFromScalar(
@@ -476,7 +490,8 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromSpars
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               bitmap);
 }
 
 Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromDenseBitmap(
@@ -514,7 +529,8 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromSpars
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               bitmap);
 }
 
 Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromDenseBitmap(
@@ -552,7 +568,8 @@ ConditionalBranchMask::MakeBodyMaskFromSparseBitmap(
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               bitmap);
 }
 
 Result<std::shared_ptr<const BodyMask>>
@@ -565,10 +582,18 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
   RETURN_NOT_OK(body_builder.Reserve(bitmap->true_count()));
   RETURN_NOT_OK(rest_builder.Reserve(bitmap->false_count()));
 
+  const int64_t sparse_bitmap_bytes = bit_util::BytesForBits(length_);
+  ARROW_ASSIGN_OR_RAISE(
+      std::shared_ptr<ResizableBuffer> sparse_bitmap_buf,
+      AllocateResizableBuffer(sparse_bitmap_bytes, exec_context->memory_pool()));
+  auto sparse_bitmap_data = sparse_bitmap_buf->mutable_data_as<uint8_t>();
+  std::memset(sparse_bitmap_data, 0, sparse_bitmap_bytes);
+
   for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     if (!bitmap->IsNull(i)) {
       if (bitmap->Value(i)) {
         body_builder.UnsafeAppend(selection_vector_->indices()[i]);
+        bit_util::SetBitTo(sparse_bitmap_data, selection_vector_->indices()[i], true);
       } else {
         rest_builder.UnsafeAppend(selection_vector_->indices()[i]);
       }
@@ -579,7 +604,10 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  auto sparse_bitmap =
+      ArrayData::Make(boolean(), length_, {nullptr, std::move(sparse_bitmap_buf)});
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               std::move(sparse_bitmap));
 }
 
 Result<std::shared_ptr<const BodyMask>>
@@ -617,7 +645,8 @@ ConditionalBranchMask::MakeBodyMaskFromSparseBitmap(
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               bitmap);
 }
 
 Result<std::shared_ptr<const BodyMask>>
@@ -654,7 +683,8 @@ ConditionalBranchMask::MakeBodyMaskFromDenseBitmap(
   ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
   auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_,
+                                               bitmap);
 }
 
 struct Branch {
@@ -690,8 +720,10 @@ struct ConditionalExecutor {
                             static_cast<const Impl*>(this)->ApplyBody(
                                 body_mask, branch.body, input, exec_context));
       DCHECK(body_result.type()->Equals(*result_type));
+      ARROW_ASSIGN_OR_RAISE(auto cond_result, body_mask->GetCond());
       ARROW_ASSIGN_OR_RAISE(auto selection_vector, body_mask->GetSelectionVector());
-      results.Emplace(std::move(body_result), std::move(selection_vector));
+      results.Emplace(std::move(cond_result), std::move(body_result),
+                      std::move(selection_vector));
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
     }
     return static_cast<const Impl*>(this)->MultiplexBranchResults(input, results,
@@ -701,11 +733,14 @@ struct ConditionalExecutor {
  protected:
   struct BranchResults {
     void Reserve(int64_t size) {
+      cond_results_.reserve(size);
       body_results_.reserve(size);
       selection_vectors_.reserve(size);
     }
 
-    void Emplace(Datum body_result, std::shared_ptr<SelectionVector> selection_vector) {
+    void Emplace(Datum cond_result, Datum body_result,
+                 std::shared_ptr<SelectionVector> selection_vector) {
+      cond_results_.emplace_back(std::move(cond_result));
       body_results_.emplace_back(std::move(body_result));
       selection_vectors_.emplace_back(std::move(selection_vector));
     }
@@ -714,6 +749,8 @@ struct ConditionalExecutor {
 
     size_t size() const { return body_results_.size(); }
 
+    const std::vector<Datum>& cond_results() const { return cond_results_; }
+
     const std::vector<Datum>& body_results() const { return body_results_; }
 
     const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors() const {
@@ -721,6 +758,7 @@ struct ConditionalExecutor {
     }
 
    private:
+    std::vector<Datum> cond_results_;
     std::vector<Datum> body_results_;
     std::vector<std::shared_ptr<SelectionVector>> selection_vectors_;
   };
@@ -774,6 +812,13 @@ struct SparseConditionalExecutor : public ConditionalExecutor<SparseConditionalE
                                       : input.length)) {
         return result;
       }
+    }
+
+    if (results.size() == 2) {
+      return CallFunction("if_else",
+                          {results.cond_results()[0], results.body_results()[0],
+                           results.body_results()[1]},
+                          exec_context);
     }
 
     std::vector<Datum> choose_args;
