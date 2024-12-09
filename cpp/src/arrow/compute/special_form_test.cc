@@ -864,10 +864,10 @@ auto kCanonicalA = field_ref("a");
 auto kCanonicalB = field_ref("b");
 auto kCanonicalC = field_ref("c");
 
-const auto kCanonicalBooleanDatums = {kBooleanNull, literal(true), literal(false),
-                                      kCanonicalA};
-const auto kCanonicalIntDatums = {kIntNull, literal(0), literal(1), kCanonicalB,
-                                  kCanonicalC};
+const auto kCanonicalBooleanCols = {kBooleanNull, literal(true), literal(false),
+                                    kCanonicalA};
+const auto kCanonicalIntCols = {kIntNull, literal(0), literal(1), kCanonicalB,
+                                kCanonicalC};
 
 const std::vector<ExecBatch> kCanonicalBatches = {
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
@@ -911,8 +911,8 @@ const std::vector<ExecBatch> kCanonicalBatches = {
 
 TEST_F(IfElseSpecialFormTest, Simple) {
   const auto& schema = kCanonicalSchema;
-  const auto& boolean_datums = kCanonicalBooleanDatums;
-  const auto& int_datums = kCanonicalIntDatums;
+  const auto& boolean_datums = kCanonicalBooleanCols;
+  const auto& int_datums = kCanonicalIntCols;
   const auto& batches = kCanonicalBatches;
   for (const auto& cond : boolean_datums) {
     for (const auto& if_true : int_datums) {
@@ -960,8 +960,8 @@ TEST_F(IfElseSpecialFormTest, NestedSimple) {
 TEST_F(IfElseSpecialFormTest, NestedConditionComplex) {
   const auto& batches = kCanonicalBatches;
   const auto& schema = kCanonicalSchema;
-  const auto& boolean_datums = kCanonicalBooleanDatums;
-  const auto& int_datums = kCanonicalIntDatums;
+  const auto& boolean_datums = kCanonicalBooleanCols;
+  const auto& int_datums = kCanonicalIntCols;
   for (const auto& nested_cond : boolean_datums) {
     for (const auto& nested_if_true : boolean_datums) {
       for (const auto& nested_if_false : boolean_datums) {
@@ -983,8 +983,8 @@ TEST_F(IfElseSpecialFormTest, NestedConditionComplex) {
 TEST_F(IfElseSpecialFormTest, NestedBodyComplex) {
   const auto& batches = kCanonicalBatches;
   const auto& schema = kCanonicalSchema;
-  const auto& boolean_datums = kCanonicalBooleanDatums;
-  const auto& int_datums = kCanonicalIntDatums;
+  const auto& boolean_datums = kCanonicalBooleanCols;
+  const auto& int_datums = kCanonicalIntCols;
   for (const auto& cond : boolean_datums) {
     for (const auto& nested_cond : boolean_datums) {
       for (const auto& nested_if_true : int_datums) {
@@ -1005,8 +1005,8 @@ TEST_F(IfElseSpecialFormTest, NestedBodyComplex) {
 TEST_F(IfElseSpecialFormTest, NestedComplex) {
   const auto& batches = kCanonicalBatches;
   const auto& schema = kCanonicalSchema;
-  const auto& boolean_datums = kCanonicalBooleanDatums;
-  const auto& int_datums = kCanonicalIntDatums;
+  const auto& boolean_datums = kCanonicalBooleanCols;
+  const auto& int_datums = kCanonicalIntCols;
   for (const auto& cond_nested_cond : boolean_datums) {
     for (const auto& cond_nested_if_true : boolean_datums) {
       for (const auto& cond_nested_if_false : boolean_datums) {
