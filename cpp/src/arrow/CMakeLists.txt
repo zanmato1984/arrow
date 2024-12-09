@@ -731,6 +731,7 @@ set(ARROW_COMPUTE_SRCS
     compute/light_array_internal.cc
     compute/ordering.cc
     compute/registry.cc
+    compute/special_form.cc
     compute/kernels/codegen_internal.cc
     compute/kernels/ree_util_internal.cc
     compute/kernels/scalar_cast_boolean.cc
@@ -786,13 +787,14 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_validity.cc
        compute/kernels/vector_array_sort.cc
        compute/kernels/vector_cumulative_ops.cc
-       compute/kernels/vector_pairwise.cc
        compute/kernels/vector_nested.cc
+       compute/kernels/vector_pairwise.cc
        compute/kernels/vector_rank.cc
        compute/kernels/vector_replace.cc
        compute/kernels/vector_run_end_encode.cc
        compute/kernels/vector_select_k.cc
-       compute/kernels/vector_sort.cc)
+       compute/kernels/vector_sort.cc
+       compute/kernels/vector_swizzle.cc)
 
   append_runtime_avx2_src(ARROW_COMPUTE_SRCS compute/kernels/aggregate_basic_avx2.cc)
   append_runtime_avx512_src(ARROW_COMPUTE_SRCS compute/kernels/aggregate_basic_avx512.cc)

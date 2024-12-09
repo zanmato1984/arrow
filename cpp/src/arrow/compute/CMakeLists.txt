@@ -98,7 +98,11 @@ add_arrow_test(internals_test
 
 add_arrow_compute_test(expression_test SOURCES expression_test.cc)
 
+add_arrow_compute_test(special_form_test SOURCES special_form_test.cc)
+
 add_arrow_benchmark(function_benchmark PREFIX "arrow-compute")
+
+add_arrow_benchmark(special_form_benchmark PREFIX "arrow-compute")
 
 add_subdirectory(kernels)
 
