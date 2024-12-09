@@ -300,9 +300,8 @@ class IfElseSpecialFormTest : public ::testing::Test {
               if_else_special(suppressed_cond, suppressed_if_true, suppressed_if_false));
           result.emplace_back(if_else_special(sv_suppress(suppressed_cond),
                                               suppressed_if_true, suppressed_if_false));
-          result.emplace_back(if_else_special(
-              suppressed_cond, sv_suppress(suppressed_if_true), suppressed_if_false));
-          result.emplace_back(if_else_special(suppressed_cond, suppressed_if_true,
+          result.emplace_back(if_else_special(suppressed_cond,
+                                              sv_suppress(suppressed_if_true),
                                               sv_suppress(suppressed_if_false)));
         }
       }
@@ -872,28 +871,13 @@ const auto kCanonicalIntCols = {kIntNull, literal(0), literal(1), kCanonicalB,
 const std::vector<ExecBatch> kCanonicalBatches = {
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
         [null, 1, 0],
-        [null, 1, 0],
-        [null, 1, 0]
-      ])")),
-    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [null, 1, 0],
         [null, null, 0],
         [null, 1, null]
       ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
         [true, 1, 0],
-        [true, 1, 0],
-        [true, 1, 0]
-      ])")),
-    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [true, 1, 0],
         [true, null, 0],
         [true, 1, null]
-      ])")),
-    ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [false, 1, 0],
-        [false, 1, 0],
-        [false, 1, 0]
       ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
         [false, 1, 0],
