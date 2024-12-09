@@ -856,38 +856,35 @@ TEST_F(IfElseSpecialFormTest, ResultShape) {
 
 namespace {
 
-auto kCanonicalSchema =
-    arrow::schema({field("a", boolean()), field("b", int32()), field("c", int32())});
+auto kCanonicalSchema = arrow::schema({field("a", boolean()), field("b", int32())});
 
 auto kCanonicalA = field_ref("a");
 auto kCanonicalB = field_ref("b");
-auto kCanonicalC = field_ref("c");
 
 const auto kCanonicalBooleanCols = {kBooleanNull, literal(true), literal(false),
                                     kCanonicalA};
-const auto kCanonicalIntCols = {kIntNull, literal(0), literal(1), kCanonicalB,
-                                kCanonicalC};
+const auto kCanonicalIntCols = {kIntNull, literal(42), kCanonicalB};
 
 const std::vector<ExecBatch> kCanonicalBatches = {
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [null, 1, 0],
-        [null, null, 0],
-        [null, 1, null]
+        [null, 0],
+        [null, null],
+        [null, 1]
       ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [true, 1, 0],
-        [true, null, 0],
-        [true, 1, null]
+        [true, 0],
+        [true, null],
+        [true, 1]
       ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [false, 1, 0],
-        [false, null, 0],
-        [false, 1, null]
+        [false, 0],
+        [false, null],
+        [false, 1]
       ])")),
     ExecBatch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-        [false, 1, 0],
-        [true, null, 0],
-        [null, 1, null]
+        [false, 0],
+        [true, null],
+        [null, 1]
       ])")),
 };
 
@@ -913,11 +910,10 @@ TEST_F(IfElseSpecialFormTest, NestedSimple) {
   const auto& schema = kCanonicalSchema;
   const auto& a = kCanonicalA;
   const auto& b = kCanonicalB;
-  const auto& c = kCanonicalC;
   ExecBatch batch(*RecordBatchFromJSON(kCanonicalSchema, R"([
-      [false, 1, 0],
-      [true, null, 0],
-      [null, 1, null]
+      [false, 0],
+      [true, null],
+      [null, 1]
     ])"));
   for (const auto& cond : {
            if_else_special(a, kBooleanNull, a),
@@ -926,13 +922,13 @@ TEST_F(IfElseSpecialFormTest, NestedSimple) {
        }) {
     for (const auto& if_true : {
              if_else_special(a, kIntNull, b),
-             if_else_special(a, b, literal(1)),
+             if_else_special(a, b, literal(42)),
              if_else_special(a, b, b),
          }) {
       for (const auto& if_false : {
-               if_else_special(a, kIntNull, c),
-               if_else_special(a, c, literal(1)),
-               if_else_special(a, c, c),
+               if_else_special(a, kIntNull, b),
+               if_else_special(a, b, literal(42)),
+               if_else_special(a, b, b),
            }) {
         CheckIfElseIgnoreShape(cond, if_true, if_false, schema, batch);
       }
