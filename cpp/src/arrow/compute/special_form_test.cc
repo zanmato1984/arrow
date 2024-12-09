@@ -298,6 +298,10 @@ class IfElseSpecialFormTest : public ::testing::Test {
         for (const auto& suppressed_if_false : suppressed_if_falses) {
           result.emplace_back(
               if_else_special(suppressed_cond, suppressed_if_true, suppressed_if_false));
+          result.emplace_back(if_else_special(sv_suppress(suppressed_cond),
+                                              suppressed_if_true, suppressed_if_false));
+          result.emplace_back(if_else_special(
+              suppressed_cond, sv_suppress(suppressed_if_true), suppressed_if_false));
           result.emplace_back(if_else_special(suppressed_cond, suppressed_if_true,
                                               sv_suppress(suppressed_if_false)));
         }
@@ -975,8 +979,56 @@ TEST_F(IfElseSpecialFormTest, NestedConditionComplex) {
   }
 }
 
-// TODO: Complex nested true and false branches.
-// TODO: Complex double/triple nested tests.
+// TODO: Deprecate this test due to slowness.
+TEST_F(IfElseSpecialFormTest, NestedBodyComplex) {
+  const auto& batches = kCanonicalBatches;
+  const auto& schema = kCanonicalSchema;
+  const auto& boolean_datums = kCanonicalBooleanDatums;
+  const auto& int_datums = kCanonicalIntDatums;
+  for (const auto& cond : boolean_datums) {
+    for (const auto& nested_cond : boolean_datums) {
+      for (const auto& nested_if_true : int_datums) {
+        for (const auto& nested_if_false : int_datums) {
+          auto nested_if_else_sp =
+              if_else_special(nested_cond, nested_if_true, nested_if_false);
+          for (const auto& batch : batches) {
+            CheckIfElseIgnoreShape(cond, nested_if_else_sp, nested_if_else_sp, schema,
+                                   batch);
+          }
+        }
+      }
+    }
+  }
+}
+
+// TODO: Deprecate this test due to slowness.
+TEST_F(IfElseSpecialFormTest, NestedComplex) {
+  const auto& batches = kCanonicalBatches;
+  const auto& schema = kCanonicalSchema;
+  const auto& boolean_datums = kCanonicalBooleanDatums;
+  const auto& int_datums = kCanonicalIntDatums;
+  for (const auto& cond_nested_cond : boolean_datums) {
+    for (const auto& cond_nested_if_true : boolean_datums) {
+      for (const auto& cond_nested_if_false : boolean_datums) {
+        auto cond =
+            if_else_special(cond_nested_cond, cond_nested_if_true, cond_nested_if_false);
+        for (const auto& nested_cond : boolean_datums) {
+          for (const auto& nested_if_true : int_datums) {
+            for (const auto& nested_if_false : int_datums) {
+              auto nested_if_else_sp =
+                  if_else_special(nested_cond, nested_if_true, nested_if_false);
+              for (const auto& batch : batches) {
+                CheckIfElseIgnoreShape(cond, nested_if_else_sp, nested_if_else_sp, schema,
+                                       batch);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 // TODO: ChunkedArray.
 
 namespace {
