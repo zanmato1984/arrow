@@ -130,10 +130,24 @@ class IntegrationRunner(object):
         Run Arrow Flight integration tests for the matrix of enabled
         implementations.
         """
-        servers = filter(lambda t: t.FLIGHT_SERVER, self.testers)
-        clients = filter(lambda t: (t.FLIGHT_CLIENT and t.CONSUMER),
-                         self.testers + self.other_testers)
-        for server, client in itertools.product(servers, clients):
+
+        def is_server(t):
+            return t.FLIGHT_SERVER
+
+        def is_client(t):
+            return t.FLIGHT_CLIENT and t.CONSUMER
+
+        for server, client in itertools.product(
+                filter(is_server, self.testers),
+                filter(is_client, self.testers)):
+            self._compare_flight_implementations(server, client)
+        for server, client in itertools.product(
+                filter(is_server, self.testers),
+                filter(is_client, self.other_testers)):
+            self._compare_flight_implementations(server, client)
+        for server, client in itertools.product(
+                filter(is_server, self.other_testers),
+                filter(is_client, self.testers)):
             self._compare_flight_implementations(server, client)
         log('\n')
 
@@ -631,10 +645,13 @@ def run_all_tests(with_cpp=True, with_java=True, with_js=True,
     flight_scenarios = [
         Scenario(
             "auth:basic_proto",
-            description="Authenticate using the BasicAuth protobuf."),
+            description="Authenticate using the BasicAuth protobuf.",
+            skip_testers={"C#"},
+        ),
         Scenario(
             "middleware",
             description="Ensure headers are propagated via middleware.",
+            skip_testers={"C#"},
         ),
         Scenario(
             "ordered",
@@ -667,6 +684,12 @@ def run_all_tests(with_cpp=True, with_java=True, with_js=True,
             skip_testers={"JS", "C#", "Rust"},
         ),
         Scenario(
+            "do_exchange:echo",
+            description=("Test the do_exchange method by "
+                         "echoing data back to the client."),
+            skip_testers={"Go", "JS", "Rust"},
+        ),
+        Scenario(
             "location:reuse_connection",
             description="Ensure arrow-flight-reuse-connection is accepted.",
             skip_testers={"JS", "C#", "Rust"},
@@ -689,12 +712,12 @@ def run_all_tests(with_cpp=True, with_java=True, with_js=True,
         Scenario(
             "flight_sql",
             description="Ensure Flight SQL protocol is working as expected.",
-            skip_testers={"Rust"}
+            skip_testers={"Rust", "C#"}
         ),
         Scenario(
             "flight_sql:extension",
             description="Ensure Flight SQL extensions work as expected.",
-            skip_testers={"Rust"}
+            skip_testers={"Rust", "C#"}
         ),
         Scenario(
             "flight_sql:ingestion",

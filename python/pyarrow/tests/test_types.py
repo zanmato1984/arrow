@@ -887,6 +887,14 @@ def test_types_weakref():
     assert wr() is None  # not a singleton
 
 
+def test_types_has_variadic_buffers():
+    for ty in get_many_types():
+        if ty in (pa.string_view(), pa.binary_view()):
+            assert ty.has_variadic_buffers
+        else:
+            assert not ty.has_variadic_buffers
+
+
 def test_fields_hashable():
     in_dict = {}
     fields = [pa.field('a', pa.int32()),
@@ -1151,6 +1159,13 @@ def test_field_basic():
 
     with pytest.raises(TypeError):
         pa.field('foo', None)
+
+
+def test_field_datatype_alias():
+    f = pa.field('foo', 'string')
+
+    assert f.name == 'foo'
+    assert f.type is pa.string()
 
 
 def test_field_equals():
