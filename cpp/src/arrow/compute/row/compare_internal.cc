@@ -60,6 +60,7 @@ void KeyCompare::NullUpdateColumnToRow(uint32_t id_col, uint32_t num_rows_to_com
     for (uint32_t i = num_processed; i < num_rows_to_compare; ++i) {
       uint32_t irow_left = use_selection ? sel_left_maybe_null[i] : i;
       uint32_t irow_right = left_to_right_map[irow_left];
+      // TODO: Overflow here?
       int64_t bitid = irow_right * null_mask_num_bytes * 8 + null_bit_id;
       match_bytevector[i] &= (bit_util::GetBit(null_masks, bitid) ? 0 : 0xff);
     }
@@ -81,6 +82,7 @@ void KeyCompare::NullUpdateColumnToRow(uint32_t id_col, uint32_t num_rows_to_com
     for (uint32_t i = num_processed; i < num_rows_to_compare; ++i) {
       uint32_t irow_left = use_selection ? sel_left_maybe_null[i] : i;
       uint32_t irow_right = left_to_right_map[irow_left];
+      // TODO: Overflow here?
       int64_t bitid_right = irow_right * null_mask_num_bytes * 8 + null_bit_id;
       int right_null = bit_util::GetBit(null_masks, bitid_right) ? 0xff : 0;
       int left_null =
