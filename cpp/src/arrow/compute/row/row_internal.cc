@@ -356,6 +356,7 @@ Status RowTableImpl::AppendSelectionFrom(const RowTableImpl& from,
     const uint8_t* src = from.rows_->data();
     uint8_t* dst = rows_->mutable_data() + num_rows_ * metadata_.fixed_length;
     for (uint32_t i = 0; i < num_rows_to_append; ++i) {
+      // TODO: Why not narrow cast warning?
       uint16_t row_id = source_row_ids ? source_row_ids[i] : i;
       uint32_t length = metadata_.fixed_length;
       auto src64 = reinterpret_cast<const uint64_t*>(src + length * row_id);

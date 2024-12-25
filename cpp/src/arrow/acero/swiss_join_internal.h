@@ -116,7 +116,8 @@ class RowArrayAccessor {
         //
         const uint8_t* row_ptr_base = rows.data(1) + field_offset_within_row;
         for (int i = 0; i < num_rows; ++i) {
-          uint32_t row_id = row_ids[i];
+          // uint32_t row_id = row_ids[i];
+          int64_t row_id = row_ids[i];
           const uint8_t* row_ptr = row_ptr_base + row_length * row_id;
           process_value_fn(i, row_ptr, field_length);
         }
@@ -126,7 +127,8 @@ class RowArrayAccessor {
         const uint8_t* row_ptr_base = rows.data(2) + field_offset_within_row;
         const RowTableImpl::offset_type* row_offsets = rows.offsets();
         for (int i = 0; i < num_rows; ++i) {
-          uint32_t row_id = row_ids[i];
+          // uint32_t row_id = row_ids[i];
+          int64_t row_id = row_ids[i];
           const uint8_t* row_ptr = row_ptr_base + row_offsets[row_id];
           process_value_fn(i, row_ptr, field_length);
         }
@@ -146,7 +148,8 @@ class RowArrayAccessor {
     uint32_t null_mask_num_bytes = rows.metadata().null_masks_bytes_per_row;
     uint32_t pos_after_encoding = rows.metadata().pos_after_encoding(column_id);
     for (int i = 0; i < num_rows; ++i) {
-      uint32_t row_id = row_ids[i];
+      int64_t row_id = row_ids[i];
+      // uint32_t row_id = row_ids[i];
       int64_t bit_id = row_id * null_mask_num_bytes * 8 + pos_after_encoding;
       process_value_fn(i, bit_util::GetBit(null_masks, bit_id) ? 0xff : 0);
     }
@@ -1018,6 +1021,9 @@ class JoinProbeProcessor {
   const std::vector<JoinKeyCmp>* cmp_;
   OutputBatchFn output_batch_fn_;
 };
+
+int64_t AvxMulSigned(uint32_t a, uint32_t b);
+int64_t AvxMulUnsigned(uint32_t a, uint32_t b);
 
 }  // namespace acero
 }  // namespace arrow

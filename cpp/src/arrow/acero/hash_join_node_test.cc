@@ -23,6 +23,7 @@
 #include <unordered_set>
 
 #include "arrow/acero/options.h"
+#include "arrow/acero/swiss_join_internal.h"
 #include "arrow/acero/test_util_internal.h"
 #include "arrow/acero/util.h"
 #include "arrow/api.h"
@@ -3562,15 +3563,18 @@ TEST(HashJoin, GH44513_Old) {
 }
 
 TEST(HashJoin, GH44513) {
-  const int64_t num_large_rows = 360449051 * 4;
+  const int64_t num_small_rows = 1;
+  // const int64_t num_small_rows = 16;
+  const int64_t num_large_rows = 360449051 * 2;
   // const int64_t num_large_rows = 18201475;
   const int64_t num_batches = 8;
   const int64_t seed = 42;
 
-  auto small_schema =
-      schema({field("key0", int64()), field("key1", int64()), field("key2", int64())});
-  auto large_schema = schema({field("key0", int64()), field("key1", int64()),
-                              field("key2", int64()), field("payload", int64())});
+  auto small_schema = schema({field("small_key0", int64()), field("small_key1", int64()),
+                              field("small_key2", int64())});
+  auto large_schema =
+      schema({field("large_key0", int64()), field("large_key1", int64()),
+              field("large_key2", int64()), field("large_payload", int64())});
 
   const int64_t key0_match = 88506230299;
   const int64_t key1_match = 16556030299;
@@ -3578,12 +3582,12 @@ TEST(HashJoin, GH44513) {
   const int64_t payload_match = 42;
 
   ASSERT_OK_AND_ASSIGN(auto small_key0_arr,
-                       Constant(MakeScalar(key0_match))->Generate(1));
+                       Constant(MakeScalar(key0_match))->Generate(num_small_rows));
   ASSERT_OK_AND_ASSIGN(auto small_key1_arr,
-                       Constant(MakeScalar(key1_match))->Generate(1));
+                       Constant(MakeScalar(key1_match))->Generate(num_small_rows));
   ASSERT_OK_AND_ASSIGN(auto small_key2_arr,
-                       Constant(MakeScalar(key2_match))->Generate(1));
-  ExecBatch small_batch({small_key0_arr, small_key1_arr, small_key2_arr}, 1);
+                       Constant(MakeScalar(key2_match))->Generate(num_small_rows));
+  ExecBatch small_batch({small_key0_arr, small_key1_arr, small_key2_arr}, num_small_rows);
 
   auto large_unmatch_key_arr = RandomArrayGenerator(seed).Int64(
       num_large_rows / num_batches, key0_match + 1, 99756520299);
@@ -3637,19 +3641,30 @@ TEST(HashJoin, GH44513) {
         "exec_batch_source",
         ExecBatchSourceNodeOptions(large_batches.schema, large_batches.batches)};
 
-    HashJoinNodeOptions join_opts(JoinType::INNER,
-                                  /*left_keys=*/{"key0", "key1", "key2"},
-                                  /*right_keys=*/{"key0", "key1", "key2"});
+    HashJoinNodeOptions join_opts(
+        JoinType::INNER,
+        /*left_keys=*/{"small_key0", "small_key1", "small_key2"},
+        /*right_keys=*/{"large_key0", "large_key1", "large_key2"});
+    join_opts.disable_bloom_filter = true;
     Declaration join{
         "hashjoin", {std::move(small_source), std::move(large_source)}, join_opts};
 
-    AggregateNodeOptions agg_opts{/*aggregates=*/{
-        {"count_all", "count(*)"}, {"sum", nullptr, "payload", "sum(payload)"}}};
-    Declaration agg{"aggregate", {std::move(join)}, std::move(agg_opts)};
+    // AggregateNodeOptions agg_opts{/*aggregates=*/{
+    //     {"count_all", "count(*)"}, {"sum", nullptr, "payload", "sum(payload)"}}};
+    // Declaration agg{"aggregate", {std::move(join)}, std::move(agg_opts)};
 
-    auto result = DeclarationToTable(std::move(agg)).ValueOrDie();
+    auto result = DeclarationToTable(std::move(join)).ValueOrDie();
     std::cout << result->ToString() << std::endl;
   }
 
   // return 0;
+}
+
+TEST(HashJoin, AvxMul) {
+  uint32_t a = 0x70000000;
+  uint32_t b = 8;
+  std::cout << "Signed: " << arrow::acero::AvxMulSigned(a, b) << std::endl;
+  std::cout << "Unsigned: " << arrow::acero::AvxMulUnsigned(a, b) << std::endl;
+  int64_t c = uint32_t(0x70000000) * uint32_t(4);
+  std::cout << "Overflow: " << c << std::endl;
 }

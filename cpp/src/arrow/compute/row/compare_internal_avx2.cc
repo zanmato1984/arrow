@@ -207,9 +207,9 @@ uint32_t KeyCompare::CompareBinaryColumnToRowHelper_avx2(
 
       // Widen the 32-bit row ids to 64-bit and store the first/last 4 of them into 2
       // 256-bit registers.
-      __m256i irow_right_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(irow_right));
+      __m256i irow_right_lo = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(irow_right));
       __m256i irow_right_hi =
-          _mm256_cvtepi32_epi64(_mm256_extracti128_si256(irow_right, 1));
+          _mm256_cvtepu32_epi64(_mm256_extracti128_si256(irow_right, 1));
       // Calculate the lower/higher 4 64-bit row offsets based on the lower/higher 4
       // 64-bit row ids and the fixed length.
       __m256i offset_right_lo =

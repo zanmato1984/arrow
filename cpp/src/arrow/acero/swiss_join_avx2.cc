@@ -181,8 +181,8 @@ int RowArrayAccessor::Visit_avx2(const RowTableImpl& rows, int column_id, int nu
             _mm256_loadu_si256(reinterpret_cast<const __m256i*>(row_ids) + i);
         // Widen the 32-bit row ids to 64-bit and store the lower/higher 4 of them into 2
         // 256-bit registers.
-        __m256i row_id_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(row_id));
-        __m256i row_id_hi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(row_id, 1));
+        __m256i row_id_lo = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(row_id));
+        __m256i row_id_hi = _mm256_cvtepu32_epi64(_mm256_extracti128_si256(row_id, 1));
         // Calculate the lower/higher 4 64-bit row offsets based on the lower/higher 4
         // 64-bit row ids and the fixed field length.
         __m256i row_offset_lo = _mm256_mul_epi32(row_id_lo, row_length);
@@ -241,17 +241,28 @@ int RowArrayAccessor::VisitNulls_avx2(const RowTableImpl& rows, int column_id,
 
   const uint8_t* null_masks = rows.null_masks();
   __m256i null_bits_per_row =
-      _mm256_set1_epi32(8 * rows.metadata().null_masks_bytes_per_row);
+      _mm256_set1_epi64x(8 * rows.metadata().null_masks_bytes_per_row);
   __m256i pos_after_encoding =
-      _mm256_set1_epi32(rows.metadata().pos_after_encoding(column_id));
+      _mm256_set1_epi64x(rows.metadata().pos_after_encoding(column_id));
   for (int i = 0; i < num_rows / kUnroll; ++i) {
     __m256i row_id = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(row_ids) + i);
-    __m256i bit_id = _mm256_mullo_epi32(row_id, null_bits_per_row);
-    bit_id = _mm256_add_epi32(bit_id, pos_after_encoding);
-    __m256i bytes = _mm256_i32gather_epi32(reinterpret_cast<const int*>(null_masks),
-                                           _mm256_srli_epi32(bit_id, 3), 1);
-    __m256i bit_in_word = _mm256_sllv_epi32(
-        _mm256_set1_epi32(1), _mm256_and_si256(bit_id, _mm256_set1_epi32(7)));
+    __m256i row_id_lo = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(row_id));
+    __m256i row_id_hi = _mm256_cvtepu32_epi64(_mm256_extracti128_si256(row_id, 1));
+    __m256i bit_id_lo = _mm256_mul_epi32(row_id_lo, null_bits_per_row);
+    __m256i bit_id_hi = _mm256_mul_epi32(row_id_hi, null_bits_per_row);
+    bit_id_lo = _mm256_add_epi64(bit_id_lo, pos_after_encoding);
+    bit_id_hi = _mm256_add_epi64(bit_id_hi, pos_after_encoding);
+    __m128i bytes_lo = _mm256_i64gather_epi32(reinterpret_cast<const int*>(null_masks),
+                                              _mm256_srli_epi64(bit_id_lo, 3), 1);
+    __m128i bytes_hi = _mm256_i64gather_epi32(reinterpret_cast<const int*>(null_masks),
+                                              _mm256_srli_epi64(bit_id_hi, 3), 1);
+    __m256i bytes = _mm256_set_m128i(bytes_hi, bytes_lo);
+    bit_id_lo = _mm256_and_si256(bit_id_lo, _mm256_set1_epi64x(7));
+    bit_id_hi = _mm256_and_si256(bit_id_hi, _mm256_set1_epi64x(7));
+    bit_id_lo = _mm256_shuffle_epi32(bit_id_lo, _MM_SHUFFLE(2, 0, 2, 0));
+    bit_id_hi = _mm256_shuffle_epi32(bit_id_hi, _MM_SHUFFLE(2, 0, 2, 0));
+    __m256i bit_id = _mm256_permute2x128_si256(bit_id_lo, bit_id_hi, 0x20);
+    __m256i bit_in_word = _mm256_sllv_epi32(_mm256_set1_epi32(1), bit_id);
     // `result` will contain one 32-bit word per tested null bit, either 0xffffffff if the
     // null bit was set or 0 if it was unset.
     __m256i result =
@@ -282,8 +293,8 @@ inline void Decode8FixedLength0_avx2(uint8_t* output, const uint8_t* row_ptr_bas
   __m128i row_hi =
       _mm256_i64gather_epi32(reinterpret_cast<const int*>(row_ptr_base), offset_hi, 1);
   // Extend to 64-bit.
-  __m256i row_lo_64 = _mm256_cvtepi32_epi64(row_lo);
-  __m256i row_hi_64 = _mm256_cvtepi32_epi64(row_hi);
+  __m256i row_lo_64 = _mm256_cvtepu32_epi64(row_lo);
+  __m256i row_hi_64 = _mm256_cvtepu32_epi64(row_hi);
   // Keep the first 8 bits in each 64-bit value, as the other bits belong to other
   // columns.
   row_lo_64 = _mm256_and_si256(row_lo_64, _mm256_set1_epi64x(0xFF));
@@ -527,6 +538,20 @@ int RowArray::DecodeNulls_avx2(ResizableArrayData* output, int output_start_row,
         Decode8Null_avx2(output->mutable_data(0) + (output_start_row + i) / 8,
                          null_bytes);
       });
+}
+
+int64_t AvxMulSigned(uint32_t a, uint32_t b) {
+  __m256i a_v = _mm256_set1_epi64x(a);
+  __m256i b_v = _mm256_set1_epi32(b);
+  __m256i result = _mm256_mul_epi32(a_v, b_v);
+  return _mm256_extract_epi64(result, 0);
+}
+
+int64_t AvxMulUnsigned(uint32_t a, uint32_t b) {
+  __m256i a_v = _mm256_set1_epi64x(a);
+  __m256i b_v = _mm256_set1_epi32(b);
+  __m256i result = _mm256_mul_epu32(a_v, b_v);
+  return _mm256_extract_epi64(result, 0);
 }
 
 }  // namespace acero
