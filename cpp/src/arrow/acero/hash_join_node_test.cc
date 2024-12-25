@@ -3668,3 +3668,88 @@ TEST(HashJoin, AvxMul) {
   int64_t c = uint32_t(0x70000000) * uint32_t(4);
   std::cout << "Overflow: " << c << std::endl;
 }
+
+TEST(HashJoin, BuildSide2GbRows) {
+  const int64_t num_batches = 8;
+  const int64_t num_small_rows = 42;
+  // Just a little over 2GB.
+  const int64_t num_large_rows = (1ull << 31) + num_batches;
+  // const int64_t num_small_rows = 16;
+  // const int64_t num_large_rows = 18201475;
+  const int64_t seed = 42;
+
+  auto small_schema = schema({field("small_key", uint8())});
+  auto large_schema =
+      schema({field("large_key", uint8()), field("large_payload", uint8())});
+
+  const uint8_t key_match = std::numeric_limits<uint8_t>::max();
+  const uint8_t payload_match = 42;
+
+  ASSERT_OK_AND_ASSIGN(auto small_key_arr,
+                       Constant(MakeScalar(key_match))->Generate(num_small_rows));
+  ExecBatch small_batch({small_key_arr}, num_small_rows);
+
+  auto large_unmatch_key_arr =
+      RandomArrayGenerator(seed).UInt8(num_large_rows / num_batches, 0, key_match - 1);
+  ASSERT_OK_AND_ASSIGN(auto large_unmatch_payload_arr,
+                       MakeArrayOfNull(uint8(), num_large_rows / num_batches));
+  ExecBatch large_unmatch_batch({large_unmatch_key_arr, large_unmatch_payload_arr},
+                                num_large_rows / num_batches);
+
+  auto large_match_key_arr = small_key_arr->Slice(0, 1);
+  ASSERT_OK_AND_ASSIGN(auto large_match_payload_arr,
+                       Constant(MakeScalar(payload_match))->Generate(1));
+  ExecBatch large_match_batch({large_match_key_arr, large_match_payload_arr}, 1);
+
+  auto small_batches =
+      BatchesWithSchema{std::vector<ExecBatch>{small_batch}, small_schema};
+  auto large_batches = BatchesWithSchema{
+      std::vector<ExecBatch>(num_batches, large_unmatch_batch), large_schema};
+  large_batches.batches.push_back(large_match_batch);
+
+  // {
+  //   Declaration small_source{
+  //       "exec_batch_source",
+  //       ExecBatchSourceNodeOptions(small_batches.schema, small_batches.batches)};
+  //   Declaration large_source{
+  //       "exec_batch_source",
+  //       ExecBatchSourceNodeOptions(large_batches.schema, large_batches.batches)};
+
+  //   HashJoinNodeOptions join_opts(JoinType::INNER,
+  //                                 /*left_keys=*/{"key0", "key1", "key2"},
+  //                                 /*right_keys=*/{"key0", "key1", "key2"});
+  //   Declaration join{
+  //       "hashjoin", {std::move(large_source), std::move(small_source)}, join_opts};
+
+  //   AggregateNodeOptions agg_opts{/*aggregates=*/{
+  //       {"count_all", "count(*)"}, {"sum", nullptr, "payload", "sum(payload)"}}};
+  //   Declaration agg{"aggregate", {std::move(join)}, std::move(agg_opts)};
+
+  //   auto result = DeclarationToTable(std::move(agg)).ValueOrDie();
+  //   std::cout << result->ToString() << std::endl;
+  // }
+  {
+    Declaration small_source{
+        "exec_batch_source",
+        ExecBatchSourceNodeOptions(small_batches.schema, small_batches.batches)};
+    Declaration large_source{
+        "exec_batch_source",
+        ExecBatchSourceNodeOptions(large_batches.schema, large_batches.batches)};
+
+    HashJoinNodeOptions join_opts(JoinType::INNER,
+                                  /*left_keys=*/{"small_key"},
+                                  /*right_keys=*/{"large_key"});
+    join_opts.disable_bloom_filter = true;
+    Declaration join{
+        "hashjoin", {std::move(small_source), std::move(large_source)}, join_opts};
+
+    // AggregateNodeOptions agg_opts{/*aggregates=*/{
+    //     {"count_all", "count(*)"}, {"sum", nullptr, "payload", "sum(payload)"}}};
+    // Declaration agg{"aggregate", {std::move(join)}, std::move(agg_opts)};
+
+    auto result = DeclarationToTable(std::move(join)).ValueOrDie();
+    std::cout << result->ToString() << std::endl;
+  }
+
+  // return 0;
+}
