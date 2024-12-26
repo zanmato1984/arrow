@@ -158,9 +158,9 @@ void SwissTable::init_slot_ids(const int num_keys, const uint16_t* selection,
     for (int i = 0; i < num_keys; ++i) {
       uint16_t id = selection[i];
       uint32_t hash = hashes[id];
+      uint32_t iblock = hash >> (bits_hash_ - log_blocks_);
       uint32_t match = ::arrow::bit_util::GetBit(match_bitvector, id) ? 1 : 0;
-      uint32_t block_id = hash >> (bits_hash_ - log_blocks_);
-      uint32_t slot_id = block_id * 8u + local_slots[id] + match;
+      uint32_t slot_id = iblock * 8u + local_slots[id] + match;
       out_slot_ids[id] = slot_id;
     }
   }

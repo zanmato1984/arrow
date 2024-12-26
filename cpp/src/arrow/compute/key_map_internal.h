@@ -266,15 +266,14 @@ uint64_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
 
 void SwissTable::insert_into_empty_slot(uint32_t slot_id, uint32_t hash,
                                         uint32_t group_id) {
-  const uint64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+  const int64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
 
   // We assume here that the number of bits is rounded up to 8, 16, 32 or 64.
   // In that case we can insert group id value using aligned 64-bit word access.
   assert(num_groupid_bits == 8 || num_groupid_bits == 16 || num_groupid_bits == 32 ||
          num_groupid_bits == 64);
 
-  const uint64_t num_block_bytes =
-      num_block_bytes_from_num_groupid_bits(num_groupid_bits);
+  const int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
   constexpr uint64_t stamp_mask = 0x7f;
 
   int start_slot = (slot_id & 7);
