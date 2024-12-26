@@ -112,7 +112,7 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
     for (int i = 0; i < num_keys; ++i) {
       uint32_t id = use_selection ? selection[i] : i;
       uint32_t hash = hashes[id];
-      uint32_t block_id = block_id_from_hash(hash, log_blocks_);
+      uint32_t block_id = hash >> (bits_hash_ - log_blocks_);
       uint32_t group_id = reinterpret_cast<const uint32_t*>(
           slots_base + block_id * num_block_bytes)[local_slots[id]];
       out_group_ids[id] = group_id;
@@ -668,18 +668,18 @@ Status SwissTable::grow_double() {
       int ihalf = block_id_new & 1;
       uint8_t stamp_new = (hash >> bits_shift_for_block_and_stamp_after) & stamp_mask;
       uint64_t group_id_bit_offs = j * num_group_id_bits_before;
-      uint64_t group_id =
-          (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ + (group_id_bit_offs >> 3)) >>
-           (group_id_bit_offs & 7)) &
-          group_id_mask_before;
+      uint64_t group_id = (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ +
+                                                      (group_id_bit_offs >> 3)) >>
+                           (group_id_bit_offs & 7)) &
+                          group_id_mask_before;
 
       uint64_t slot_id_new = i * 16u + ihalf * 8u + full_slots_new[ihalf];
       hashes_new[slot_id_new] = hash;
       uint8_t* block_base_new = double_block_base_new + ihalf * block_size_after;
       block_base_new[7 - full_slots_new[ihalf]] = stamp_new;
       int64_t group_id_bit_offs_new = full_slots_new[ihalf] * num_group_id_bits_after;
-      uint64_t* ptr =
-          reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ + (group_id_bit_offs_new >> 3));
+      uint64_t* ptr = reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ +
+                                                  (group_id_bit_offs_new >> 3));
       util::SafeStore(ptr,
                       util::SafeLoad(ptr) | (group_id << (group_id_bit_offs_new & 7)));
       full_slots_new[ihalf]++;
@@ -692,7 +692,7 @@ Status SwissTable::grow_double() {
     // How many full slots in this block
     uint8_t* block_base = blocks_->mutable_data() + i * block_size_before;
     uint64_t block = util::SafeLoadAs<uint64_t>(block_base);
-    int full_slots = static_cast<int>(CountLeadingZeros(block & kHighBitOfEachByte) >> 3);
+    uint32_t full_slots = CountLeadingZeros(block & kHighBitOfEachByte) >> 3;
 
     for (uint32_t j = 0; j < full_slots; ++j) {
       uint64_t slot_id = i * 8u + j;
@@ -726,8 +726,8 @@ Status SwissTable::grow_double() {
       hashes_new[block_id_new * 8u + full_slots_new] = hash;
       block_base_new[7 - full_slots_new] = stamp_new;
       int64_t group_id_bit_offs_new = full_slots_new * num_group_id_bits_after;
-      uint64_t* ptr =
-          reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ + (group_id_bit_offs_new >> 3));
+      uint64_t* ptr = reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ +
+                                                  (group_id_bit_offs_new >> 3));
       util::SafeStore(ptr,
                       util::SafeLoad(ptr) | (group_id << (group_id_bit_offs_new & 7)));
     }
