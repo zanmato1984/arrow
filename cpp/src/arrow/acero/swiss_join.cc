@@ -633,10 +633,11 @@ void SwissTableMerge::MergePartition(SwissTable* target, const SwissTable* sourc
                                      std::vector<uint32_t>* overflow_hashes) {
   // Prepare parameters needed for scanning full slots in source.
   //
-  int source_group_id_bits =
+  int64_t source_group_id_bits =
       SwissTable::num_groupid_bits_from_log_blocks(source->log_blocks());
   uint64_t source_group_id_mask = ~0ULL >> (64 - source_group_id_bits);
-  int64_t source_block_bytes = source_group_id_bits + 8;
+  int64_t source_block_bytes =
+      SwissTable::num_block_bytes_from_num_groupid_bits(source_group_id_bits);
   ARROW_DCHECK(source_block_bytes % sizeof(uint64_t) == 0);
 
   // Compute index of the last block in target that corresponds to the given
@@ -694,9 +695,10 @@ inline bool SwissTableMerge::InsertNewGroup(SwissTable* target, uint64_t group_i
   //
   int64_t block_id = hash >> (SwissTable::bits_hash_ - target->log_blocks());
   int64_t block_id_mask = ((1LL << target->log_blocks()) - 1);
-  int num_group_id_bits =
+  int64_t num_group_id_bits =
       SwissTable::num_groupid_bits_from_log_blocks(target->log_blocks());
-  int64_t num_block_bytes = num_group_id_bits + sizeof(uint64_t);
+  int64_t num_block_bytes =
+      SwissTable::num_block_bytes_from_num_groupid_bits(num_group_id_bits);
   ARROW_DCHECK(num_block_bytes % sizeof(uint64_t) == 0);
   uint8_t* block_bytes = target->blocks() + block_id * num_block_bytes;
   uint64_t block = *reinterpret_cast<const uint64_t*>(block_bytes);

@@ -94,12 +94,16 @@ class ARROW_EXPORT SwissTable {
 
   inline void insert_into_empty_slot(uint32_t slot_id, uint32_t hash, uint32_t group_id);
 
-  static int num_groupid_bits_from_log_blocks(int log_blocks) {
+  static int64_t num_groupid_bits_from_log_blocks(int log_blocks) {
     int required_bits = log_blocks + 3;
     return required_bits <= 8    ? 8
            : required_bits <= 16 ? 16
            : required_bits <= 32 ? 32
                                  : 64;
+  }
+
+  static int64_t num_block_bytes_from_num_groupid_bits(int64_t num_groupid_bits) {
+    return num_groupid_bits + bytes_status_;
   }
 
   // Use 32-bit hash for now
@@ -139,11 +143,10 @@ class ARROW_EXPORT SwissTable {
                          const uint32_t* hashes, const uint8_t* local_slots,
                          uint32_t* out_group_ids) const;
 
-  template <typename T, bool use_selection>
+  template <bool use_selection>
   void extract_group_ids_imp(const int num_keys, const uint16_t* selection,
                              const uint32_t* hashes, const uint8_t* local_slots,
-                             uint32_t* out_group_ids, int elements_offset,
-                             int element_multiplier) const;
+                             uint32_t* out_group_ids) const;
 
   inline uint64_t next_slot_to_visit(uint64_t block_index, int slot,
                                      int match_found) const;
@@ -173,8 +176,7 @@ class ARROW_EXPORT SwissTable {
                                 uint8_t* out_match_bitvector,
                                 uint8_t* out_local_slots) const;
   int extract_group_ids_avx2(const int num_keys, const uint32_t* hashes,
-                             const uint8_t* local_slots, uint32_t* out_group_ids,
-                             int byte_offset, int byte_multiplier, int byte_size) const;
+                             const uint8_t* local_slots, uint32_t* out_group_ids) const;
 #endif
 
   void run_comparisons(const int num_keys, const uint16_t* optional_selection_ids,
@@ -202,6 +204,8 @@ class ARROW_EXPORT SwissTable {
   // Resize small hash tables when 50% full (up to 8KB).
   // Resize large hash tables when 75% full.
   Status grow_double();
+
+  static constexpr int bytes_status_ = 8;
 
   // Number of hash bits stored in slots in a block.
   // The highest bits of hash determine block id.
@@ -269,7 +273,8 @@ void SwissTable::insert_into_empty_slot(uint32_t slot_id, uint32_t hash,
   assert(num_groupid_bits == 8 || num_groupid_bits == 16 || num_groupid_bits == 32 ||
          num_groupid_bits == 64);
 
-  const uint64_t num_block_bytes = (8 + num_groupid_bits);
+  const uint64_t num_block_bytes =
+      num_block_bytes_from_num_groupid_bits(num_groupid_bits);
   constexpr uint64_t stamp_mask = 0x7f;
 
   int start_slot = (slot_id & 7);
