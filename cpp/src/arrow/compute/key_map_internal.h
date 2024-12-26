@@ -205,6 +205,7 @@ class ARROW_EXPORT SwissTable {
   // Resize large hash tables when 75% full.
   Status grow_double();
 
+  // TODO: Rename to bytes_status_in_block_.
   static constexpr int bytes_status_ = 8;
 
   // Number of hash bits stored in slots in a block.
