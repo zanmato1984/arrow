@@ -704,10 +704,10 @@ Status SwissTable::grow_double() {
       }
 
       uint64_t group_id_bit_offs = j * num_group_id_bits_before;
-      uint64_t group_id =
-          (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ + (group_id_bit_offs >> 3)) >>
-           (group_id_bit_offs & 7)) &
-          group_id_mask_before;
+      uint64_t group_id = (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ +
+                                                      (group_id_bit_offs >> 3)) >>
+                           (group_id_bit_offs & 7)) &
+                          group_id_mask_before;
       uint8_t stamp_new = (hash >> bits_shift_for_block_and_stamp_after) & stamp_mask;
 
       uint8_t* block_base_new =
