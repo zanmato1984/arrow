@@ -106,6 +106,10 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
     }
   } else {
     int64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+    int64_t num_groupid_bytes = num_groupid_bits / 8;
+    uint32_t mask = num_groupid_bytes == 1   ? 0xFF
+                    : num_groupid_bytes == 2 ? 0xFFFF
+                                             : 0xFFFFFFFF;
     int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
     const uint8_t* slots_base = blocks_->data() + bytes_status_;
 
@@ -113,8 +117,9 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
       uint32_t id = use_selection ? selection[i] : i;
       uint32_t hash = hashes[id];
       uint32_t block_id = hash >> (bits_hash_ - log_blocks_);
-      uint32_t group_id = reinterpret_cast<const uint32_t*>(
-          slots_base + block_id * num_block_bytes)[local_slots[id]];
+      uint32_t group_id = *reinterpret_cast<const uint32_t*>(
+          slots_base + block_id * num_block_bytes + local_slots[id] * num_groupid_bytes);
+      group_id &= mask;
       out_group_ids[id] = group_id;
     }
   }
