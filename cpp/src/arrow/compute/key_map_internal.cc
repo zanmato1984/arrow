@@ -258,6 +258,11 @@ uint64_t SwissTable::num_groups_for_resize() const {
   }
 }
 
+uint32_t SwissTable::wrap_global_slot_id(uint32_t global_slot_id) const {
+  uint32_t global_slot_id_mask = static_cast<uint32_t>((1ULL << (log_blocks_ + 3)) - 1);
+  return global_slot_id & global_slot_id_mask;
+}
+
 void SwissTable::early_filter(const int num_keys, const uint32_t* hashes,
                               uint8_t* out_match_bitvector,
                               uint8_t* out_local_slots) const {
@@ -357,7 +362,7 @@ bool SwissTable::find_next_stamp_match(const uint32_t hash, const uint32_t in_sl
   constexpr uint64_t stamp_mask = 0x7f;
   const int stamp =
       static_cast<int>((hash >> bits_shift_for_block_and_stamp_) & stamp_mask);
-  uint32_t start_slot_id = in_slot_id;
+  uint32_t start_slot_id = wrap_global_slot_id(in_slot_id);
   int match_found;
   int local_slot;
   uint8_t* blockbase;
@@ -367,7 +372,7 @@ bool SwissTable::find_next_stamp_match(const uint32_t hash, const uint32_t in_sl
 
     search_block<true>(block, stamp, start_slot_id & 7, &local_slot, &match_found);
 
-    start_slot_id = (start_slot_id & ~7U) + local_slot + match_found;
+    start_slot_id = wrap_global_slot_id((start_slot_id & ~7U) + local_slot + match_found);
 
     // Match found can be 1 in two cases:
     // - match was found

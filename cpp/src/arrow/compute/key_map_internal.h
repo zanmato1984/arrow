@@ -168,6 +168,8 @@ class ARROW_EXPORT SwissTable {
 
   inline uint64_t num_groups_for_resize() const;
 
+  inline uint32_t wrap_global_slot_id(uint32_t global_slot_id) const;
+
   void init_slot_ids(const int num_keys, const uint16_t* selection,
                      const uint32_t* hashes, const uint8_t* local_slots,
                      const uint8_t* match_bitvector, uint32_t* out_slot_ids) const;
