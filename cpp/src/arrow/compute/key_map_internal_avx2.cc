@@ -394,7 +394,8 @@ int SwissTable::extract_group_ids_avx2(const int num_keys, const uint32_t* hashe
                     : num_groupid_bytes == 2 ? 0xFFFF
                                              : 0xFFFFFFFF;
     int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
-    const int* slots_base = reinterpret_cast<const int*>(blocks_->data() + bytes_status_);
+    const int* slots_base =
+        reinterpret_cast<const int*>(blocks_->data() + bytes_status_in_block_);
 
     for (int i = 0; i < num_keys / unroll; ++i) {
       __m256i hash = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + i);

@@ -101,7 +101,7 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
   if (log_blocks_ == 0) {
     for (int i = 0; i < num_keys; ++i) {
       uint32_t id = use_selection ? selection[i] : i;
-      uint32_t group_id = blocks()[bytes_status_ + local_slots[id]];
+      uint32_t group_id = blocks()[bytes_status_in_block_ + local_slots[id]];
       out_group_ids[id] = group_id;
     }
   } else {
@@ -111,7 +111,7 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
                     : num_groupid_bytes == 2 ? 0xFFFF
                                              : 0xFFFFFFFF;
     int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
-    const uint8_t* slots_base = blocks_->data() + bytes_status_;
+    const uint8_t* slots_base = blocks_->data() + bytes_status_in_block_;
 
     for (int i = 0; i < num_keys; ++i) {
       uint32_t id = use_selection ? selection[i] : i;
@@ -494,7 +494,7 @@ Status SwissTable::map_new_keys_helper(
   //
   ARROW_DCHECK(*inout_num_selected <= static_cast<uint32_t>(1 << log_minibatch_));
 
-  size_t num_bytes_for_bits = (*inout_num_selected + 7) / 8 + bytes_status_;
+  size_t num_bytes_for_bits = (*inout_num_selected + 7) / 8 + bytes_status_in_block_;
   auto match_bitvector_buf = util::TempVectorHolder<uint8_t>(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
@@ -673,18 +673,19 @@ Status SwissTable::grow_double() {
       int ihalf = block_id_new & 1;
       uint8_t stamp_new = (hash >> bits_shift_for_block_and_stamp_after) & stamp_mask;
       uint64_t group_id_bit_offs = j * num_group_id_bits_before;
-      uint64_t group_id = (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ +
-                                                      (group_id_bit_offs >> 3)) >>
-                           (group_id_bit_offs & 7)) &
-                          group_id_mask_before;
+      uint64_t group_id =
+          (util::SafeLoadAs<uint64_t>(block_base + bytes_status_in_block_ +
+                                      (group_id_bit_offs >> 3)) >>
+           (group_id_bit_offs & 7)) &
+          group_id_mask_before;
 
       uint64_t slot_id_new = i * 16u + ihalf * 8u + full_slots_new[ihalf];
       hashes_new[slot_id_new] = hash;
       uint8_t* block_base_new = double_block_base_new + ihalf * block_size_after;
       block_base_new[7 - full_slots_new[ihalf]] = stamp_new;
       int64_t group_id_bit_offs_new = full_slots_new[ihalf] * num_group_id_bits_after;
-      uint64_t* ptr = reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ +
-                                                  (group_id_bit_offs_new >> 3));
+      uint64_t* ptr = reinterpret_cast<uint64_t*>(
+          block_base_new + bytes_status_in_block_ + (group_id_bit_offs_new >> 3));
       util::SafeStore(ptr,
                       util::SafeLoad(ptr) | (group_id << (group_id_bit_offs_new & 7)));
       full_slots_new[ihalf]++;
@@ -709,10 +710,11 @@ Status SwissTable::grow_double() {
       }
 
       uint64_t group_id_bit_offs = j * num_group_id_bits_before;
-      uint64_t group_id = (util::SafeLoadAs<uint64_t>(block_base + bytes_status_ +
-                                                      (group_id_bit_offs >> 3)) >>
-                           (group_id_bit_offs & 7)) &
-                          group_id_mask_before;
+      uint64_t group_id =
+          (util::SafeLoadAs<uint64_t>(block_base + bytes_status_in_block_ +
+                                      (group_id_bit_offs >> 3)) >>
+           (group_id_bit_offs & 7)) &
+          group_id_mask_before;
       uint8_t stamp_new = (hash >> bits_shift_for_block_and_stamp_after) & stamp_mask;
 
       uint8_t* block_base_new =
@@ -731,8 +733,8 @@ Status SwissTable::grow_double() {
       hashes_new[block_id_new * 8u + full_slots_new] = hash;
       block_base_new[7 - full_slots_new] = stamp_new;
       int64_t group_id_bit_offs_new = full_slots_new * num_group_id_bits_after;
-      uint64_t* ptr = reinterpret_cast<uint64_t*>(block_base_new + bytes_status_ +
-                                                  (group_id_bit_offs_new >> 3));
+      uint64_t* ptr = reinterpret_cast<uint64_t*>(
+          block_base_new + bytes_status_in_block_ + (group_id_bit_offs_new >> 3));
       util::SafeStore(ptr,
                       util::SafeLoad(ptr) | (group_id << (group_id_bit_offs_new & 7)));
     }

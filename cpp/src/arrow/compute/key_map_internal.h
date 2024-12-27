@@ -103,7 +103,7 @@ class ARROW_EXPORT SwissTable {
   }
 
   static int64_t num_block_bytes_from_num_groupid_bits(int64_t num_groupid_bits) {
-    return num_groupid_bits + bytes_status_;
+    return num_groupid_bits + bytes_status_in_block_;
   }
 
   // Use 32-bit hash for now
@@ -205,8 +205,7 @@ class ARROW_EXPORT SwissTable {
   // Resize large hash tables when 75% full.
   Status grow_double();
 
-  // TODO: Rename to bytes_status_in_block_.
-  static constexpr int bytes_status_ = 8;
+  static constexpr int bytes_status_in_block_ = 8;
 
   // Number of hash bits stored in slots in a block.
   // The highest bits of hash determine block id.
