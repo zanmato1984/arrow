@@ -168,8 +168,6 @@ class ARROW_EXPORT SwissTable {
 
   inline uint64_t num_groups_for_resize() const;
 
-  inline uint32_t wrap_global_slot_id(uint32_t global_slot_id) const;
-
   void init_slot_ids(const int num_keys, const uint16_t* selection,
                      const uint32_t* hashes, const uint8_t* local_slots,
                      const uint8_t* match_bitvector, uint32_t* out_slot_ids) const;
@@ -265,24 +263,6 @@ class ARROW_EXPORT SwissTable {
   int64_t hardware_flags_;
   MemoryPool* pool_;
 };
-
-// uint32_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
-//                                       uint64_t group_id_mask) const {
-//   // Group id values for all 8 slots in the block are bit-packed and follow the status
-//   // bytes. We assume here that the number of bits is rounded up to 8, 16, 32 or 64. In
-//   // that case we can extract group id using aligned 64-bit word access.
-//   int num_group_id_bits = static_cast<int>(ARROW_POPCOUNT64(group_id_mask));
-//   assert(num_group_id_bits == 8 || num_group_id_bits == 16 || num_group_id_bits == 32
-//   ||
-//          num_group_id_bits == 64);
-
-//   int bit_offset = slot * num_group_id_bits;
-//   const uint64_t* group_id_bytes =
-//       reinterpret_cast<const uint64_t*>(block_ptr) + 1 + (bit_offset >> 6);
-//   uint64_t group_id = (*group_id_bytes >> (bit_offset & 63)) & group_id_mask;
-
-//   return group_id;
-// }
 
 void SwissTable::insert_into_empty_slot(uint32_t slot_id, uint32_t hash,
                                         uint32_t group_id) {
