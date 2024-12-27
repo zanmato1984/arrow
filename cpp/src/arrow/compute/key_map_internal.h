@@ -87,12 +87,25 @@ class ARROW_EXPORT SwissTable {
     return reinterpret_cast<uint32_t*>(hashes_->mutable_data());
   }
 
+  inline void insert_into_empty_slot(uint32_t slot_id, uint32_t hash, uint32_t group_id);
+
   /// \brief Extract group id for a given slot in a given block.
   ///
-  inline uint64_t extract_group_id(const uint8_t* block_ptr, int slot,
-                                   uint64_t group_id_mask) const;
+  inline static uint32_t extract_group_id(const uint8_t* block_ptr, int local_slot,
+                                          int64_t num_group_id_bits) {
+    uint32_t group_id_mask = group_id_mask_from_num_groupid_bits(num_group_id_bits);
+    uint32_t group_id = *reinterpret_cast<const uint32_t*>(
+        block_ptr + bytes_status_in_block_ + local_slot * num_group_id_bits / 8);
+    return group_id & group_id_mask;
+  }
 
-  inline void insert_into_empty_slot(uint32_t slot_id, uint32_t hash, uint32_t group_id);
+  inline static uint32_t block_id_from_hash(uint32_t hash, int log_blocks) {
+    return hash >> (bits_hash_ - log_blocks);
+  }
+
+  inline static uint32_t global_slot_id(uint32_t block_id, uint32_t local_slot_id) {
+    return block_id * static_cast<uint32_t>(kSlotsPerBlock) + local_slot_id;
+  }
 
   static int64_t num_groupid_bits_from_log_blocks(int log_blocks) {
     int required_bits = log_blocks + 3;
@@ -105,6 +118,8 @@ class ARROW_EXPORT SwissTable {
   static int64_t num_block_bytes_from_num_groupid_bits(int64_t num_groupid_bits) {
     return num_groupid_bits + bytes_status_in_block_;
   }
+
+  static constexpr int kSlotsPerBlock = 8;
 
   // Use 32-bit hash for now
   static constexpr int bits_hash_ = 32;
@@ -153,7 +168,7 @@ class ARROW_EXPORT SwissTable {
 
   inline uint64_t num_groups_for_resize() const;
 
-  inline uint64_t wrap_global_slot_id(uint64_t global_slot_id) const;
+  inline uint32_t wrap_global_slot_id(uint32_t global_slot_id) const;
 
   void init_slot_ids(const int num_keys, const uint16_t* selection,
                      const uint32_t* hashes, const uint8_t* local_slots,
@@ -205,6 +220,10 @@ class ARROW_EXPORT SwissTable {
   // Resize large hash tables when 75% full.
   Status grow_double();
 
+  static uint32_t group_id_mask_from_num_groupid_bits(int64_t num_groupid_bits) {
+    return static_cast<uint32_t>((1ULL << num_groupid_bits) - 1);
+  }
+
   static constexpr int bytes_status_in_block_ = 8;
 
   // Number of hash bits stored in slots in a block.
@@ -247,22 +266,23 @@ class ARROW_EXPORT SwissTable {
   MemoryPool* pool_;
 };
 
-uint64_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
-                                      uint64_t group_id_mask) const {
-  // Group id values for all 8 slots in the block are bit-packed and follow the status
-  // bytes. We assume here that the number of bits is rounded up to 8, 16, 32 or 64. In
-  // that case we can extract group id using aligned 64-bit word access.
-  int num_group_id_bits = static_cast<int>(ARROW_POPCOUNT64(group_id_mask));
-  assert(num_group_id_bits == 8 || num_group_id_bits == 16 || num_group_id_bits == 32 ||
-         num_group_id_bits == 64);
+// uint32_t SwissTable::extract_group_id(const uint8_t* block_ptr, int slot,
+//                                       uint64_t group_id_mask) const {
+//   // Group id values for all 8 slots in the block are bit-packed and follow the status
+//   // bytes. We assume here that the number of bits is rounded up to 8, 16, 32 or 64. In
+//   // that case we can extract group id using aligned 64-bit word access.
+//   int num_group_id_bits = static_cast<int>(ARROW_POPCOUNT64(group_id_mask));
+//   assert(num_group_id_bits == 8 || num_group_id_bits == 16 || num_group_id_bits == 32
+//   ||
+//          num_group_id_bits == 64);
 
-  int bit_offset = slot * num_group_id_bits;
-  const uint64_t* group_id_bytes =
-      reinterpret_cast<const uint64_t*>(block_ptr) + 1 + (bit_offset >> 6);
-  uint64_t group_id = (*group_id_bytes >> (bit_offset & 63)) & group_id_mask;
+//   int bit_offset = slot * num_group_id_bits;
+//   const uint64_t* group_id_bytes =
+//       reinterpret_cast<const uint64_t*>(block_ptr) + 1 + (bit_offset >> 6);
+//   uint64_t group_id = (*group_id_bytes >> (bit_offset & 63)) & group_id_mask;
 
-  return group_id;
-}
+//   return group_id;
+// }
 
 void SwissTable::insert_into_empty_slot(uint32_t slot_id, uint32_t hash,
                                         uint32_t group_id) {
