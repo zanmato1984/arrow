@@ -1181,7 +1181,7 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
           // We want each partition to correspond to a range of block indices,
           // so we also partition on the highest bits of the hash.
           //
-          return locals.batch_hashes[i] >> (31 - log_num_prtns_) >> 1;
+          return locals.batch_hashes[i] >> (SwissTable::bits_hash_ - log_num_prtns_);
         },
         [&locals](int64_t i, int pos) {
           locals.batch_prtn_row_ids[pos] = static_cast<uint16_t>(i);
