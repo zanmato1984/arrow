@@ -394,14 +394,11 @@ struct SwissTableWithKeys {
           arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays);
 
-    // Input(const ExecBatch* in_batch, arrow::util::TempVectorStack* in_temp_stack,
-    //       std::vector<KeyColumnArray>* in_temp_column_arrays);
-
     Input(const ExecBatch* in_batch, int in_batch_start_row, int in_num_selected,
           const uint16_t* in_selection, arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays);
 
-    Input(const Input& base, int num_rows_to_skip, int num_rows_to_include);
+    Input Slice(int offset, int num_rows) const;
 
     const ExecBatch* batch;
     // Window of the batch to operate on.

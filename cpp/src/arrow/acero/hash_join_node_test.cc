@@ -991,7 +991,7 @@ TEST(HashJoin, Random) {
   const int num_tests = 100;
 #endif
   for (int test_id = 0; test_id < num_tests; ++test_id) {
-    bool parallel = true;  // (rng.from_range(0, 1) == 1);
+    bool parallel = (rng.from_range(0, 1) == 1);
     bool disable_bloom_filter = (rng.from_range(0, 1) == 1);
     auto exec_ctx = std::make_unique<ExecContext>(
         default_memory_pool(), parallel ? arrow::internal::GetCpuThreadPool() : nullptr);
@@ -1016,9 +1016,9 @@ TEST(HashJoin, Random) {
     constexpr int key_cmp_mask = 0x03;
     // for EQ only:
     // constexpr int key_cmp_mask = 0x01;
-    constexpr int min_num_rows = 4096;
+    constexpr int min_num_rows = 1;
     const int max_num_rows = parallel ? 20000 : 2000;
-    constexpr int min_batch_size = 100;
+    constexpr int min_batch_size = 10;
     constexpr int max_batch_size = 100;
 
     // Generate list of key field data types
@@ -3280,7 +3280,7 @@ void AssertRowCountEq(Declaration source, int64_t expected) {
 // fixed length and larger than 4GB, and the 64-bit offset in the hash table can handle it
 // correctly.
 TEST(HashJoin, LARGE_MEMORY_TEST(BuildSideOver4GBFixedLength)) {
-  constexpr int64_t k5GB = 1ll * 1024 * 1024;
+  constexpr int64_t k5GB = 5ll * 1024 * 1024;
   constexpr int fixed_length = 128;
   const auto type = fixed_size_binary(fixed_length);
   constexpr uint8_t byte_no_match_min = static_cast<uint8_t>('A');

@@ -743,47 +743,28 @@ SwissTableWithKeys::Input::Input(const ExecBatch* in_batch, int in_batch_start_r
       temp_stack(in_temp_stack),
       temp_column_arrays(in_temp_column_arrays) {}
 
-// SwissTableWithKeys::Input::Input(const ExecBatch* in_batch,
-//                                  arrow::util::TempVectorStack* in_temp_stack,
-//                                  std::vector<KeyColumnArray>* in_temp_column_arrays)
-//     : batch(in_batch),
-//       batch_start_row(0),
-//       batch_end_row(static_cast<int>(in_batch->length)),
-//       num_selected(0),
-//       selection_maybe_null(nullptr),
-//       temp_stack(in_temp_stack),
-//       temp_column_arrays(in_temp_column_arrays) {}
-
 SwissTableWithKeys::Input::Input(const ExecBatch* in_batch, int in_batch_start_row,
                                  int in_num_selected, const uint16_t* in_selection,
                                  arrow::util::TempVectorStack* in_temp_stack,
                                  std::vector<KeyColumnArray>* in_temp_column_arrays)
     : batch(in_batch),
-      batch_start_row(in_num_selected),
+      batch_start_row(in_batch_start_row),
       batch_end_row(static_cast<int>(in_batch->length)),
       num_selected(in_num_selected),
       selection_maybe_null(in_selection),
       temp_stack(in_temp_stack),
       temp_column_arrays(in_temp_column_arrays) {}
 
-SwissTableWithKeys::Input::Input(const Input& base, int num_rows_to_skip,
-                                 int num_rows_to_include)
-    : batch(base.batch),
-      temp_stack(base.temp_stack),
-      temp_column_arrays(base.temp_column_arrays) {
-  if (base.selection_maybe_null) {
-    batch_start_row = base.batch_start_row;
-    batch_end_row = base.batch_end_row;
-    ARROW_DCHECK(num_rows_to_skip + num_rows_to_include <= base.num_selected);
-    num_selected = num_rows_to_include;
-    selection_maybe_null = base.selection_maybe_null + num_rows_to_skip;
+SwissTableWithKeys::Input SwissTableWithKeys::Input::Slice(int offset,
+                                                           int num_rows) const {
+  if (selection_maybe_null) {
+    ARROW_DCHECK_LE(offset + num_rows, num_selected);
+    return Input(batch, batch_start_row, num_rows, selection_maybe_null + offset,
+                 temp_stack, temp_column_arrays);
   } else {
-    ARROW_DCHECK(base.batch_start_row + num_rows_to_skip + num_rows_to_include <=
-                 base.batch_end_row);
-    batch_start_row = base.batch_start_row + num_rows_to_skip;
-    batch_end_row = base.batch_start_row + num_rows_to_skip + num_rows_to_include;
-    num_selected = 0;
-    selection_maybe_null = nullptr;
+    ARROW_DCHECK_LE(batch_start_row + offset + num_rows, batch_end_row);
+    return Input(batch, batch_start_row + offset, batch_end_row, temp_stack,
+                 temp_column_arrays);
   }
 }
 
@@ -888,7 +869,7 @@ Status SwissTableWithKeys::AppendCallback(int num_keys, const uint16_t* selectio
     for (int i = 0; i < num_keys; ++i) {
       selection_to_use_buf.mutable_data()[i] = in->selection_maybe_null[selection[i]];
     }
-    batch_start_to_use = 0;
+    batch_start_to_use = in->batch_start_row;
     batch_end_to_use = static_cast<int>(in->batch->length);
     selection_to_use = selection_to_use_buf.mutable_data();
 
@@ -941,7 +922,8 @@ void SwissTableWithKeys::MapReadOnly(Input* input, const uint32_t* hashes,
 
 Status SwissTableWithKeys::MapWithInserts(Input* input, const uint32_t* hashes,
                                           uint32_t* key_ids, uint32_t* temp_group_ids) {
-  return Map(input, /*insert_missing=*/true, hashes, nullptr, key_ids, temp_group_ids);
+  return Map(input, /*insert_missing=*/true, hashes,
+             /*match_bitvector_maybe_null=*/nullptr, key_ids, temp_group_ids);
 }
 
 Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t* hashes,
@@ -965,7 +947,7 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
 
     // Prepare updated input buffers that represent the current minibatch.
     //
-    Input minibatch_input(*input, minibatch_start, minibatch_size_next);
+    Input minibatch_input = input->Slice(minibatch_start, minibatch_size_next);
     Ctx minibatch_ctx{&minibatch_input, temp_group_ids};
     uint8_t* minibatch_match_bitvector =
         insert_missing ? match_bitvector_buf.mutable_data()
@@ -1164,7 +1146,7 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
   auto group_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
       temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
   ARROW_DCHECK_LE(num_prtns_, arrow::util::MiniBatch::kMiniBatchLength);
-  auto prtn_ids_buf = arrow::util::TempVectorHolder<int>(temp_stack, num_prtns_);
+  auto prtn_ids_buf = arrow::util::TempVectorHolder<int>(temp_stack, num_prtns_ + 1);
 
   auto hashes = hashes_buf.mutable_data();
   auto prtn_ranges = prtn_ranges_buf.mutable_data();
@@ -1265,7 +1247,7 @@ Status SwissTableForJoinBuild::ProcessPartition(
   if (!no_payload_) {
     ARROW_DCHECK(payload_batch_maybe_null);
     RETURN_NOT_OK(prtn_state.payloads.AppendBatchSelection(
-        pool_, hardware_flags_, *payload_batch_maybe_null, 0,
+        pool_, hardware_flags_, *payload_batch_maybe_null, start_row,
         static_cast<int>(payload_batch_maybe_null->length), num_rows, row_ids,
         locals.temp_column_arrays));
   }
@@ -1837,9 +1819,9 @@ bool JoinMatchIterator::GetNextBatch(int num_rows_max, int* out_num_rows,
 
 namespace {
 
-// Given match_bitvector identifies that there is a match for row[batch_start_row + i] in
-// given input batch if bit match_bitvector[i] == passing_bit. Collect all the passing row
-// ids according to the given match_bitvector.
+// Given match_bitvector identifies that there is a match for row[batch_start_row + i]
+// in given input batch if bit match_bitvector[i] == passing_bit. Collect all the
+// passing row ids according to the given match_bitvector.
 //
 void CollectPassingBatchIds(int passing_bit, int64_t hardware_flags, int batch_start_row,
                             int num_batch_rows, const uint8_t* match_bitvector,
@@ -1947,8 +1929,8 @@ Status JoinResidualFilter::FilterLeftSemi(const ExecBatch& keypayload_batch,
   }
 
   if (num_build_keys_referred_ == 0 && num_build_payloads_referred_ == 0) {
-    // If filter refers no column in the right table, then we can directly filter on the
-    // left rows without inner matching and materializing the right rows.
+    // If filter refers no column in the right table, then we can directly filter on
+    // the left rows without inner matching and materializing the right rows.
     //
     CollectPassingBatchIds(1, hardware_flags_, batch_start_row, num_batch_rows,
                            match_bitvector, num_passing_ids, passing_batch_row_ids);
@@ -1966,16 +1948,16 @@ Status JoinResidualFilter::FilterLeftSemi(const ExecBatch& keypayload_batch,
   auto match_payload_ids_buf =
       arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size_);
 
-  // Inner matching is necessary for non-trivial filter. Only until evaluating filter for
-  // all matches of the same row can we be sure that it's not passing (it could pass
-  // earlier though).
+  // Inner matching is necessary for non-trivial filter. Only until evaluating filter
+  // for all matches of the same row can we be sure that it's not passing (it could
+  // pass earlier though).
   //
   JoinMatchIterator match_iterator;
   match_iterator.SetLookupResult(num_batch_rows, batch_start_row, match_bitvector,
                                  key_ids, no_duplicate_keys, key_to_payload_);
   int num_matches_next = 0;
-  // Used to not only collect distinct row ids, but also skip unecessary matches in the
-  // next batch.
+  // Used to not only collect distinct row ids, but also skip unecessary matches in
+  // the next batch.
   //
   int row_id_last = JoinMatchIterator::kInvalidRowId;
   while (match_iterator.GetNextBatch(minibatch_size_, &num_matches_next,
