@@ -394,13 +394,12 @@ struct SwissTableWithKeys {
           arrow::util::TempVectorStack* in_temp_stack,
           std::vector<KeyColumnArray>* in_temp_column_arrays);
 
-    Input(const ExecBatch* in_batch, arrow::util::TempVectorStack* in_temp_stack,
-          std::vector<KeyColumnArray>* in_temp_column_arrays);
+    // Input(const ExecBatch* in_batch, arrow::util::TempVectorStack* in_temp_stack,
+    //       std::vector<KeyColumnArray>* in_temp_column_arrays);
 
-    Input(const ExecBatch* in_batch, int in_num_selected, const uint16_t* in_selection,
-          arrow::util::TempVectorStack* in_temp_stack,
-          std::vector<KeyColumnArray>* in_temp_column_arrays,
-          std::vector<uint32_t>* in_temp_group_ids);
+    Input(const ExecBatch* in_batch, int in_batch_start_row, int in_num_selected,
+          const uint16_t* in_selection, arrow::util::TempVectorStack* in_temp_stack,
+          std::vector<KeyColumnArray>* in_temp_column_arrays);
 
     Input(const Input& base, int num_rows_to_skip, int num_rows_to_include);
 
@@ -419,7 +418,6 @@ struct SwissTableWithKeys {
     //
     arrow::util::TempVectorStack* temp_stack;
     std::vector<KeyColumnArray>* temp_column_arrays;
-    std::vector<uint32_t>* temp_group_ids;
   };
 
   Status Init(int64_t hardware_flags, MemoryPool* pool);
@@ -438,8 +436,9 @@ struct SwissTableWithKeys {
   // otherwise).
   //
   void MapReadOnly(Input* input, const uint32_t* hashes, uint8_t* match_bitvector,
-                   uint32_t* key_ids);
-  Status MapWithInserts(Input* input, const uint32_t* hashes, uint32_t* key_ids);
+                   uint32_t* key_ids, uint32_t* temp_group_ids);
+  Status MapWithInserts(Input* input, const uint32_t* hashes, uint32_t* key_ids,
+                        uint32_t* temp_group_ids);
 
   SwissTable* swiss_table() { return &swiss_table_; }
   const SwissTable* swiss_table() const { return &swiss_table_; }
@@ -447,12 +446,22 @@ struct SwissTableWithKeys {
   const RowArray* keys() const { return &keys_; }
 
  private:
+  // Callback context, including input and temporary storage for equal and append
+  // callbacks.
+  //
+  struct Ctx {
+    Input* input;
+    // Temporary storage for intermediate group ids.
+    //
+    uint32_t* temp_group_ids;
+  };
   void EqualCallback(int num_keys, const uint16_t* selection_maybe_null,
                      const uint32_t* group_ids, uint32_t* out_num_keys_mismatch,
                      uint16_t* out_selection_mismatch, void* callback_ctx);
   Status AppendCallback(int num_keys, const uint16_t* selection, void* callback_ctx);
   Status Map(Input* input, bool insert_missing, const uint32_t* hashes,
-             uint8_t* match_bitvector_maybe_null, uint32_t* key_ids);
+             uint8_t* match_bitvector_maybe_null, uint32_t* key_ids,
+             uint32_t* temp_group_ids);
 
   SwissTable::EqualImpl equal_impl_;
   SwissTable::AppendImpl append_impl_;
@@ -569,7 +578,9 @@ class SwissTableForJoinBuild {
  private:
   void InitRowArray();
   Status ProcessPartition(int64_t thread_id, const ExecBatch& key_batch,
-                          const ExecBatch* payload_batch_maybe_null,
+                          const ExecBatch* payload_batch_maybe_null, int start_row,
+                          int num_rows, const uint32_t* hashes, const uint16_t* row_ids,
+                          uint32_t* temp_group_ids,
                           arrow::util::TempVectorStack* temp_stack, int prtn_id);
 
   SwissTableForJoin* target_;
@@ -620,15 +631,9 @@ class SwissTableForJoinBuild {
 
   // One per thread.
   //
-  // Buffers for storing temporary intermediate results when processing input
-  // batches.
+  // Buffers for temporary storage when processing input batches.
   //
   struct ThreadState {
-    std::vector<uint32_t> batch_hashes;
-    std::vector<uint16_t> batch_prtn_ranges;
-    std::vector<uint16_t> batch_prtn_row_ids;
-    std::vector<int> temp_prtn_ids;
-    std::vector<uint32_t> temp_group_ids;
     std::vector<KeyColumnArray> temp_column_arrays;
   };
 

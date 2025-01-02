@@ -741,44 +741,39 @@ SwissTableWithKeys::Input::Input(const ExecBatch* in_batch, int in_batch_start_r
       num_selected(0),
       selection_maybe_null(nullptr),
       temp_stack(in_temp_stack),
-      temp_column_arrays(in_temp_column_arrays),
-      temp_group_ids(nullptr) {}
+      temp_column_arrays(in_temp_column_arrays) {}
 
-SwissTableWithKeys::Input::Input(const ExecBatch* in_batch,
+// SwissTableWithKeys::Input::Input(const ExecBatch* in_batch,
+//                                  arrow::util::TempVectorStack* in_temp_stack,
+//                                  std::vector<KeyColumnArray>* in_temp_column_arrays)
+//     : batch(in_batch),
+//       batch_start_row(0),
+//       batch_end_row(static_cast<int>(in_batch->length)),
+//       num_selected(0),
+//       selection_maybe_null(nullptr),
+//       temp_stack(in_temp_stack),
+//       temp_column_arrays(in_temp_column_arrays) {}
+
+SwissTableWithKeys::Input::Input(const ExecBatch* in_batch, int in_batch_start_row,
+                                 int in_num_selected, const uint16_t* in_selection,
                                  arrow::util::TempVectorStack* in_temp_stack,
                                  std::vector<KeyColumnArray>* in_temp_column_arrays)
     : batch(in_batch),
-      batch_start_row(0),
-      batch_end_row(static_cast<int>(in_batch->length)),
-      num_selected(0),
-      selection_maybe_null(nullptr),
-      temp_stack(in_temp_stack),
-      temp_column_arrays(in_temp_column_arrays),
-      temp_group_ids(nullptr) {}
-
-SwissTableWithKeys::Input::Input(const ExecBatch* in_batch, int in_num_selected,
-                                 const uint16_t* in_selection,
-                                 arrow::util::TempVectorStack* in_temp_stack,
-                                 std::vector<KeyColumnArray>* in_temp_column_arrays,
-                                 std::vector<uint32_t>* in_temp_group_ids)
-    : batch(in_batch),
-      batch_start_row(0),
+      batch_start_row(in_num_selected),
       batch_end_row(static_cast<int>(in_batch->length)),
       num_selected(in_num_selected),
       selection_maybe_null(in_selection),
       temp_stack(in_temp_stack),
-      temp_column_arrays(in_temp_column_arrays),
-      temp_group_ids(in_temp_group_ids) {}
+      temp_column_arrays(in_temp_column_arrays) {}
 
 SwissTableWithKeys::Input::Input(const Input& base, int num_rows_to_skip,
                                  int num_rows_to_include)
     : batch(base.batch),
       temp_stack(base.temp_stack),
-      temp_column_arrays(base.temp_column_arrays),
-      temp_group_ids(base.temp_group_ids) {
+      temp_column_arrays(base.temp_column_arrays) {
   if (base.selection_maybe_null) {
-    batch_start_row = 0;
-    batch_end_row = static_cast<int>(batch->length);
+    batch_start_row = base.batch_start_row;
+    batch_end_row = base.batch_end_row;
     ARROW_DCHECK(num_rows_to_skip + num_rows_to_include <= base.num_selected);
     num_selected = num_rows_to_include;
     selection_maybe_null = base.selection_maybe_null + num_rows_to_skip;
@@ -809,7 +804,8 @@ void SwissTableWithKeys::EqualCallback(int num_keys, const uint16_t* selection_m
 
   ARROW_DCHECK(num_keys <= swiss_table_.minibatch_size());
 
-  Input* in = reinterpret_cast<Input*>(callback_ctx);
+  Ctx* ctx = reinterpret_cast<Ctx*>(callback_ctx);
+  Input* in = ctx->input;
 
   int64_t hardware_flags = swiss_table_.hardware_flags();
 
@@ -821,27 +817,26 @@ void SwissTableWithKeys::EqualCallback(int num_keys, const uint16_t* selection_m
   if (in->selection_maybe_null) {
     auto selection_to_use_buf =
         arrow::util::TempVectorHolder<uint16_t>(in->temp_stack, num_keys);
-    ARROW_DCHECK(in->temp_group_ids);
-    in->temp_group_ids->resize(in->batch->length);
+    ARROW_DCHECK(ctx->temp_group_ids);
 
     if (selection_maybe_null) {
       for (int i = 0; i < num_keys; ++i) {
         uint16_t local_row_id = selection_maybe_null[i];
         uint16_t global_row_id = in->selection_maybe_null[local_row_id];
         selection_to_use_buf.mutable_data()[i] = global_row_id;
-        (*in->temp_group_ids)[global_row_id] = group_ids[local_row_id];
+        ctx->temp_group_ids[global_row_id] = group_ids[local_row_id];
       }
       selection_to_use = selection_to_use_buf.mutable_data();
     } else {
       for (int i = 0; i < num_keys; ++i) {
         uint16_t global_row_id = in->selection_maybe_null[i];
-        (*in->temp_group_ids)[global_row_id] = group_ids[i];
+        ctx->temp_group_ids[global_row_id] = group_ids[i];
       }
       selection_to_use = in->selection_maybe_null;
     }
-    batch_start_to_use = 0;
+    batch_start_to_use = in->batch_start_row;
     batch_end_to_use = static_cast<int>(in->batch->length);
-    group_ids_to_use = in->temp_group_ids->data();
+    group_ids_to_use = ctx->temp_group_ids;
 
     auto match_bitvector_buf =
         arrow::util::TempVectorHolder<uint8_t>(in->temp_stack, num_keys);
@@ -880,7 +875,8 @@ Status SwissTableWithKeys::AppendCallback(int num_keys, const uint16_t* selectio
   ARROW_DCHECK(num_keys <= swiss_table_.minibatch_size());
   ARROW_DCHECK(selection);
 
-  Input* in = reinterpret_cast<Input*>(callback_ctx);
+  Ctx* ctx = reinterpret_cast<Ctx*>(callback_ctx);
+  Input* in = ctx->input;
 
   int batch_start_to_use;
   int batch_end_to_use;
@@ -937,17 +933,20 @@ void SwissTableWithKeys::Hash(Input* input, uint32_t* hashes, int64_t hardware_f
 }
 
 void SwissTableWithKeys::MapReadOnly(Input* input, const uint32_t* hashes,
-                                     uint8_t* match_bitvector, uint32_t* key_ids) {
-  std::ignore = Map(input, /*insert_missing=*/false, hashes, match_bitvector, key_ids);
+                                     uint8_t* match_bitvector, uint32_t* key_ids,
+                                     uint32_t* temp_group_ids) {
+  std::ignore = Map(input, /*insert_missing=*/false, hashes, match_bitvector, key_ids,
+                    temp_group_ids);
 }
 
 Status SwissTableWithKeys::MapWithInserts(Input* input, const uint32_t* hashes,
-                                          uint32_t* key_ids) {
-  return Map(input, /*insert_missing=*/true, hashes, nullptr, key_ids);
+                                          uint32_t* key_ids, uint32_t* temp_group_ids) {
+  return Map(input, /*insert_missing=*/true, hashes, nullptr, key_ids, temp_group_ids);
 }
 
 Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t* hashes,
-                               uint8_t* match_bitvector_maybe_null, uint32_t* key_ids) {
+                               uint8_t* match_bitvector_maybe_null, uint32_t* key_ids,
+                               uint32_t* temp_group_ids) {
   arrow::util::TempVectorStack* temp_stack = input->temp_stack;
 
   // Split into smaller mini-batches
@@ -967,6 +966,7 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
     // Prepare updated input buffers that represent the current minibatch.
     //
     Input minibatch_input(*input, minibatch_start, minibatch_size_next);
+    Ctx minibatch_ctx{&minibatch_input, temp_group_ids};
     uint8_t* minibatch_match_bitvector =
         insert_missing ? match_bitvector_buf.mutable_data()
                        : match_bitvector_maybe_null + minibatch_start / 8;
@@ -989,7 +989,7 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
                                 minibatch_match_bitvector, slots.mutable_data());
       swiss_table_.find(minibatch_size_next, minibatch_hashes, minibatch_match_bitvector,
                         slots.mutable_data(), minibatch_key_ids, temp_stack, equal_impl_,
-                        &minibatch_input);
+                        &minibatch_ctx);
     }
 
     // Perform inserts of missing keys if required.
@@ -1004,7 +1004,7 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
 
       RETURN_NOT_OK(swiss_table_.map_new_keys(
           num_ids, ids_buf.mutable_data(), minibatch_hashes, minibatch_key_ids,
-          temp_stack, equal_impl_, append_impl_, &minibatch_input));
+          temp_stack, equal_impl_, append_impl_, &minibatch_ctx));
     }
 
     minibatch_start += minibatch_size_next;
@@ -1153,93 +1153,108 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
   ARROW_DCHECK(thread_id < dop_);
   ThreadState& locals = thread_states_[thread_id];
 
-  // Compute hash
-  //
-  locals.batch_hashes.resize(key_batch.length);
-  RETURN_NOT_OK(Hashing32::HashBatch(
-      key_batch, locals.batch_hashes.data(), locals.temp_column_arrays, hardware_flags_,
-      temp_stack, /*start_row=*/0, static_cast<int>(key_batch.length)));
+  int num_rows = static_cast<int>(key_batch.length);
 
-  // Partition on hash
-  //
-  locals.batch_prtn_row_ids.resize(locals.batch_hashes.size());
-  locals.batch_prtn_ranges.resize(num_prtns_ + 1);
-  int num_rows = static_cast<int>(locals.batch_hashes.size());
-  if (num_prtns_ == 1) {
-    // We treat single partition case separately to avoid extra checks in row
-    // partitioning implementation for general case.
+  auto hashes_buf = arrow::util::TempVectorHolder<uint32_t>(
+      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+  auto prtn_ranges_buf = arrow::util::TempVectorHolder<uint16_t>(
+      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+  auto prtn_row_ids_buf = arrow::util::TempVectorHolder<uint16_t>(
+      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+  auto group_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
+      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
+  ARROW_DCHECK_LE(num_prtns_, arrow::util::MiniBatch::kMiniBatchLength);
+  auto prtn_ids_buf = arrow::util::TempVectorHolder<int>(temp_stack, num_prtns_);
+
+  auto hashes = hashes_buf.mutable_data();
+  auto prtn_ranges = prtn_ranges_buf.mutable_data();
+  auto prtn_row_ids = prtn_row_ids_buf.mutable_data();
+  auto group_ids = group_ids_buf.mutable_data();
+  auto prtn_ids = prtn_ids_buf.mutable_data();
+
+  for (int minibatch_start = 0; minibatch_start < num_rows;) {
+    int minibatch_size_next =
+        std::min(arrow::util::MiniBatch::kMiniBatchLength, num_rows - minibatch_start);
+
+    // Compute hash
     //
-    locals.batch_prtn_ranges[0] = 0;
-    locals.batch_prtn_ranges[1] = num_rows;
-    for (int i = 0; i < num_rows; ++i) {
-      locals.batch_prtn_row_ids[i] = i;
+    RETURN_NOT_OK(Hashing32::HashBatch(
+        key_batch, hashes, locals.temp_column_arrays, hardware_flags_, temp_stack,
+        /*start_row=*/minibatch_start, minibatch_size_next));
+
+    // Partition on hash
+    //
+    if (num_prtns_ == 1) {
+      // We treat single partition case separately to avoid extra checks in row
+      // partitioning implementation for general case.
+      //
+      prtn_ranges[0] = 0;
+      prtn_ranges[1] = minibatch_size_next;
+      for (int i = 0; i < minibatch_size_next; ++i) {
+        prtn_row_ids[i] = i;
+      }
+    } else {
+      PartitionSort::Eval(
+          minibatch_size_next, num_prtns_, prtn_ranges,
+          /*prtn_id_impl=*/
+          [&](int64_t i) {
+            // SwissTable uses the highest bits of the hash for block index.
+            // We want each partition to correspond to a range of block indices,
+            // so we also partition on the highest bits of the hash.
+            //
+            return hashes[i] >> (31 - log_num_prtns_) >> 1;
+          },
+          /*output_pos_impl=*/
+          [&](int64_t i, int pos) { prtn_row_ids[pos] = static_cast<uint16_t>(i); });
     }
-  } else {
-    PartitionSort::Eval(
-        static_cast<int>(locals.batch_hashes.size()), num_prtns_,
-        locals.batch_prtn_ranges.data(),
-        [this, &locals](int64_t i) {
-          // SwissTable uses the highest bits of the hash for block index.
-          // We want each partition to correspond to a range of block indices,
-          // so we also partition on the highest bits of the hash.
-          //
-          return locals.batch_hashes[i] >> (31 - log_num_prtns_) >> 1;
-        },
-        [&locals](int64_t i, int pos) {
-          locals.batch_prtn_row_ids[pos] = static_cast<uint16_t>(i);
-        });
+
+    // Update hashes, shifting left to get rid of the bits that were already used
+    // for partitioning.
+    //
+    for (int i = 0; i < minibatch_size_next; ++i) {
+      hashes[i] <<= log_num_prtns_;
+    }
+
+    // For each partition:
+    // - map keys to unique integers using (this partition's) hash table
+    // - append payloads (if present) to (this partition's) row array
+    //
+
+    RETURN_NOT_OK(prtn_locks_.ForEachPartition(
+        thread_id, prtn_ids,
+        /*is_prtn_empty_fn=*/
+        [&](int prtn_id) { return prtn_ranges[prtn_id + 1] == prtn_ranges[prtn_id]; },
+        /*process_prtn_fn=*/
+        [&](int prtn_id) {
+          return ProcessPartition(
+              thread_id, key_batch, payload_batch_maybe_null, minibatch_start,
+              prtn_ranges[prtn_id + 1] - prtn_ranges[prtn_id], hashes,
+              prtn_row_ids + prtn_ranges[prtn_id], group_ids, temp_stack, prtn_id);
+        }));
+
+    minibatch_start += minibatch_size_next;
   }
-
-  // Update hashes, shifting left to get rid of the bits that were already used
-  // for partitioning.
-  //
-  for (size_t i = 0; i < locals.batch_hashes.size(); ++i) {
-    locals.batch_hashes[i] <<= log_num_prtns_;
-  }
-
-  // For each partition:
-  // - map keys to unique integers using (this partition's) hash table
-  // - append payloads (if present) to (this partition's) row array
-  //
-  locals.temp_prtn_ids.resize(num_prtns_);
-
-  RETURN_NOT_OK(prtn_locks_.ForEachPartition(
-      thread_id, locals.temp_prtn_ids.data(),
-      /*is_prtn_empty_fn=*/
-      [&](int prtn_id) {
-        return locals.batch_prtn_ranges[prtn_id + 1] == locals.batch_prtn_ranges[prtn_id];
-      },
-      /*process_prtn_fn=*/
-      [&](int prtn_id) {
-        return ProcessPartition(thread_id, key_batch, payload_batch_maybe_null,
-                                temp_stack, prtn_id);
-      }));
 
   return Status::OK();
 }
 
-Status SwissTableForJoinBuild::ProcessPartition(int64_t thread_id,
-                                                const ExecBatch& key_batch,
-                                                const ExecBatch* payload_batch_maybe_null,
-                                                arrow::util::TempVectorStack* temp_stack,
-                                                int prtn_id) {
+Status SwissTableForJoinBuild::ProcessPartition(
+    int64_t thread_id, const ExecBatch& key_batch,
+    const ExecBatch* payload_batch_maybe_null, int start_row, int num_rows,
+    const uint32_t* hashes, const uint16_t* row_ids, uint32_t* temp_group_ids,
+    arrow::util::TempVectorStack* temp_stack, int prtn_id) {
   ARROW_DCHECK(thread_id < dop_);
   ThreadState& locals = thread_states_[thread_id];
-
-  int num_rows_new =
-      locals.batch_prtn_ranges[prtn_id + 1] - locals.batch_prtn_ranges[prtn_id];
-  const uint16_t* row_ids =
-      locals.batch_prtn_row_ids.data() + locals.batch_prtn_ranges[prtn_id];
   PartitionState& prtn_state = prtn_states_[prtn_id];
   size_t num_rows_before = prtn_state.key_ids.size();
   // Insert new keys into hash table associated with the current partition
   // and map existing keys to integer ids.
   //
-  prtn_state.key_ids.resize(num_rows_before + num_rows_new);
-  SwissTableWithKeys::Input input(&key_batch, num_rows_new, row_ids, temp_stack,
-                                  &locals.temp_column_arrays, &locals.temp_group_ids);
+  prtn_state.key_ids.resize(num_rows_before + num_rows);
+  SwissTableWithKeys::Input input(&key_batch, start_row, num_rows, row_ids, temp_stack,
+                                  &locals.temp_column_arrays);
   RETURN_NOT_OK(prtn_state.keys.MapWithInserts(
-      &input, locals.batch_hashes.data(), prtn_state.key_ids.data() + num_rows_before));
+      &input, hashes, prtn_state.key_ids.data() + num_rows_before, temp_group_ids));
   // Append input batch rows from current partition to an array of payload
   // rows for this partition.
   //
@@ -1251,7 +1266,7 @@ Status SwissTableForJoinBuild::ProcessPartition(int64_t thread_id,
     ARROW_DCHECK(payload_batch_maybe_null);
     RETURN_NOT_OK(prtn_state.payloads.AppendBatchSelection(
         pool_, hardware_flags_, *payload_batch_maybe_null, 0,
-        static_cast<int>(payload_batch_maybe_null->length), num_rows_new, row_ids,
+        static_cast<int>(payload_batch_maybe_null->length), num_rows, row_ids,
         locals.temp_column_arrays));
   }
   // We do not need to keep track of key ids if we reject rows with
@@ -2269,6 +2284,8 @@ Status JoinProbeProcessor::OnNextBatch(int64_t thread_id,
   auto match_bitvector_buf = arrow::util::TempVectorHolder<uint8_t>(
       temp_stack, static_cast<uint32_t>(bit_util::BytesForBits(minibatch_size)));
   auto key_ids_buf = arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
+  auto group_ids_buf =
+      arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
   auto materialize_batch_ids_buf =
       arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size);
   auto materialize_key_ids_buf =
@@ -2285,9 +2302,9 @@ Status JoinProbeProcessor::OnNextBatch(int64_t thread_id,
                                     minibatch_start + minibatch_size_next, temp_stack,
                                     temp_column_arrays);
     hash_table_->keys()->Hash(&input, hashes_buf.mutable_data(), hardware_flags);
-    hash_table_->keys()->MapReadOnly(&input, hashes_buf.mutable_data(),
-                                     match_bitvector_buf.mutable_data(),
-                                     key_ids_buf.mutable_data());
+    hash_table_->keys()->MapReadOnly(
+        &input, hashes_buf.mutable_data(), match_bitvector_buf.mutable_data(),
+        key_ids_buf.mutable_data(), group_ids_buf.mutable_data());
 
     // AND bit vector with null key filter for join
     //
@@ -2428,7 +2445,7 @@ Status JoinProbeProcessor::OnFinished() {
 
 class SwissJoin : public HashJoinImpl {
  public:
-  static constexpr auto kTempStackUsage = 64 * arrow::util::MiniBatch::kMiniBatchLength;
+  static constexpr auto kTempStackUsage = 256 * arrow::util::MiniBatch::kMiniBatchLength;
 
   Status Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
               const HashJoinProjectionMaps* proj_map_left,
