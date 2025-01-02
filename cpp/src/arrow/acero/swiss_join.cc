@@ -1819,9 +1819,9 @@ bool JoinMatchIterator::GetNextBatch(int num_rows_max, int* out_num_rows,
 
 namespace {
 
-// Given match_bitvector identifies that there is a match for row[batch_start_row + i]
-// in given input batch if bit match_bitvector[i] == passing_bit. Collect all the
-// passing row ids according to the given match_bitvector.
+// Given match_bitvector identifies that there is a match for row[batch_start_row + i] in
+// given input batch if bit match_bitvector[i] == passing_bit. Collect all the passing row
+// ids according to the given match_bitvector.
 //
 void CollectPassingBatchIds(int passing_bit, int64_t hardware_flags, int batch_start_row,
                             int num_batch_rows, const uint8_t* match_bitvector,
@@ -1929,8 +1929,8 @@ Status JoinResidualFilter::FilterLeftSemi(const ExecBatch& keypayload_batch,
   }
 
   if (num_build_keys_referred_ == 0 && num_build_payloads_referred_ == 0) {
-    // If filter refers no column in the right table, then we can directly filter on
-    // the left rows without inner matching and materializing the right rows.
+    // If filter refers no column in the right table, then we can directly filter on the
+    // left rows without inner matching and materializing the right rows.
     //
     CollectPassingBatchIds(1, hardware_flags_, batch_start_row, num_batch_rows,
                            match_bitvector, num_passing_ids, passing_batch_row_ids);
@@ -1948,16 +1948,16 @@ Status JoinResidualFilter::FilterLeftSemi(const ExecBatch& keypayload_batch,
   auto match_payload_ids_buf =
       arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size_);
 
-  // Inner matching is necessary for non-trivial filter. Only until evaluating filter
-  // for all matches of the same row can we be sure that it's not passing (it could
-  // pass earlier though).
+  // Inner matching is necessary for non-trivial filter. Only until evaluating filter for
+  // all matches of the same row can we be sure that it's not passing (it could pass
+  // earlier though).
   //
   JoinMatchIterator match_iterator;
   match_iterator.SetLookupResult(num_batch_rows, batch_start_row, match_bitvector,
                                  key_ids, no_duplicate_keys, key_to_payload_);
   int num_matches_next = 0;
-  // Used to not only collect distinct row ids, but also skip unecessary matches in
-  // the next batch.
+  // Used to not only collect distinct row ids, but also skip unecessary matches in the
+  // next batch.
   //
   int row_id_last = JoinMatchIterator::kInvalidRowId;
   while (match_iterator.GetNextBatch(minibatch_size_, &num_matches_next,
@@ -2427,7 +2427,7 @@ Status JoinProbeProcessor::OnFinished() {
 
 class SwissJoin : public HashJoinImpl {
  public:
-  static constexpr auto kTempStackUsage = 256 * arrow::util::MiniBatch::kMiniBatchLength;
+  static constexpr auto kTempStackUsage = 64 * arrow::util::MiniBatch::kMiniBatchLength;
 
   Status Init(QueryContext* ctx, JoinType join_type, size_t num_threads,
               const HashJoinProjectionMaps* proj_map_left,
