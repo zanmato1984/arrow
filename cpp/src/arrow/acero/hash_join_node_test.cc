@@ -3280,7 +3280,7 @@ void AssertRowCountEq(Declaration source, int64_t expected) {
 // fixed length and larger than 4GB, and the 64-bit offset in the hash table can handle it
 // correctly.
 TEST(HashJoin, LARGE_MEMORY_TEST(BuildSideOver4GBFixedLength)) {
-  constexpr int64_t k5GB = 5ll * 1024 * 1024;
+  constexpr int64_t k5GB = 5ll * 1024 * 1024 * 1024;
   constexpr int fixed_length = 128;
   const auto type = fixed_size_binary(fixed_length);
   constexpr uint8_t byte_no_match_min = static_cast<uint8_t>('A');
