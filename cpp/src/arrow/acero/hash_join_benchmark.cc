@@ -42,7 +42,8 @@ struct BenchmarkSettings {
   // Change to 'true' to benchmark alternative, non-default and less optimized version of
   // a hash join node implementation.
   bool use_basic_implementation = false;
-  int batch_size = 1024;
+  int build_batch_size = 1024;
+  int probe_batch_size = 1024;
   int num_build_batches = 32;
   int num_probe_batches = 32 * 16;
   std::vector<std::shared_ptr<DataType>> key_types = {int32()};
@@ -70,7 +71,7 @@ class JoinBenchmark {
 
       // For integers, selectivity is the proportion of the build interval that overlaps
       // with the probe interval
-      uint64_t num_build_rows = settings.num_build_batches * settings.batch_size;
+      uint64_t num_build_rows = settings.num_build_batches * settings.build_batch_size;
 
       uint64_t min_build_value = 0;
       uint64_t max_build_value =
@@ -118,17 +119,18 @@ class JoinBenchmark {
     auto l_schema = *l_schema_builder.Finish();
     auto r_schema = *r_schema_builder.Finish();
 
-    BatchesWithSchema l_batches_with_schema =
-        MakeRandomBatches(l_schema, settings.num_probe_batches, settings.batch_size);
-    BatchesWithSchema r_batches_with_schema =
-        MakeRandomBatches(r_schema, settings.num_build_batches, settings.batch_size);
+    BatchesWithSchema l_batches_with_schema = MakeRandomBatches(
+        l_schema, settings.num_probe_batches, settings.probe_batch_size);
+    BatchesWithSchema r_batches_with_schema = MakeRandomBatches(
+        r_schema, settings.num_build_batches, settings.build_batch_size);
 
     for (ExecBatch& batch : l_batches_with_schema.batches)
       l_batches_.InsertBatch(std::move(batch));
     for (ExecBatch& batch : r_batches_with_schema.batches)
       r_batches_.InsertBatch(std::move(batch));
 
-    stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
+    stats_.num_probe_rows = settings.num_probe_batches * settings.probe_batch_size;
+    stats_.num_build_rows = settings.num_build_batches * settings.build_batch_size;
 
     schema_mgr_ = std::make_unique<HashJoinSchema>();
     DCHECK_OK(schema_mgr_->Init(settings.join_type, *l_batches_with_schema.schema,
@@ -206,12 +208,14 @@ class JoinBenchmark {
 
   struct {
     uint64_t num_probe_rows;
+    uint64_t num_build_rows;
   } stats_;
 };
 
-static void HashJoinBasicBenchmarkImpl(benchmark::State& st,
-                                       BenchmarkSettings& settings) {
-  uint64_t total_rows = 0;
+static void HashJoinBasicBenchmarkImpl(benchmark::State& st, BenchmarkSettings& settings,
+                                       bool count_build_side = false) {
+  uint64_t total_rows_probe = 0;
+  uint64_t total_rows_build = 0;
   for (auto _ : st) {
     st.PauseTiming();
     {
@@ -219,11 +223,17 @@ static void HashJoinBasicBenchmarkImpl(benchmark::State& st,
       st.ResumeTiming();
       bm.RunJoin();
       st.PauseTiming();
-      total_rows += bm.stats_.num_probe_rows;
+      total_rows_probe += bm.stats_.num_probe_rows;
+      total_rows_build += bm.stats_.num_build_rows;
     }
     st.ResumeTiming();
   }
-  st.counters["rows/sec"] = benchmark::Counter(total_rows, benchmark::Counter::kIsRate);
+  st.counters["rows/sec"] =
+      benchmark::Counter(total_rows_probe, benchmark::Counter::kIsRate);
+  if (count_build_side) {
+    st.counters["build rows/sec"] =
+        benchmark::Counter(total_rows_build, benchmark::Counter::kIsRate);
+  }
 }
 
 template <typename... Args>
@@ -304,6 +314,17 @@ static void BM_HashJoinBasic_BuildParallelism(benchmark::State& st) {
   settings.num_probe_batches = settings.num_threads;
 
   HashJoinBasicBenchmarkImpl(st, settings);
+}
+
+static void BM_HashJoinBasic_BuildBatchSize(benchmark::State& st) {
+  BenchmarkSettings settings;
+  settings.num_threads = 8;
+  settings.build_batch_size = static_cast<int>(st.range(0)) * 1024;
+  settings.num_build_batches = settings.num_threads * 64;
+  settings.probe_batch_size = 1;
+  settings.num_probe_batches = 1;
+
+  HashJoinBasicBenchmarkImpl(st, settings, /*count_build_side=*/true);
 }
 
 static void BM_HashJoinBasic_NullPercentage(benchmark::State& st) {
@@ -503,6 +524,12 @@ BENCHMARK(BM_HashJoinBasic_ProbeParallelism)
 BENCHMARK(BM_HashJoinBasic_BuildParallelism)
     ->ArgNames({"Threads", "HashTable krows"})
     ->ArgsProduct({benchmark::CreateDenseRange(1, 16, 1), hashtable_krows})
+    ->MeasureProcessCPUTime();
+
+BENCHMARK(BM_HashJoinBasic_BuildBatchSize)
+    ->ArgNames({"Build batch krows"})
+    // TODO: Should be 64.
+    ->ArgsProduct({benchmark::CreateRange(1, 63, 2)})
     ->MeasureProcessCPUTime();
 
 BENCHMARK(BM_HashJoinBasic_NullPercentage)
