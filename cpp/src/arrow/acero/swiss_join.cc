@@ -1137,15 +1137,15 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
 
   int num_rows = static_cast<int>(key_batch.length);
 
-  auto hashes_buf = arrow::util::TempVectorHolder<uint32_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  auto prtn_ranges_buf = arrow::util::TempVectorHolder<uint16_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  auto prtn_row_ids_buf = arrow::util::TempVectorHolder<uint16_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  auto group_ids_buf = arrow::util::TempVectorHolder<uint32_t>(
-      temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-  ARROW_DCHECK_LE(num_prtns_, arrow::util::MiniBatch::kMiniBatchLength);
+  constexpr auto minibatch_size = arrow::util::MiniBatch::kMiniBatchLength;
+  auto hashes_buf = arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
+  auto prtn_ranges_buf =
+      arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size);
+  auto prtn_row_ids_buf =
+      arrow::util::TempVectorHolder<uint16_t>(temp_stack, minibatch_size);
+  auto group_ids_buf =
+      arrow::util::TempVectorHolder<uint32_t>(temp_stack, minibatch_size);
+  ARROW_DCHECK_LE(num_prtns_, minibatch_size);
   auto prtn_ids_buf = arrow::util::TempVectorHolder<int>(temp_stack, num_prtns_ + 1);
 
   auto hashes = hashes_buf.mutable_data();
@@ -1155,8 +1155,7 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
   auto prtn_ids = prtn_ids_buf.mutable_data();
 
   for (int minibatch_start = 0; minibatch_start < num_rows;) {
-    int minibatch_size_next =
-        std::min(arrow::util::MiniBatch::kMiniBatchLength, num_rows - minibatch_start);
+    int minibatch_size_next = std::min(minibatch_size, num_rows - minibatch_start);
 
     // Compute hash
     //
