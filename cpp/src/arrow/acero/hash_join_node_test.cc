@@ -23,6 +23,7 @@
 #include <unordered_set>
 
 #include "arrow/acero/options.h"
+#include "arrow/acero/partition_util.h"
 #include "arrow/acero/test_util_internal.h"
 #include "arrow/acero/util.h"
 #include "arrow/api.h"
@@ -3444,6 +3445,57 @@ TEST(HashJoin, LARGE_MEMORY_TEST(BuildSideOver4GBVarLength)) {
   Declaration filter{"filter", {result}, FilterNodeOptions{std::move(predicate)}};
   AssertRowCountEq(std::move(filter),
                    num_batches_left * num_rows_per_batch_left * num_batches_right);
+}
+
+TEST(PartitionSort, Basic) {
+  for (int num_rows : {1, 7, 8, 9, 1023, 1024, 1025, 1 << 15}) {
+    for (int num_prtns : {1, 2, 3, 4, 5, 6, 7, 8}) {
+      ARROW_SCOPED_TRACE("num_rows=", num_rows, " num_prtns=", num_prtns);
+      {
+        ARROW_SCOPED_TRACE("constant prtn");
+        std::vector<uint16_t> prtn_ranges(num_prtns + 1);
+        PartitionSort::Eval(
+            num_rows, num_prtns, prtn_ranges.data(), [](int64_t i) { return 0; },
+            [](int64_t i, int pos) {
+              ARROW_SCOPED_TRACE("row=", i);
+              ASSERT_EQ(pos, i);
+            });
+        for (int i = 0; i < num_prtns; i++) {
+          ARROW_SCOPED_TRACE("prtn=", i);
+        }
+      }
+      {
+        ARROW_SCOPED_TRACE("hash prtn");
+        int num_rows_full_prtn = static_cast<int>(bit_util::CeilDiv(num_rows, num_prtns));
+        int num_full_prtns = (num_rows - 1) % num_prtns + 1;
+        std::vector<uint16_t> prtn_ranges(num_prtns + 1);
+        PartitionSort::Eval(
+            num_rows, num_prtns, prtn_ranges.data(),
+            [num_prtns](int64_t i) { return i % num_prtns; },
+            [num_prtns, num_rows_full_prtn, num_full_prtns](int64_t i, int pos) {
+              ARROW_SCOPED_TRACE("row=", i);
+              uint16_t prtn_id = i % num_prtns;
+              int expected_pos =
+                  prtn_id <= num_full_prtns
+                      ? prtn_id * num_rows_full_prtn + static_cast<int>(i) / num_prtns
+                      : num_full_prtns * num_rows_full_prtn +
+                            (prtn_id - num_full_prtns) * (num_rows_full_prtn - 1) +
+                            static_cast<int>(i) / num_prtns;
+              ASSERT_EQ(pos, expected_pos);
+            });
+        for (int i = 0; i <= num_prtns; i++) {
+          ARROW_SCOPED_TRACE("prtn=", i);
+          if (i <= num_full_prtns) {
+            ASSERT_EQ(prtn_ranges[i], i * num_rows_full_prtn);
+          } else {
+            ASSERT_EQ(prtn_ranges[i],
+                      num_full_prtns * num_rows_full_prtn +
+                          (i - num_full_prtns) * (num_rows_full_prtn - 1));
+          }
+        }
+      }
+    }
+  }
 }
 
 }  // namespace acero
