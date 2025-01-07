@@ -3446,5 +3446,134 @@ TEST(HashJoin, LARGE_MEMORY_TEST(BuildSideOver4GBVarLength)) {
                    num_batches_left * num_rows_per_batch_left * num_batches_right);
 }
 
+TEST(HashJoin, MatchAtMinibatchBoundary) {
+  const auto int_type = int64();
+  constexpr int64_t int_no_match_min_left = std::numeric_limits<int64_t>::min();
+  constexpr int64_t int_no_match_max_left = 0;
+  constexpr int64_t int_no_match_min_right = 1;
+  constexpr int64_t int_no_match_max_right = std::numeric_limits<int64_t>::max() - 1;
+  constexpr int64_t int_match = std::numeric_limits<int64_t>::max();
+  const auto int_match_value = MakeScalar(int_match);
+
+  constexpr int fsb_length = 128;
+  const auto fsb_type = fixed_size_binary(fsb_length);
+  constexpr uint8_t fsb_no_match_min_left = static_cast<uint8_t>('A');
+  constexpr uint8_t fsb_no_match_max_left = static_cast<uint8_t>('Z');
+  constexpr uint8_t fsb_no_match_min_right = static_cast<uint8_t>('a');
+  constexpr uint8_t fsb_no_match_max_right = static_cast<uint8_t>('z');
+  constexpr uint8_t fsb_match = static_cast<uint8_t>('!');
+  const auto fsb_match_value =
+      std::make_shared<FixedSizeBinaryScalar>(std::string(fsb_length, fsb_match));
+
+  const auto vsb_type = utf8();
+  constexpr int vsb_no_match_length_min_left = 1;
+  constexpr int vsb_no_match_length_max_left = 64;
+  constexpr int vsb_no_match_length_min_right = 65;
+  constexpr int vsb_no_match_length_max_right = 128;
+  constexpr int vsb_match_length = 129;
+  const auto vsb_match_value =
+      std::make_shared<StringScalar>(std::string(vsb_match_length, '!'));
+
+  constexpr int16_t num_no_match_rows = arrow::util::MiniBatch::kMiniBatchLength * 4 - 1;
+  constexpr int16_t num_match_rows = 2;
+
+  ASSERT_OK_AND_ASSIGN(
+      auto int_expected_column,
+      Constant(int_match_value)->Generate(num_match_rows * num_match_rows));
+  ASSERT_OK_AND_ASSIGN(
+      auto fsb_expected_column,
+      Constant(fsb_match_value)->Generate(num_match_rows * num_match_rows));
+  ASSERT_OK_AND_ASSIGN(
+      auto vsb_expected_column,
+      Constant(vsb_match_value)->Generate(num_match_rows * num_match_rows));
+
+  ExecBatch expected({int_expected_column, fsb_expected_column, vsb_expected_column,
+                      int_expected_column, fsb_expected_column, vsb_expected_column,
+                      int_expected_column, fsb_expected_column, vsb_expected_column,
+                      int_expected_column, fsb_expected_column, vsb_expected_column},
+                     num_match_rows);
+
+  auto int_match_column = int_expected_column->Slice(0, num_match_rows);
+  auto fsb_match_column = fsb_expected_column->Slice(0, num_match_rows);
+  auto vsb_match_column = vsb_expected_column->Slice(0, num_match_rows);
+
+  BatchesWithSchema batches_left;
+  {
+    auto int_no_match_column = RandomArrayGenerator(kSeedMax).Int64(
+        num_no_match_rows, /*min=*/int_no_match_min_left, /*max=*/int_no_match_max_left,
+        /*null_probability=*/0.1);
+    ASSERT_OK_AND_ASSIGN(auto int_column,
+                         Concatenate({int_no_match_column, int_match_column}));
+
+    auto fsb_no_match_column = RandomArrayGenerator(kSeedMax).FixedSizeBinary(
+        num_no_match_rows, fsb_length,
+        /*null_probability =*/0.1, /*min_byte=*/fsb_no_match_min_left,
+        /*max_byte=*/fsb_no_match_max_left);
+    ASSERT_OK_AND_ASSIGN(auto fsb_column,
+                         Concatenate({fsb_no_match_column, fsb_match_column}));
+
+    auto vsb_no_match_column = RandomArrayGenerator(kSeedMax).String(
+        num_no_match_rows, vsb_no_match_length_min_left, vsb_no_match_length_max_left,
+        /*null_probability =*/0.1);
+    ASSERT_OK_AND_ASSIGN(auto vsb_column,
+                         Concatenate({vsb_no_match_column, vsb_match_column}));
+
+    ExecBatch batch(
+        {int_column, fsb_column, vsb_column, int_column, fsb_column, vsb_column},
+        num_no_match_rows + num_match_rows);
+    batches_left = BatchesWithSchema{
+        {std::move(batch)},
+        schema({field("l_int_key", int_type), field("l_fsb_key", fsb_type),
+                field("l_vsb_key", vsb_type), field("l_int_payload", int_type),
+                field("l_fsb_payload", fsb_type), field("l_vsb_payload", vsb_type)})};
+  }
+
+  BatchesWithSchema batches_right;
+  {
+    auto int_no_match_column = RandomArrayGenerator(kSeedMax).Int64(
+        num_no_match_rows, /*min=*/int_no_match_min_right, /*max=*/int_no_match_max_right,
+        /*null_probability=*/0.1);
+    ASSERT_OK_AND_ASSIGN(auto int_column,
+                         Concatenate({int_no_match_column, int_match_column}));
+
+    auto fsb_no_match_column = RandomArrayGenerator(kSeedMax).FixedSizeBinary(
+        num_no_match_rows, fsb_length,
+        /*null_probability =*/0.1, /*min_byte=*/fsb_no_match_min_right,
+        /*max_byte=*/fsb_no_match_max_right);
+    ASSERT_OK_AND_ASSIGN(auto fsb_column,
+                         Concatenate({fsb_no_match_column, fsb_match_column}));
+
+    auto vsb_no_match_column = RandomArrayGenerator(kSeedMax).String(
+        num_no_match_rows, vsb_no_match_length_min_right, vsb_no_match_length_max_right,
+        /*null_probability =*/0.1);
+    ASSERT_OK_AND_ASSIGN(auto vsb_column,
+                         Concatenate({vsb_no_match_column, vsb_match_column}));
+
+    ExecBatch batch(
+        {int_column, fsb_column, vsb_column, int_column, fsb_column, vsb_column},
+        num_no_match_rows + num_match_rows);
+    batches_right = BatchesWithSchema{
+        {std::move(batch)},
+        schema({field("r_int_key", int_type), field("r_fsb_key", fsb_type),
+                field("r_vsb_key", vsb_type), field("r_int_payload", int_type),
+                field("r_fsb_payload", fsb_type), field("r_vsb_payload", vsb_type)})};
+  }
+
+  Declaration left{"exec_batch_source",
+                   ExecBatchSourceNodeOptions(std::move(batches_left.schema),
+                                              std::move(batches_left.batches))};
+  Declaration right{"exec_batch_source",
+                    ExecBatchSourceNodeOptions(std::move(batches_right.schema),
+                                               std::move(batches_right.batches))};
+  HashJoinNodeOptions join_opts(JoinType::INNER,
+                                /*left_keys=*/{"l_int_key", "l_fsb_key", "l_vsb_key"},
+                                /*right_keys=*/{"r_int_key", "r_fsb_key", "r_vsb_key"});
+  Declaration join{"hashjoin", {std::move(left), std::move(right)}, join_opts};
+
+  ASSERT_OK_AND_ASSIGN(auto result, DeclarationToExecBatches(std::move(join)));
+
+  AssertExecBatchesEqual(result.schema, {expected}, result.batches);
+}
+
 }  // namespace acero
 }  // namespace arrow
