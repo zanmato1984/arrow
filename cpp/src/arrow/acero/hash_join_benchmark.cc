@@ -528,8 +528,7 @@ BENCHMARK(BM_HashJoinBasic_BuildParallelism)
 
 BENCHMARK(BM_HashJoinBasic_BuildBatchSize)
     ->ArgNames({"Build batch krows"})
-    // TODO: Should be 64.
-    ->ArgsProduct({benchmark::CreateRange(1, 63, 2)})
+    ->ArgsProduct({benchmark::CreateRange(1, 32, 2)})
     ->MeasureProcessCPUTime();
 
 BENCHMARK(BM_HashJoinBasic_NullPercentage)
