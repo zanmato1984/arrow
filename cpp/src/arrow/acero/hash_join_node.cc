@@ -775,9 +775,13 @@ class HashJoinNode : public ExecNode, public TracedNode {
     if (batch.length == 0) {
       return Status::OK();
     }
-    std::lock_guard<std::mutex> guard(build_side_mutex_);
-    build_accumulator_.InsertBatch(std::move(batch));
-    return Status::OK();
+    size_t batch_id;
+    {
+      std::lock_guard<std::mutex> guard(build_side_mutex_);
+      batch_id = build_accumulator_.batch_count();
+      build_accumulator_.InsertBatch(std::move(batch));
+    }
+    return impl_->OnBuildSideBatch(thread_index, batch_id, build_accumulator_[batch_id]);
   }
 
   Status OnBuildSideFinished(size_t thread_index) {

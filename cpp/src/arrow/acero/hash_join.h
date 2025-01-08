@@ -57,6 +57,8 @@ class HashJoinImpl {
                       OutputBatchCallback output_batch_callback,
                       FinishedCallback finished_callback) = 0;
 
+  virtual Status OnBuildSideBatch(size_t thread_index, size_t batch_id,
+                                  const ExecBatch& batch) = 0;
   virtual Status BuildHashTable(size_t thread_index, AccumulationQueue batches,
                                 BuildFinishedCallback on_finished) = 0;
   virtual Status ProbeSingleBatch(size_t thread_index, ExecBatch batch) = 0;

@@ -2535,6 +2535,10 @@ class SwissJoin : public HashJoinImpl {
     return CancelIfNotOK(StartScanHashTable(static_cast<int64_t>(thread_index)));
   }
 
+  Status OnBuildSideBatch(size_t thread_index, size_t batch_id, const ExecBatch& batch) override {
+    return Status::OK();
+  }
+
   Status BuildHashTable(size_t thread_id, AccumulationQueue batches,
                         BuildFinishedCallback on_finished) override {
     if (IsCancelled()) {

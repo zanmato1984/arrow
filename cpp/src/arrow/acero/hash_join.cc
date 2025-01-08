@@ -600,6 +600,11 @@ class HashJoinBasicImpl : public HashJoinImpl {
     return build_finished_callback_(thread_index);
   }
 
+  Status OnBuildSideBatch(size_t thread_index, size_t batch_id,
+                          const ExecBatch& batch) override {
+    return Status::OK();
+  }
+
   Status BuildHashTable(size_t /*thread_index*/, AccumulationQueue batches,
                         BuildFinishedCallback on_finished) override {
     build_finished_callback_ = std::move(on_finished);
