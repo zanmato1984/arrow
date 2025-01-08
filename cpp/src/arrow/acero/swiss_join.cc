@@ -971,14 +971,14 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
         insert_missing ? match_bitvector_buf.mutable_data()
                        : match_bitvector_maybe_null + minibatch_start / 8;
     const uint32_t* minibatch_hashes;
-    if (input->selection_maybe_null) {
-      minibatch_hashes = hashes_buf.mutable_data();
-      for (int i = 0; i < minibatch_size_next; ++i) {
-        hashes_buf.mutable_data()[i] = hashes[minibatch_input.selection_maybe_null[i]];
-      }
-    } else {
+    // if (input->selection_maybe_null) {
+    //   minibatch_hashes = hashes_buf.mutable_data();
+    //   for (int i = 0; i < minibatch_size_next; ++i) {
+    //     hashes_buf.mutable_data()[i] = hashes[minibatch_input.selection_maybe_null[i]];
+    //   }
+    // } else {
       minibatch_hashes = hashes + minibatch_start;
-    }
+    // }
     uint32_t* minibatch_key_ids = key_ids + minibatch_start;
 
     // Lookup existing keys.
@@ -1190,8 +1190,8 @@ Status SwissTableForJoinBuild::PrePartitionBatch(
     for (int i = 0; i < num_rows; ++i) {
       auto prtn_id = locals.batch_hashes[i] >> (31 - log_num_prtns_) >> 1;
       locals.pre_prtns[prtn_id].back().row_ids.push_back(i);
-      locals.pre_prtns[prtn_id].back().hashes.push_back(locals.batch_hashes[i] <<=
-                                                        log_num_prtns_);
+      locals.pre_prtns[prtn_id].back().hashes.push_back(locals.batch_hashes[i]
+                                                        << log_num_prtns_);
     }
   }
 
@@ -1274,10 +1274,10 @@ Status SwissTableForJoinBuild::BuildPartition(int prtn_id,
                                               const HashJoinProjectionMaps* schema,
                                               AccumulationQueue& batches,
                                               arrow::util::TempVectorStack* temp_stack) {
+  auto& prtn_state = prtn_states_[prtn_id];
   for (size_t thread_id = 0; thread_id < thread_states_.size(); ++thread_id) {
-    ThreadState& locals = thread_states_[thread_id];
+    const ThreadState& locals = thread_states_[thread_id];
     for (const auto& prtn_data : locals.pre_prtns[prtn_id]) {
-      auto& prtn_state = prtn_states_[prtn_id];
       auto batch_id = prtn_data.batch_id;
       const auto& batch = batches[batch_id];
       int num_rows = static_cast<int>(prtn_data.row_ids.size());
@@ -1288,34 +1288,38 @@ Status SwissTableForJoinBuild::BuildPartition(int prtn_id,
       ExecBatch input_batch;
       ARROW_ASSIGN_OR_RAISE(input_batch, KeyPayloadFromInput(schema, &batch));
 
-      ExecBatch key_batch({}, batch.length);
+      ExecBatch key_batch({}, input_batch.length);
       key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
       for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
-        key_batch.values[icol] = batch.values[icol];
+        key_batch.values[icol] = input_batch.values[icol];
       }
 
-      locals.batch_hashes.resize(key_batch.length);
-      prtn_state.key_ids.resize(num_rows);
-      RETURN_NOT_OK(Hashing32::HashBatch(key_batch, locals.batch_hashes.data(),
-                                         locals.temp_column_arrays, hardware_flags_,
-                                         temp_stack, /*start_row=*/0,
-                                         static_cast<int>(key_batch.length)));
+      // locals.batch_hashes.resize(key_batch.length);
+      size_t num_rows_before = prtn_state.key_ids.size();
+      prtn_state.key_ids.resize(num_rows_before + num_rows);
+      // RETURN_NOT_OK(Hashing32::HashBatch(key_batch, locals.batch_hashes.data(),
+      //                                    locals.temp_column_arrays, hardware_flags_,
+      //                                    temp_stack, /*start_row=*/0,
+      //                                    static_cast<int>(key_batch.length)));
       SwissTableWithKeys::Input input(&key_batch, num_rows, prtn_data.row_ids.data(),
-                                      temp_stack, &locals.temp_column_arrays,
-                                      &locals.temp_group_ids);
-      RETURN_NOT_OK(prtn_state.keys.MapWithInserts(&input, locals.batch_hashes.data(),
-                                                   prtn_state.key_ids.data()));
+                                      temp_stack, &prtn_state.temp_column_arrays,
+                                      &prtn_state.temp_group_ids);
+      RETURN_NOT_OK(prtn_state.keys.MapWithInserts(&input, prtn_data.hashes.data(),
+                                                   prtn_state.key_ids.data() + num_rows));
 
       ExecBatch payload_batch({}, batch.length);
       if (!no_payload_) {
         payload_batch.values.resize(schema->num_cols(HashJoinProjection::PAYLOAD));
         for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
           payload_batch.values[icol] =
-              batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
+              input_batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
         }
         RETURN_NOT_OK(prtn_state.payloads.AppendBatchSelection(
             pool_, hardware_flags_, payload_batch, 0, static_cast<int>(batch.length),
-            num_rows, prtn_data.row_ids.data(), locals.temp_column_arrays));
+            num_rows, prtn_data.row_ids.data(), prtn_state.temp_column_arrays));
+      }
+      if (reject_duplicate_keys_) {
+        prtn_state.key_ids.clear();
       }
     }
   }

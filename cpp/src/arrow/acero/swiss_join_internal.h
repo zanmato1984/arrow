@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include "arrow/acero/accumulation_queue.h"
 #include "arrow/acero/options.h"
 #include "arrow/acero/partition_util.h"
 #include "arrow/acero/schema_util.h"
@@ -546,7 +547,7 @@ class SwissTableForJoinBuild {
                        arrow::util::TempVectorStack* temp_stack);
 
   Status BuildPartition(int prtn_id, const HashJoinProjectionMaps* schema,
-                        AccumulationQueue& batches,
+                        util::AccumulationQueue& batches,
                         arrow::util::TempVectorStack* temp_stack);
 
   // Allocate memory and initialize counters required for parallel merging of
@@ -627,6 +628,9 @@ class SwissTableForJoinBuild {
     std::vector<uint32_t> key_ids;
     std::vector<uint32_t> overflow_key_ids;
     std::vector<uint32_t> overflow_hashes;
+
+    std::vector<uint32_t> temp_group_ids;
+    std::vector<KeyColumnArray> temp_column_arrays;
   };
 
   // One per thread.
