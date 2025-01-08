@@ -1093,21 +1093,16 @@ uint32_t SwissTableForJoin::payload_id_to_key_id(uint32_t payload_id) const {
   return static_cast<uint32_t>(first_greater - entries) - 1;
 }
 
-Status SwissTableForJoinBuild::Init(SwissTableForJoin* target, int dop, int64_t num_rows,
-                                    bool reject_duplicate_keys, bool no_payload,
-                                    const std::vector<KeyColumnMetadata>& key_types,
-                                    const std::vector<KeyColumnMetadata>& payload_types,
-                                    MemoryPool* pool, int64_t hardware_flags) {
-  target_ = target;
+Status SwissTableForJoinBuild::PreInit(
+    int dop, bool reject_duplicate_keys, bool no_payload,
+    const std::vector<KeyColumnMetadata>& key_types,
+    const std::vector<KeyColumnMetadata>& payload_types, MemoryPool* pool,
+    int64_t hardware_flags) {
   dop_ = dop;
-  num_rows_ = num_rows;
 
   // Make sure that we do not use many partitions if there are not enough rows.
   //
-  constexpr int64_t min_num_rows_per_prtn = 1 << 18;
-  log_num_prtns_ =
-      std::min(bit_util::Log2(dop_),
-               bit_util::Log2(bit_util::CeilDiv(num_rows, min_num_rows_per_prtn)));
+  log_num_prtns_ = bit_util::Log2(dop_);
   num_prtns_ = 1 << log_num_prtns_;
 
   reject_duplicate_keys_ = reject_duplicate_keys;
@@ -1117,6 +1112,9 @@ Status SwissTableForJoinBuild::Init(SwissTableForJoin* target, int dop, int64_t 
 
   prtn_states_.resize(num_prtns_);
   thread_states_.resize(dop_);
+  for (auto& thread_state : thread_states_) {
+    thread_state.pre_prtns.resize(num_prtns_);
+  }
   prtn_locks_.Init(dop_, num_prtns_);
 
   RowTableMetadata key_row_metadata;
@@ -1137,11 +1135,65 @@ Status SwissTableForJoinBuild::Init(SwissTableForJoin* target, int dop, int64_t 
         prtn_state.payloads.InitIfNeeded(pool, hardware_flags, payload_row_metadata));
   }
 
+  return Status::OK();
+}
+
+Status SwissTableForJoinBuild::Init(SwissTableForJoin* target, int64_t num_rows) {
+  target_ = target;
+  num_rows_ = num_rows;
+
   target_->dop_ = dop_;
   target_->local_states_.resize(dop_);
-  target_->no_payload_columns_ = no_payload;
-  target_->no_duplicate_keys_ = reject_duplicate_keys;
+  target_->no_payload_columns_ = no_payload_;
+  target_->no_duplicate_keys_ = reject_duplicate_keys_;
   target_->map_.InitCallbacks();
+
+  return Status::OK();
+}
+
+Status SwissTableForJoinBuild::PrePartitionBatch(
+    int64_t thread_id, size_t batch_id, const ExecBatch& key_batch,
+    arrow::util::TempVectorStack* temp_stack) {
+  ARROW_DCHECK(thread_id < dop_);
+  ThreadState& locals = thread_states_[thread_id];
+
+  // Compute hash
+  //
+  locals.batch_hashes.resize(key_batch.length);
+  RETURN_NOT_OK(Hashing32::HashBatch(
+      key_batch, locals.batch_hashes.data(), locals.temp_column_arrays, hardware_flags_,
+      temp_stack, /*start_row=*/0, static_cast<int>(key_batch.length)));
+
+  // Partition on hash
+  //
+  locals.batch_prtn_row_ids.resize(locals.batch_hashes.size());
+  locals.batch_prtn_ranges.resize(num_prtns_ + 1);
+  int num_rows = static_cast<int>(locals.batch_hashes.size());
+  if (num_prtns_ == 1) {
+    // We treat single partition case separately to avoid extra checks in row
+    // partitioning implementation for general case.
+    //
+    locals.batch_prtn_ranges[0] = 0;
+    locals.batch_prtn_ranges[1] = num_rows;
+    std::vector<uint16_t> row_ids(num_rows);
+    std::vector<uint32_t> hashes(num_rows);
+    for (int i = 0; i < num_rows; ++i) {
+      row_ids[i] = i;
+      hashes[i] = locals.batch_hashes[i];
+    }
+    locals.pre_prtns[0].emplace_back(
+        ThreadState::PartitionData{batch_id, std::move(row_ids), std::move(hashes)});
+  } else {
+    for (int i = 0; i < num_prtns_; ++i) {
+      locals.pre_prtns[i].emplace_back(ThreadState::PartitionData{batch_id, {}, {}});
+    }
+    for (int i = 0; i < num_rows; ++i) {
+      auto prtn_id = locals.batch_hashes[i] >> (31 - log_num_prtns_) >> 1;
+      locals.pre_prtns[prtn_id].back().row_ids.push_back(i);
+      locals.pre_prtns[prtn_id].back().hashes.push_back(locals.batch_hashes[i] <<=
+                                                        log_num_prtns_);
+    }
+  }
 
   return Status::OK();
 }
@@ -1218,6 +1270,59 @@ Status SwissTableForJoinBuild::PushNextBatch(int64_t thread_id,
   return Status::OK();
 }
 
+Status SwissTableForJoinBuild::BuildPartition(int prtn_id,
+                                              const HashJoinProjectionMaps* schema,
+                                              AccumulationQueue& batches,
+                                              arrow::util::TempVectorStack* temp_stack) {
+  for (size_t thread_id = 0; thread_id < thread_states_.size(); ++thread_id) {
+    ThreadState& locals = thread_states_[thread_id];
+    for (const auto& prtn_data : locals.pre_prtns[prtn_id]) {
+      auto& prtn_state = prtn_states_[prtn_id];
+      auto batch_id = prtn_data.batch_id;
+      const auto& batch = batches[batch_id];
+      int num_rows = static_cast<int>(prtn_data.row_ids.size());
+      if (num_rows == 0) {
+        continue;
+      }
+
+      ExecBatch input_batch;
+      ARROW_ASSIGN_OR_RAISE(input_batch, KeyPayloadFromInput(schema, &batch));
+
+      ExecBatch key_batch({}, batch.length);
+      key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
+      for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+        key_batch.values[icol] = batch.values[icol];
+      }
+
+      locals.batch_hashes.resize(key_batch.length);
+      prtn_state.key_ids.resize(num_rows);
+      RETURN_NOT_OK(Hashing32::HashBatch(key_batch, locals.batch_hashes.data(),
+                                         locals.temp_column_arrays, hardware_flags_,
+                                         temp_stack, /*start_row=*/0,
+                                         static_cast<int>(key_batch.length)));
+      SwissTableWithKeys::Input input(&key_batch, num_rows, prtn_data.row_ids.data(),
+                                      temp_stack, &locals.temp_column_arrays,
+                                      &locals.temp_group_ids);
+      RETURN_NOT_OK(prtn_state.keys.MapWithInserts(&input, locals.batch_hashes.data(),
+                                                   prtn_state.key_ids.data()));
+
+      ExecBatch payload_batch({}, batch.length);
+      if (!no_payload_) {
+        payload_batch.values.resize(schema->num_cols(HashJoinProjection::PAYLOAD));
+        for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
+          payload_batch.values[icol] =
+              batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
+        }
+        RETURN_NOT_OK(prtn_state.payloads.AppendBatchSelection(
+            pool_, hardware_flags_, payload_batch, 0, static_cast<int>(batch.length),
+            num_rows, prtn_data.row_ids.data(), locals.temp_column_arrays));
+      }
+    }
+  }
+
+  return Status::OK();
+}
+
 Status SwissTableForJoinBuild::ProcessPartition(int64_t thread_id,
                                                 const ExecBatch& key_batch,
                                                 const ExecBatch* payload_batch_maybe_null,
@@ -1261,6 +1366,40 @@ Status SwissTableForJoinBuild::ProcessPartition(int64_t thread_id,
     prtn_state.key_ids.clear();
   }
   return Status::OK();
+}
+
+Result<ExecBatch> SwissTableForJoinBuild::KeyPayloadFromInput(
+    const HashJoinProjectionMaps* schema, const ExecBatch* input) {
+  ExecBatch projected({}, input->length);
+  int num_key_cols = schema->num_cols(HashJoinProjection::KEY);
+  int num_payload_cols = schema->num_cols(HashJoinProjection::PAYLOAD);
+  projected.values.resize(num_key_cols + num_payload_cols);
+
+  auto key_to_input = schema->map(HashJoinProjection::KEY, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_key_cols; ++icol) {
+    const Datum& value_in = input->values[key_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(
+          projected.values[icol],
+          MakeArrayFromScalar(*value_in.scalar(), projected.length, pool_));
+    } else {
+      projected.values[icol] = value_in;
+    }
+  }
+  auto payload_to_input =
+      schema->map(HashJoinProjection::PAYLOAD, HashJoinProjection::INPUT);
+  for (int icol = 0; icol < num_payload_cols; ++icol) {
+    const Datum& value_in = input->values[payload_to_input.get(icol)];
+    if (value_in.is_scalar()) {
+      ARROW_ASSIGN_OR_RAISE(
+          projected.values[num_key_cols + icol],
+          MakeArrayFromScalar(*value_in.scalar(), projected.length, pool_));
+    } else {
+      projected.values[num_key_cols + icol] = value_in;
+    }
+  }
+
+  return projected;
 }
 
 Status SwissTableForJoinBuild::PreparePrtnMerge() {
@@ -2483,6 +2622,36 @@ class SwissJoin : public HashJoinImpl {
       materialize[i] = &local_states_[i].materialize;
     }
 
+    {
+      // Initialize build class instance
+      //
+      const HashJoinProjectionMaps* schema = schema_[1];
+      bool reject_duplicate_keys =
+          (join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI) &&
+          residual_filter_.NumBuildPayloadsReferred() == 0;
+      bool no_payload =
+          reject_duplicate_keys || (schema->num_cols(HashJoinProjection::PAYLOAD) == 0 &&
+                                    residual_filter_.NumBuildPayloadsReferred() == 0);
+
+      std::vector<KeyColumnMetadata> key_types;
+      for (int i = 0; i < schema->num_cols(HashJoinProjection::KEY); ++i) {
+        ARROW_ASSIGN_OR_RAISE(
+            KeyColumnMetadata metadata,
+            ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::KEY, i)));
+        key_types.push_back(metadata);
+      }
+      std::vector<KeyColumnMetadata> payload_types;
+      for (int i = 0; i < schema->num_cols(HashJoinProjection::PAYLOAD); ++i) {
+        ARROW_ASSIGN_OR_RAISE(KeyColumnMetadata metadata,
+                              ColumnMetadataFromDataType(
+                                  schema->data_type(HashJoinProjection::PAYLOAD, i)));
+        payload_types.push_back(metadata);
+      }
+      RETURN_NOT_OK(CancelIfNotOK(
+          hash_table_build_.PreInit(num_threads_, reject_duplicate_keys, no_payload,
+                                    key_types, payload_types, pool_, hardware_flags_)));
+    }
+
     residual_filter_.Init(std::move(filter), ctx_, pool_, hardware_flags_, proj_map_left,
                           proj_map_right, &hash_table_);
 
@@ -2535,8 +2704,29 @@ class SwissJoin : public HashJoinImpl {
     return CancelIfNotOK(StartScanHashTable(static_cast<int64_t>(thread_index)));
   }
 
-  Status OnBuildSideBatch(size_t thread_index, size_t batch_id, const ExecBatch& batch) override {
-    return Status::OK();
+  Status OnBuildSideBatch(size_t thread_index, size_t batch_id,
+                          const ExecBatch& batch) override {
+    ExecBatch input_batch;
+    ARROW_ASSIGN_OR_RAISE(input_batch, KeyPayloadFromInput(/*side=*/1, &batch));
+
+    const HashJoinProjectionMaps* schema = schema_[1];
+    // Split batch into key batch and optional payload batch
+    //
+    // Input batch is key-payload batch (key columns followed by payload
+    // columns). We split it into two separate batches.
+    //
+    // TODO: Change SwissTableForJoinBuild interface to use key-payload
+    // batch instead to avoid this operation, which involves increasing
+    // shared pointer ref counts.
+    //
+    ExecBatch key_batch({}, input_batch.length);
+    key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
+    for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
+      key_batch.values[icol] = input_batch.values[icol];
+    }
+    arrow::util::TempVectorStack* temp_stack = &local_states_[thread_index].stack;
+    return hash_table_build_.PrePartitionBatch(thread_index, batch_id, key_batch,
+                                               temp_stack);
   }
 
   Status BuildHashTable(size_t thread_id, AccumulationQueue batches,
@@ -2562,42 +2752,28 @@ class SwissJoin : public HashJoinImpl {
 
  private:
   Status StartBuildHashTable(int64_t thread_id) {
-    // Initialize build class instance
-    //
-    const HashJoinProjectionMaps* schema = schema_[1];
-    bool reject_duplicate_keys =
-        (join_type_ == JoinType::LEFT_SEMI || join_type_ == JoinType::LEFT_ANTI) &&
-        residual_filter_.NumBuildPayloadsReferred() == 0;
-    bool no_payload =
-        reject_duplicate_keys || (schema->num_cols(HashJoinProjection::PAYLOAD) == 0 &&
-                                  residual_filter_.NumBuildPayloadsReferred() == 0);
-
-    std::vector<KeyColumnMetadata> key_types;
-    for (int i = 0; i < schema->num_cols(HashJoinProjection::KEY); ++i) {
-      ARROW_ASSIGN_OR_RAISE(
-          KeyColumnMetadata metadata,
-          ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::KEY, i)));
-      key_types.push_back(metadata);
-    }
-    std::vector<KeyColumnMetadata> payload_types;
-    for (int i = 0; i < schema->num_cols(HashJoinProjection::PAYLOAD); ++i) {
-      ARROW_ASSIGN_OR_RAISE(
-          KeyColumnMetadata metadata,
-          ColumnMetadataFromDataType(schema->data_type(HashJoinProjection::PAYLOAD, i)));
-      payload_types.push_back(metadata);
-    }
-    RETURN_NOT_OK(CancelIfNotOK(hash_table_build_.Init(
-        &hash_table_, num_threads_, build_side_batches_.row_count(),
-        reject_duplicate_keys, no_payload, key_types, payload_types, pool_,
-        hardware_flags_)));
+    RETURN_NOT_OK(CancelIfNotOK(
+        hash_table_build_.Init(&hash_table_, build_side_batches_.row_count())));
 
     // Process all input batches
     //
     return CancelIfNotOK(
-        start_task_group_callback_(task_group_build_, build_side_batches_.batch_count()));
+        start_task_group_callback_(task_group_build_, hash_table_build_.num_prtns()));
+    // start_task_group_callback_(task_group_build_, build_side_batches_.batch_count()));
   }
 
-  Status BuildTask(size_t thread_id, int64_t batch_id) {
+  Status BuildTask(size_t thread_id, int64_t prtn_id) {
+    if (IsCancelled()) {
+      return Status::OK();
+    }
+
+    const HashJoinProjectionMaps* schema = schema_[1];
+    arrow::util::TempVectorStack* temp_stack = &local_states_[thread_id].stack;
+    return CancelIfNotOK(hash_table_build_.BuildPartition(
+        static_cast<int>(prtn_id), schema, build_side_batches_, temp_stack));
+  }
+
+  Status BuildTaskOld(size_t thread_id, int64_t batch_id) {
     if (IsCancelled()) {
       return Status::OK();
     }
@@ -2814,7 +2990,7 @@ class SwissJoin : public HashJoinImpl {
     return finished_callback_(num_produced_batches);
   }
 
-  Result<ExecBatch> KeyPayloadFromInput(int side, ExecBatch* input) {
+  Result<ExecBatch> KeyPayloadFromInput(int side, const ExecBatch* input) {
     ExecBatch projected({}, input->length);
     int num_key_cols = schema_[side]->num_cols(HashJoinProjection::KEY);
     int num_payload_cols = schema_[side]->num_cols(HashJoinProjection::PAYLOAD);
