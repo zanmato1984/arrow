@@ -97,8 +97,8 @@ class JoinBenchmark {
       auto r_field =
           field(r_name, settings.key_types[i], key_value_metadata(build_metadata));
 
-      DCHECK_OK(l_schema_builder.AddField(l_field));
-      DCHECK_OK(r_schema_builder.AddField(r_field));
+      ARROW_CHECK_OK(l_schema_builder.AddField(l_field));
+      ARROW_CHECK_OK(r_schema_builder.AddField(r_field));
 
       left_keys.push_back(FieldRef(l_name));
       right_keys.push_back(FieldRef(r_name));
@@ -107,12 +107,14 @@ class JoinBenchmark {
 
     for (size_t i = 0; i < settings.probe_payload_types.size(); i++) {
       std::string name = "lp" + std::to_string(i);
-      DCHECK_OK(l_schema_builder.AddField(field(name, settings.probe_payload_types[i])));
+      ARROW_CHECK_OK(
+          l_schema_builder.AddField(field(name, settings.probe_payload_types[i])));
     }
 
     for (size_t i = 0; i < settings.build_payload_types.size(); i++) {
       std::string name = "rp" + std::to_string(i);
-      DCHECK_OK(r_schema_builder.AddField(field(name, settings.build_payload_types[i])));
+      ARROW_CHECK_OK(
+          r_schema_builder.AddField(field(name, settings.build_payload_types[i])));
     }
 
     auto l_schema = *l_schema_builder.Finish();
@@ -132,9 +134,9 @@ class JoinBenchmark {
     stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
 
     schema_mgr_ = std::make_unique<HashJoinSchema>();
-    DCHECK_OK(schema_mgr_->Init(settings.join_type, *l_batches_with_schema.schema,
-                                left_keys, *r_batches_with_schema.schema, right_keys,
-                                settings.residual_filter, "l_", "r_"));
+    ARROW_CHECK_OK(schema_mgr_->Init(settings.join_type, *l_batches_with_schema.schema,
+                                     left_keys, *r_batches_with_schema.schema, right_keys,
+                                     settings.residual_filter, "l_", "r_"));
 
     if (settings.use_basic_implementation) {
       join_ = *HashJoinImpl::MakeBasic();
@@ -145,12 +147,12 @@ class JoinBenchmark {
     omp_set_num_threads(settings.num_threads);
     auto schedule_callback = [](std::function<Status(size_t)> func) -> Status {
 #pragma omp task
-      { DCHECK_OK(func(omp_get_thread_num())); }
+      { ARROW_CHECK_OK(func(omp_get_thread_num())); }
       return Status::OK();
     };
 
     scheduler_ = TaskScheduler::Make();
-    DCHECK_OK(ctx_.Init(nullptr));
+    ARROW_CHECK_OK(ctx_.Init(nullptr));
 
     auto register_task_group_callback = [&](std::function<Status(size_t, int64_t)> task,
                                             std::function<Status(size_t)> cont) {
@@ -161,7 +163,7 @@ class JoinBenchmark {
       return scheduler_->StartTaskGroup(omp_get_thread_num(), task_group_id, num_tasks);
     };
 
-    DCHECK_OK(join_->Init(
+    ARROW_CHECK_OK(join_->Init(
         &ctx_, settings.join_type, settings.num_threads, &(schema_mgr_->proj_maps[0]),
         &(schema_mgr_->proj_maps[1]), std::move(key_cmp), settings.residual_filter,
         std::move(register_task_group_callback), std::move(start_task_group_callback),
@@ -178,7 +180,7 @@ class JoinBenchmark {
 
     scheduler_->RegisterEnd();
 
-    DCHECK_OK(scheduler_->StartScheduling(
+    ARROW_CHECK_OK(scheduler_->StartScheduling(
         0 /*thread index*/, std::move(schedule_callback),
         static_cast<int>(2 * settings.num_threads) /*concurrent tasks*/,
         settings.num_threads == 1));
@@ -189,10 +191,9 @@ class JoinBenchmark {
     {
       int tid = omp_get_thread_num();
 #pragma omp single
-      DCHECK_OK(
-          join_->BuildHashTable(tid, std::move(r_batches_), [this](size_t thread_index) {
-            return Status::OK();
-          }));
+      ARROW_CHECK_OK(
+          join_->BuildHashTable(tid, std::move(r_batches_),
+                                [this](size_t thread_index) { return Status::OK(); }));
     }
   }
 
@@ -669,7 +670,7 @@ void RowArrayDecodeBenchmark(benchmark::State& st, const std::shared_ptr<Schema>
   std::vector<uint16_t> row_ids_encode(batch.length);
   std::iota(row_ids_encode.begin(), row_ids_encode.end(), 0);
   std::vector<KeyColumnArray> temp_column_arrays;
-  DCHECK_OK(rows.AppendBatchSelection(
+  ARROW_CHECK_OK(rows.AppendBatchSelection(
       default_memory_pool(), internal::CpuInfo::GetInstance()->hardware_flags(), batch, 0,
       static_cast<int>(batch.length), static_cast<int>(batch.length),
       row_ids_encode.data(), temp_column_arrays));
@@ -685,11 +686,11 @@ void RowArrayDecodeBenchmark(benchmark::State& st, const std::shared_ptr<Schema>
     ResizableArrayData column;
     // Allocate at least 8 rows for the convenience of SIMD decoding.
     int log_num_rows_min = std::max(3, bit_util::Log2(batch.length));
-    DCHECK_OK(column.Init(batch[column_to_decode].type(), default_memory_pool(),
-                          log_num_rows_min));
-    DCHECK_OK(rows.DecodeSelected(&column, column_to_decode,
-                                  static_cast<int>(batch.length), row_ids_decode.data(),
-                                  default_memory_pool()));
+    ARROW_CHECK_OK(column.Init(batch[column_to_decode].type(), default_memory_pool(),
+                               log_num_rows_min));
+    ARROW_CHECK_OK(rows.DecodeSelected(&column, column_to_decode,
+                                       static_cast<int>(batch.length),
+                                       row_ids_decode.data(), default_memory_pool()));
   }
   st.SetItemsProcessed(st.iterations() * batch.length);
 }
@@ -697,7 +698,7 @@ void RowArrayDecodeBenchmark(benchmark::State& st, const std::shared_ptr<Schema>
 static void BM_RowArray_Decode(benchmark::State& st,
                                const std::shared_ptr<DataType>& type) {
   SchemaBuilder schema_builder;
-  DCHECK_OK(schema_builder.AddField(field("", type)));
+  ARROW_CHECK_OK(schema_builder.AddField(field("", type)));
   auto schema = *schema_builder.Finish();
   RowArrayDecodeBenchmark(st, schema, 0);
 }
@@ -711,7 +712,7 @@ BENCHMARK_CAPTURE(BM_RowArray_Decode, "int64", int64());
 static void BM_RowArray_DecodeFixedSizeBinary(benchmark::State& st) {
   int fixed_size = static_cast<int>(st.range(0));
   SchemaBuilder schema_builder;
-  DCHECK_OK(schema_builder.AddField(field("", fixed_size_binary(fixed_size))));
+  ARROW_CHECK_OK(schema_builder.AddField(field("", fixed_size_binary(fixed_size))));
   auto schema = *schema_builder.Finish();
   RowArrayDecodeBenchmark(st, schema, 0);
 }
@@ -725,7 +726,8 @@ static void BM_RowArray_DecodeBinary(benchmark::State& st) {
   std::unordered_map<std::string, std::string> metadata;
   metadata["max_length"] = std::to_string(max_length);
   SchemaBuilder schema_builder;
-  DCHECK_OK(schema_builder.AddField(field("", utf8(), key_value_metadata(metadata))));
+  ARROW_CHECK_OK(
+      schema_builder.AddField(field("", utf8(), key_value_metadata(metadata))));
   auto schema = *schema_builder.Finish();
   RowArrayDecodeBenchmark(st, schema, 0);
 }
@@ -738,7 +740,7 @@ static void BM_RowArray_DecodeOneOfColumns(benchmark::State& st,
                                            std::vector<std::shared_ptr<DataType>> types) {
   SchemaBuilder schema_builder;
   for (const auto& type : types) {
-    DCHECK_OK(schema_builder.AddField(field("", type)));
+    ARROW_CHECK_OK(schema_builder.AddField(field("", type)));
   }
   auto schema = *schema_builder.Finish();
   int column_to_decode = static_cast<int>(st.range(0));
