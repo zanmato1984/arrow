@@ -128,6 +128,7 @@ class JoinBenchmark {
     for (ExecBatch& batch : r_batches_with_schema.batches)
       r_batches_.InsertBatch(std::move(batch));
 
+    stats_.num_build_rows = settings.num_build_batches * settings.batch_size;
     stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
 
     schema_mgr_ = std::make_unique<HashJoinSchema>();
@@ -174,8 +175,7 @@ class JoinBenchmark {
         [this](size_t thread_index) -> Status {
           return join_->BuildHashTable(
               thread_index, std::move(r_batches_), [this](size_t thread_index) {
-                return scheduler_->StartTaskGroup(thread_index, task_group_probe_,
-                                                  l_batches_.batch_count());
+                return Status::OK();
               });
         });
 
@@ -215,6 +215,7 @@ class JoinBenchmark {
   int task_group_probe_;
 
   struct {
+    uint64_t num_build_rows;
     uint64_t num_probe_rows;
   } stats_;
 };
@@ -229,7 +230,7 @@ static void HashJoinBasicBenchmarkImpl(benchmark::State& st,
       st.ResumeTiming();
       bm.RunJoin();
       st.PauseTiming();
-      total_rows += bm.stats_.num_probe_rows;
+      total_rows += bm.stats_.num_build_rows;
     }
     st.ResumeTiming();
   }
@@ -393,7 +394,7 @@ static void BM_HashJoinBasic_HeavyBuildPayload(benchmark::State& st) {
 }
 #endif
 
-std::vector<int64_t> hashtable_krows = benchmark::CreateRange(1, 4096, 8);
+std::vector<int64_t> hashtable_krows = benchmark::CreateRange(1, 4096 * 16, 8);
 
 std::vector<std::string> keytypes_argnames = {"Hashtable krows"};
 #ifdef ARROW_BUILD_DETAILED_BENCHMARKS
@@ -512,7 +513,7 @@ BENCHMARK(BM_HashJoinBasic_ProbeParallelism)
 
 BENCHMARK(BM_HashJoinBasic_BuildParallelism)
     ->ArgNames({"Threads", "HashTable krows"})
-    ->ArgsProduct({benchmark::CreateDenseRange(1, 16, 1), hashtable_krows})
+    ->ArgsProduct({benchmark::CreateRange(1, 32, 2), hashtable_krows})
     ->MeasureProcessCPUTime();
 
 BENCHMARK(BM_HashJoinBasic_NullPercentage)
