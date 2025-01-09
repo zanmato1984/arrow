@@ -191,8 +191,7 @@ class JoinBenchmark {
 #pragma omp single
       DCHECK_OK(
           join_->BuildHashTable(tid, std::move(r_batches_), [this](size_t thread_index) {
-            return scheduler_->StartTaskGroup(thread_index, task_group_probe_,
-                                              l_batches_.batch_count());
+            return Status::OK();
           }));
     }
   }
