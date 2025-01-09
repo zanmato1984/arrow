@@ -977,7 +977,7 @@ Status SwissTableWithKeys::Map(Input* input, bool insert_missing, const uint32_t
     //     hashes_buf.mutable_data()[i] = hashes[minibatch_input.selection_maybe_null[i]];
     //   }
     // } else {
-      minibatch_hashes = hashes + minibatch_start;
+    minibatch_hashes = hashes + minibatch_start;
     // }
     uint32_t* minibatch_key_ids = key_ids + minibatch_start;
 
@@ -1157,24 +1157,21 @@ Status SwissTableForJoinBuild::PrePartitionBatch(
   ARROW_DCHECK(thread_id < dop_);
   ThreadState& locals = thread_states_[thread_id];
 
+  int num_rows = static_cast<int>(key_batch.length);
+
   // Compute hash
   //
-  locals.batch_hashes.resize(key_batch.length);
-  RETURN_NOT_OK(Hashing32::HashBatch(
-      key_batch, locals.batch_hashes.data(), locals.temp_column_arrays, hardware_flags_,
-      temp_stack, /*start_row=*/0, static_cast<int>(key_batch.length)));
+  locals.batch_hashes.resize(num_rows);
+  RETURN_NOT_OK(Hashing32::HashBatch(key_batch, locals.batch_hashes.data(),
+                                     locals.temp_column_arrays, hardware_flags_,
+                                     temp_stack, /*start_row=*/0, num_rows));
 
   // Partition on hash
   //
-  locals.batch_prtn_row_ids.resize(locals.batch_hashes.size());
-  locals.batch_prtn_ranges.resize(num_prtns_ + 1);
-  int num_rows = static_cast<int>(locals.batch_hashes.size());
   if (num_prtns_ == 1) {
     // We treat single partition case separately to avoid extra checks in row
     // partitioning implementation for general case.
     //
-    locals.batch_prtn_ranges[0] = 0;
-    locals.batch_prtn_ranges[1] = num_rows;
     std::vector<uint16_t> row_ids(num_rows);
     std::vector<uint32_t> hashes(num_rows);
     for (int i = 0; i < num_rows; ++i) {
@@ -1304,11 +1301,11 @@ Status SwissTableForJoinBuild::BuildPartition(int prtn_id,
       SwissTableWithKeys::Input input(&key_batch, num_rows, prtn_data.row_ids.data(),
                                       temp_stack, &prtn_state.temp_column_arrays,
                                       &prtn_state.temp_group_ids);
-      RETURN_NOT_OK(prtn_state.keys.MapWithInserts(&input, prtn_data.hashes.data(),
-                                                   prtn_state.key_ids.data() + num_rows));
+      RETURN_NOT_OK(prtn_state.keys.MapWithInserts(
+          &input, prtn_data.hashes.data(), prtn_state.key_ids.data() + num_rows_before));
 
-      ExecBatch payload_batch({}, batch.length);
       if (!no_payload_) {
+        ExecBatch payload_batch({}, batch.length);
         payload_batch.values.resize(schema->num_cols(HashJoinProjection::PAYLOAD));
         for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
           payload_batch.values[icol] =
@@ -1478,6 +1475,10 @@ Status SwissTableForJoinBuild::PreparePrtnMerge() {
 
 void SwissTableForJoinBuild::PrtnMerge(int prtn_id) {
   PartitionState& prtn_state = prtn_states_[prtn_id];
+
+  if (prtn_state.keys.keys()->num_rows() == 0) {
+    return;
+  }
 
   // There are 4 data structures that require partition merging:
   // 1. array of key rows
@@ -2626,6 +2627,13 @@ class SwissJoin : public HashJoinImpl {
       materialize[i] = &local_states_[i].materialize;
     }
 
+    residual_filter_.Init(std::move(filter), ctx_, pool_, hardware_flags_, proj_map_left,
+                          proj_map_right, &hash_table_);
+
+    probe_processor_.Init(proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
+                          &hash_table_, &residual_filter_, materialize, &key_cmp_,
+                          output_batch_callback_);
+
     {
       // Initialize build class instance
       //
@@ -2655,13 +2663,6 @@ class SwissJoin : public HashJoinImpl {
           hash_table_build_.PreInit(num_threads_, reject_duplicate_keys, no_payload,
                                     key_types, payload_types, pool_, hardware_flags_)));
     }
-
-    residual_filter_.Init(std::move(filter), ctx_, pool_, hardware_flags_, proj_map_left,
-                          proj_map_right, &hash_table_);
-
-    probe_processor_.Init(proj_map_left->num_cols(HashJoinProjection::KEY), join_type_,
-                          &hash_table_, &residual_filter_, materialize, &key_cmp_,
-                          output_batch_callback_);
 
     InitTaskGroups();
 
