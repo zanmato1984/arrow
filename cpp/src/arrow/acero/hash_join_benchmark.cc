@@ -167,6 +167,18 @@ class JoinBenchmark {
         [](int64_t, ExecBatch) { return Status::OK(); },
         [](int64_t) { return Status::OK(); }));
 
+    task_group_build_ = scheduler_->RegisterTaskGroup(
+        [this](size_t thread_index, int64_t task_id) -> Status {
+          return join_->OnBuildSideBatch(thread_index, task_id, r_batches_[task_id]);
+        },
+        [this](size_t thread_index) -> Status {
+          return join_->BuildHashTable(
+              thread_index, std::move(r_batches_), [this](size_t thread_index) {
+                return scheduler_->StartTaskGroup(thread_index, task_group_probe_,
+                                                  l_batches_.batch_count());
+              });
+        });
+
     task_group_probe_ = scheduler_->RegisterTaskGroup(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return join_->ProbeSingleBatch(thread_index, std::move(l_batches_[task_id]));
@@ -189,10 +201,7 @@ class JoinBenchmark {
       int tid = omp_get_thread_num();
 #pragma omp single
       DCHECK_OK(
-          join_->BuildHashTable(tid, std::move(r_batches_), [this](size_t thread_index) {
-            return scheduler_->StartTaskGroup(thread_index, task_group_probe_,
-                                              l_batches_.batch_count());
-          }));
+          scheduler_->StartTaskGroup(tid, task_group_build_, r_batches_.batch_count()));
     }
   }
 
@@ -202,6 +211,7 @@ class JoinBenchmark {
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> join_;
   QueryContext ctx_;
+  int task_group_build_;
   int task_group_probe_;
 
   struct {
