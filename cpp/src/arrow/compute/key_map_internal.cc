@@ -756,7 +756,6 @@ Status SwissTable::init(int64_t hardware_flags, MemoryPool* pool, int log_blocks
   log_blocks_ = log_blocks;
   bits_shift_for_block_and_stamp_ = ComputeBitsShiftForBlockAndStamp(log_blocks_);
   bits_shift_for_block_ = ComputeBitsShiftForBlock(log_blocks_);
-  int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   int64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   num_inserted_ = 0;
 

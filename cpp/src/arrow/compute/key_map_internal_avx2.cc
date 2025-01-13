@@ -408,8 +408,10 @@ int SwissTable::extract_group_ids_avx2(const int num_keys, const uint32_t* hashe
       __m256i local_slot_hi = _mm256_shuffle_epi8(
           local_slot, _mm256_setr_epi32(0x80808004, 0x80808080, 0x80808005, 0x80808080,
                                         0x80808006, 0x80808080, 0x80808007, 0x80808080));
-      local_slot_lo = _mm256_mul_epu32(local_slot_lo, _mm256_set1_epi32(byte_size));
-      local_slot_hi = _mm256_mul_epu32(local_slot_hi, _mm256_set1_epi32(byte_size));
+      local_slot_lo = _mm256_mul_epu32(
+          local_slot_lo, _mm256_set1_epi32(static_cast<int32_t>(num_groupid_bytes)));
+      local_slot_hi = _mm256_mul_epu32(
+          local_slot_hi, _mm256_set1_epi32(static_cast<int32_t>(num_groupid_bytes)));
 
       // NB: Use zero-extend conversion for unsigned block_id.
       __m256i slot_offset_lo = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(block_id));
