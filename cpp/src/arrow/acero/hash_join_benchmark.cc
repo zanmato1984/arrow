@@ -128,6 +128,7 @@ class JoinBenchmark {
     for (ExecBatch& batch : r_batches_with_schema.batches)
       r_batches_.InsertBatch(std::move(batch));
 
+    stats_.num_build_rows = settings.num_build_batches * settings.batch_size;
     stats_.num_probe_rows = settings.num_probe_batches * settings.batch_size;
 
     schema_mgr_ = std::make_unique<HashJoinSchema>();
@@ -167,6 +168,17 @@ class JoinBenchmark {
         [](int64_t, ExecBatch) { return Status::OK(); },
         [](int64_t) { return Status::OK(); }));
 
+    task_group_build_ = scheduler_->RegisterTaskGroup(
+        [this](size_t thread_index, int64_t task_id) -> Status {
+          return join_->OnBuildSideBatch(thread_index, task_id, r_batches_[task_id]);
+        },
+        [this](size_t thread_index) -> Status {
+          return join_->BuildHashTable(
+              thread_index, std::move(r_batches_), [this](size_t thread_index) {
+                return Status::OK();
+              });
+        });
+
     task_group_probe_ = scheduler_->RegisterTaskGroup(
         [this](size_t thread_index, int64_t task_id) -> Status {
           return join_->ProbeSingleBatch(thread_index, std::move(l_batches_[task_id]));
@@ -189,10 +201,7 @@ class JoinBenchmark {
       int tid = omp_get_thread_num();
 #pragma omp single
       DCHECK_OK(
-          join_->BuildHashTable(tid, std::move(r_batches_), [this](size_t thread_index) {
-            return scheduler_->StartTaskGroup(thread_index, task_group_probe_,
-                                              l_batches_.batch_count());
-          }));
+          scheduler_->StartTaskGroup(tid, task_group_build_, r_batches_.batch_count()));
     }
   }
 
@@ -202,9 +211,11 @@ class JoinBenchmark {
   std::unique_ptr<HashJoinSchema> schema_mgr_;
   std::unique_ptr<HashJoinImpl> join_;
   QueryContext ctx_;
+  int task_group_build_;
   int task_group_probe_;
 
   struct {
+    uint64_t num_build_rows;
     uint64_t num_probe_rows;
   } stats_;
 };
@@ -219,7 +230,7 @@ static void HashJoinBasicBenchmarkImpl(benchmark::State& st,
       st.ResumeTiming();
       bm.RunJoin();
       st.PauseTiming();
-      total_rows += bm.stats_.num_probe_rows;
+      total_rows += bm.stats_.num_build_rows;
     }
     st.ResumeTiming();
   }
@@ -383,7 +394,7 @@ static void BM_HashJoinBasic_HeavyBuildPayload(benchmark::State& st) {
 }
 #endif
 
-std::vector<int64_t> hashtable_krows = benchmark::CreateRange(1, 4096, 8);
+std::vector<int64_t> hashtable_krows = benchmark::CreateRange(1, 4096 * 16, 8);
 
 std::vector<std::string> keytypes_argnames = {"Hashtable krows"};
 #ifdef ARROW_BUILD_DETAILED_BENCHMARKS
@@ -502,7 +513,7 @@ BENCHMARK(BM_HashJoinBasic_ProbeParallelism)
 
 BENCHMARK(BM_HashJoinBasic_BuildParallelism)
     ->ArgNames({"Threads", "HashTable krows"})
-    ->ArgsProduct({benchmark::CreateDenseRange(1, 16, 1), hashtable_krows})
+    ->ArgsProduct({benchmark::CreateRange(1, 32, 2), hashtable_krows})
     ->MeasureProcessCPUTime();
 
 BENCHMARK(BM_HashJoinBasic_NullPercentage)
