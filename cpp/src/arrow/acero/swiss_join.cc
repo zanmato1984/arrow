@@ -633,9 +633,9 @@ void SwissTableMerge::MergePartition(SwissTable* target, const SwissTable* sourc
                                      std::vector<uint32_t>* overflow_hashes) {
   // Prepare parameters needed for scanning full slots in source.
   //
-  int64_t source_group_id_bits =
+  int source_group_id_bits =
       SwissTable::num_groupid_bits_from_log_blocks(source->log_blocks());
-  int64_t source_block_bytes =
+  int source_block_bytes =
       SwissTable::num_block_bytes_from_num_groupid_bits(source_group_id_bits);
   ARROW_DCHECK(source_block_bytes % sizeof(uint64_t) == 0);
 
@@ -652,7 +652,8 @@ void SwissTableMerge::MergePartition(SwissTable* target, const SwissTable* sourc
   // For each source block...
   uint32_t source_blocks = 1 << source->log_blocks();
   for (uint32_t block_id = 0; block_id < source_blocks; ++block_id) {
-    uint8_t* block_bytes = source->blocks() + block_id * source_block_bytes;
+    uint8_t* block_bytes =
+        SwissTable::block_addr(source->blocks(), block_id, source_block_bytes);
     uint64_t block = *reinterpret_cast<const uint64_t*>(block_bytes);
 
     // For each non-empty source slot...
@@ -693,12 +694,13 @@ inline bool SwissTableMerge::InsertNewGroup(SwissTable* target, uint32_t group_i
   //
   uint32_t block_id = SwissTable::block_id_from_hash(hash, target->log_blocks());
   uint32_t block_id_mask = (1 << target->log_blocks()) - 1;
-  int64_t num_group_id_bits =
+  int num_group_id_bits =
       SwissTable::num_groupid_bits_from_log_blocks(target->log_blocks());
-  int64_t num_block_bytes =
+  int num_block_bytes =
       SwissTable::num_block_bytes_from_num_groupid_bits(num_group_id_bits);
   ARROW_DCHECK(num_block_bytes % sizeof(uint64_t) == 0);
-  uint8_t* block_bytes = target->blocks() + block_id * num_block_bytes;
+  uint8_t* block_bytes =
+      SwissTable::block_addr(target->blocks(), block_id, num_block_bytes);
   uint64_t block = *reinterpret_cast<const uint64_t*>(block_bytes);
 
   // Search for the first block with empty slots.
@@ -707,7 +709,7 @@ inline bool SwissTableMerge::InsertNewGroup(SwissTable* target, uint32_t group_i
   constexpr uint64_t kHighBitOfEachByte = 0x8080808080808080ULL;
   while ((block & kHighBitOfEachByte) == 0 && block_id < max_block_id) {
     block_id = (block_id + 1) & block_id_mask;
-    block_bytes = target->blocks() + block_id * num_block_bytes;
+    block_bytes = SwissTable::block_addr(target->blocks(), block_id, num_block_bytes);
     block = *reinterpret_cast<const uint64_t*>(block_bytes);
   }
   if ((block & kHighBitOfEachByte) == 0) {
