@@ -107,7 +107,7 @@ class ARROW_EXPORT SwissTable {
     return block_id * static_cast<uint32_t>(kSlotsPerBlock) + local_slot_id;
   }
 
-  static int64_t num_groupid_bits_from_log_blocks(int log_blocks) {
+  static int num_groupid_bits_from_log_blocks(int log_blocks) {
     int required_bits = log_blocks + 3;
     return required_bits <= 8    ? 8
            : required_bits <= 16 ? 16
@@ -115,8 +115,13 @@ class ARROW_EXPORT SwissTable {
                                  : 64;
   }
 
-  static int64_t num_block_bytes_from_num_groupid_bits(int64_t num_groupid_bits) {
+  static int num_block_bytes_from_num_groupid_bits(int num_groupid_bits) {
     return num_groupid_bits + bytes_status_in_block_;
+  }
+
+  template <typename T>
+  inline static T* block_addr(T* blocks, uint32_t block_id, int num_block_bytes) {
+    return blocks + static_cast<int64_t>(block_id) * num_block_bytes;
   }
 
   static constexpr int kSlotsPerBlock = 8;
@@ -288,20 +293,20 @@ class ARROW_EXPORT SwissTable {
 
 void SwissTable::insert_into_empty_slot(uint32_t slot_id, uint32_t hash,
                                         uint32_t group_id) {
-  const int64_t num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+  const int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
 
   // We assume here that the number of bits is rounded up to 8, 16, 32 or 64.
   // In that case we can insert group id value using aligned 64-bit word access.
   assert(num_groupid_bits == 8 || num_groupid_bits == 16 || num_groupid_bits == 32 ||
          num_groupid_bits == 64);
 
-  const int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
+  const int num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
   constexpr uint64_t stamp_mask = 0x7f;
 
   int start_slot = (slot_id & 7);
   int stamp = static_cast<int>((hash >> bits_shift_for_block_and_stamp_) & stamp_mask);
-  uint64_t block_id = slot_id >> 3;
-  uint8_t* blockbase = blocks_->mutable_data() + num_block_bytes * block_id;
+  uint32_t block_id = slot_id >> 3;
+  uint8_t* blockbase = block_addr(blocks_->mutable_data(), block_id, num_block_bytes);
 
   blockbase[7 - start_slot] = static_cast<uint8_t>(stamp);
   int groupid_bit_offset = static_cast<int>(start_slot * num_groupid_bits);
