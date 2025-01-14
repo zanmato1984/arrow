@@ -225,8 +225,7 @@ void SwissTable::early_filter_imp(const int num_keys, const uint32_t* hashes,
     uint32_t stamp = iblock & stamp_mask;
     iblock >>= bits_shift_for_block_;
 
-    const uint8_t* blockbase =
-        blocks_->data() + static_cast<uint64_t>(iblock) * num_block_bytes;
+    const uint8_t* blockbase = blocks_->data() + iblock * num_block_bytes;
     ARROW_DCHECK(num_block_bytes % sizeof(uint64_t) == 0);
     uint64_t block = *reinterpret_cast<const uint64_t*>(blockbase);
 
