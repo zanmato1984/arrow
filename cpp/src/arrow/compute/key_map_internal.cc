@@ -176,8 +176,8 @@ void SwissTable::init_slot_ids_for_new_keys(uint32_t num_ids, const uint16_t* id
   int64_t num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
   if (log_blocks_ == 0) {
     uint64_t block = *reinterpret_cast<const uint64_t*>(blocks_->mutable_data());
-    uint32_t empty_slot =
-        static_cast<uint32_t>(8 - ARROW_POPCOUNT64(block & kHighBitOfEachByte));
+    uint32_t empty_slot = static_cast<uint32_t>(
+        kSlotsPerBlock - ARROW_POPCOUNT64(block & kHighBitOfEachByte));
     for (uint32_t i = 0; i < num_ids; ++i) {
       int id = ids[i];
       slot_ids[id] = empty_slot;
@@ -197,7 +197,7 @@ void SwissTable::init_slot_ids_for_new_keys(uint32_t num_ids, const uint16_t* id
         }
         iblock = (iblock + 1) & ((1 << log_blocks_) - 1);
       }
-      uint32_t empty_slot = static_cast<int>(8 - ARROW_POPCOUNT64(block));
+      uint32_t empty_slot = static_cast<int>(kSlotsPerBlock - ARROW_POPCOUNT64(block));
       slot_ids[id] = global_slot_id(iblock, empty_slot);
     }
   }
@@ -720,7 +720,7 @@ Status SwissTable::grow_double() {
       uint64_t block_new = util::SafeLoadAs<uint64_t>(block_base_new);
       int full_slots_new =
           static_cast<int>(CountLeadingZeros(block_new & kHighBitOfEachByte) >> 3);
-      while (full_slots_new == 8) {
+      while (full_slots_new == kSlotsPerBlock) {
         block_id_new = (block_id_new + 1) & ((1 << log_blocks_after) - 1);
         block_base_new = blocks_new->mutable_data() + block_id_new * block_size_after;
         block_new = util::SafeLoadAs<uint64_t>(block_base_new);
