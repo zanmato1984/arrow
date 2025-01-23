@@ -17,6 +17,7 @@
 
 #include "arrow/compute/row/compare_internal.h"
 #include "arrow/compute/util.h"
+#include "arrow/util/avx2_internal.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/simd.h"
 
