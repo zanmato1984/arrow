@@ -59,8 +59,8 @@ test_that("distinct() can retain groups", {
   print(groups, file=stderr())
   compare_dplyr_binding(
       groups %>%
-      # distinct(lgl) %>%
-      # arrange(lgl, int) %>%
+      distinct(lgl) %>%
+      arrange(lgl, int) %>%
       collect(),
     tbl
   )
