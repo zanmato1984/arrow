@@ -20,8 +20,8 @@ example_data <- tibble::tibble(
   dbl = c(1:8, NA, 10) + 0.1,
   dbl2 = rep(5, 10),
   lgl = sample(c(TRUE, FALSE, NA), 10, replace = TRUE),
-  # false = logical(10),
-  false = rep(TRUE, 10),
+  false = logical(10),
+  # false = rep(TRUE, 10),
   chr = letters[c(1:5, NA, 7:10)],
   fct = factor(letters[c(1:4, NA, NA, 7:10)])
 )

@@ -2396,6 +2396,77 @@ TEST_P(GroupBy, Distinct) {
   }
 }
 
+TEST_P(GroupBy, DistinctWithBoolean) {
+  auto all = std::make_shared<CountOptions>(CountOptions::ALL);
+  auto only_valid = std::make_shared<CountOptions>(CountOptions::ONLY_VALID);
+  auto only_null = std::make_shared<CountOptions>(CountOptions::ONLY_NULL);
+  for (bool use_threads : {false}) {
+    SCOPED_TRACE(use_threads ? "parallel/merged" : "serial");
+
+    auto table = TableFromJSON(
+        schema({field("int", int32()), field("dbl", float64()), field("dbl2", float64()),
+                field("lgl", boolean()), field("false", boolean()),
+                field("chr", fixed_size_binary(1)), field("fct", fixed_size_binary(1)),
+                field("some_grouping", int32())}),
+        {
+            R"([
+    [1, 1.1, 5.0, false, false, "a", "a", 1],
+    [2, 2.1, 10.0, null, false, "b", "b", 2],
+    [3, 3.1, 5.0, false, false, "c", "c", 1],
+    [null, 4.1, 10.0, true, false, "d", "d", 2],
+    [5, 5.1, 5.0, false, false, "e", null, 1],
+    [6, 6.1, 10.0, null, false, null, null, 2],
+    [7, 7.1, 5.0, null, false, "g", "g", 1],
+    [8, 8.1, 10.0, true, false, "h", "h", 2],
+    [9, null, 5.0, true, false, "i", "i", 1],
+    [10, 10.1, 10.0, null, false, "j", "j", 2]
+])",
+        });
+
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         AltGroupBy(
+                             {
+                                 table->GetColumnByName("dbl"),
+                                 table->GetColumnByName("dbl2"),
+                                 table->GetColumnByName("lgl"),
+                                 table->GetColumnByName("false"),
+                                 table->GetColumnByName("chr"),
+                                 table->GetColumnByName("fct"),
+                             },
+                             {
+                                 table->GetColumnByName("some_grouping"),
+                                 table->GetColumnByName("int"),
+                                 table->GetColumnByName("int"),
+                             },
+                             {},
+                             {
+                                 {"hash_list", "agg_0", "dbl"},
+                                 {"hash_list", "agg_1", "dbl2"},
+                                 {"hash_list", "agg_2", "lgl"},
+                                 {"hash_list", "agg_3", "false"},
+                                 {"hash_list", "agg_4", "chr"},
+                                 {"hash_list", "agg_5", "fct"},
+                                //  {"hash_distinct", "agg_0", "dbl"},
+                                //  {"hash_distinct", "agg_1", "dbl2"},
+                                //  {"hash_distinct", "agg_2", "lgl"},
+                                //  {"hash_distinct", "agg_3", "false"},
+                                //  {"hash_distinct", "agg_4", "chr"},
+                                //  {"hash_distinct", "agg_5", "fct"},
+                             },
+                             use_threads));
+    ValidateOutput(result);
+    // SortBy({"agg_0", "key_1"}, &result);
+
+    auto struct_arr = result.array_as<StructArray>();
+    for (int i = 0; i < struct_arr->length(); i++) {
+      ASSERT_OK_AND_ASSIGN(auto row, struct_arr->GetScalar(i));
+      std::cout << row->ToString() << std::endl;
+    }
+
+    std::cout << result.ToString() << std::endl;
+  }
+}
+
 TEST_P(GroupBy, OneMiscTypes) {
   auto in_schema = schema({
       field("floats", float64()),

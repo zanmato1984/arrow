@@ -53,12 +53,13 @@ test_that("distinct() works without any variables", {
 })
 
 test_that("distinct() can retain groups", {
-  groups <- .input %>%
-      group_by(some_grouping, int)
-  cat("Groups:\n", file=stderr())
-  print(groups, file=stderr())
+ #  groups <- .input %>%
+ #      group_by(some_grouping, int)
+ #  cat("Groups:\n", file=stderr())
+ #  print(groups, file=stderr())
   compare_dplyr_binding(
-      groups %>%
+    .input %>%
+      group_by(some_grouping, int) %>%
       distinct(lgl) %>%
       arrange(lgl, int) %>%
       collect(),

@@ -254,7 +254,6 @@ class ARROW_EXPORT RowTableImpl {
     return buffers_[i]->size();
   }
 
- private:
   // Accessors into the table's buffers
   inline const uint8_t* data(int i) const {
     ARROW_DCHECK(i >= 0 && i < kMaxBuffers);
@@ -271,6 +270,7 @@ class ARROW_EXPORT RowTableImpl {
     return NULLPTR;
   }
 
+ private:
   /// \brief Resize the fixed length buffers to store `num_extra_rows` more rows. The
   /// fixed length buffers are buffers_[0] for null masks, buffers_[1] for row data if the
   /// row is fixed length, or for row offsets otherwise.
