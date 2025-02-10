@@ -119,6 +119,10 @@ class ARROW_EXPORT SwissTable {
     return num_groupid_bits + bytes_status_in_block_;
   }
 
+  static int64_t num_bytes_total_blocks(int num_block_bytes, int log_blocks) {
+    return (static_cast<int64_t>(num_block_bytes) << log_blocks) + padding_;
+  }
+
   template <typename T>
   inline static T* block_addr(T* blocks, uint32_t block_id, int num_block_bytes) {
     return blocks + static_cast<int64_t>(block_id) * num_block_bytes;

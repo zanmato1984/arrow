@@ -628,7 +628,8 @@ Status SwissTable::grow_double() {
   int bits_shift_for_block_after = ComputeBitsShiftForBlock(log_blocks_after);
   int block_size_before = num_block_bytes_from_num_groupid_bits(num_group_id_bits_before);
   int block_size_after = num_block_bytes_from_num_groupid_bits(num_group_id_bits_after);
-  int64_t block_size_total_after = (block_size_after << log_blocks_after) + padding_;
+  int64_t block_size_total_after =
+      num_bytes_total_blocks(block_size_after, log_blocks_after);
   int64_t hashes_size_total_after =
       (bits_hash_ / 8 * (1 << (log_blocks_after + 3))) + padding_;
   constexpr uint32_t stamp_mask = (1 << bits_stamp_) - 1;
@@ -758,7 +759,7 @@ Status SwissTable::init(int64_t hardware_flags, MemoryPool* pool, int log_blocks
   num_inserted_ = 0;
 
   const int block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
-  const int64_t slot_bytes = (block_bytes << log_blocks_) + padding_;
+  const int64_t slot_bytes = num_bytes_total_blocks(block_bytes, log_blocks_);
   ARROW_ASSIGN_OR_RAISE(blocks_, AllocateBuffer(slot_bytes, pool_));
 
   // Make sure group ids are initially set to zero for all slots.
