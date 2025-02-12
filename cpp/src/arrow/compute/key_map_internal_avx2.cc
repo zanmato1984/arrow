@@ -231,8 +231,10 @@ int SwissTable::early_filter_imp_avx2_x32(const int num_hashes, const uint32_t* 
   uint64_t block_bytes[16];
   const int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   for (int i = 0; i < (1 << log_blocks_); ++i) {
-    uint64_t in_blockbytes =
-        *reinterpret_cast<const uint64_t*>(blocks_->data() + (8 + num_groupid_bits) * i);
+    int64_t pos = (8ll + num_groupid_bits) * i;
+    DCHECK_LE(pos, std::numeric_limits<uint32_t>::max())
+        << "Early filter avx2 overflow: " << (8 + num_groupid_bits) << " * " << i;
+    uint64_t in_blockbytes = *reinterpret_cast<const uint64_t*>(blocks_->data() + pos);
     block_bytes[i] = in_blockbytes;
   }
 

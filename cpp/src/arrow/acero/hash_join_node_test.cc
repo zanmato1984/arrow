@@ -3452,15 +3452,16 @@ TEST(HashJoin, LARGE_MEMORY_TEST(BuildSideOver4GBVarLength)) {
 // GH-45334: The row ids of the matching rows on the right side (the build side) are very
 // big, causing the index calculation overflow.
 TEST(HashJoin, BuildSideLargeRowIds) {
-  GTEST_SKIP() << "Test disabled due to excessively time and resource consuming, "
-                  "for local debugging only.";
+  // GTEST_SKIP() << "Test disabled due to excessively time and resource consuming, "
+  //                 "for local debugging only.";
 
   // A fair amount of match rows to trigger both SIMD and non-SIMD code paths.
   const int64_t num_match_rows = 35;
   const int64_t num_rows_per_match_batch = 35;
   const int64_t num_match_batches = num_match_rows / num_rows_per_match_batch;
 
-  const int64_t num_unmatch_rows_large = 720898048;
+  const int64_t num_unmatch_rows_large = 900000000;
+  // const int64_t num_unmatch_rows_large = 720898048;
   const int64_t num_rows_per_unmatch_batch_large = 352001;
   const int64_t num_unmatch_batches_large =
       num_unmatch_rows_large / num_rows_per_unmatch_batch_large;

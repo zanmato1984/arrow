@@ -111,8 +111,11 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
     for (int i = 0; i < num_keys; ++i) {
       uint32_t id = use_selection ? selection[i] : i;
       uint32_t hash = hashes[id];
-      int64_t pos =
-          (hash >> (bits_hash_ - log_blocks_)) * element_multiplier + local_slots[id];
+      uint32_t block_id = hash >> (bits_hash_ - log_blocks_);
+      int64_t pos = static_cast<int64_t>(block_id) * element_multiplier;
+      DCHECK_LE(pos, std::numeric_limits<uint32_t>::max())
+          << "Extract group ids overflow: " << block_id << " * " << element_multiplier;
+      pos += local_slots[id];
       uint32_t group_id = static_cast<uint32_t>(elements[pos]);
       ARROW_DCHECK(group_id < num_inserted_ || num_inserted_ == 0);
       out_group_ids[id] = group_id;
@@ -223,8 +226,10 @@ void SwissTable::init_slot_ids_for_new_keys(uint32_t num_ids, const uint16_t* id
       uint32_t iblock = hash >> (bits_hash_ - log_blocks_);
       uint64_t block;
       for (;;) {
-        block = *reinterpret_cast<const uint64_t*>(blocks_->mutable_data() +
-                                                   num_block_bytes * iblock);
+        int64_t pos = static_cast<int64_t>(num_block_bytes) * iblock;
+        DCHECK_LE(pos, std::numeric_limits<uint32_t>::max())
+            << "Init slot ids overflow: " << num_block_bytes << " * " << iblock;
+        block = *reinterpret_cast<const uint64_t*>(blocks_->mutable_data() + pos);
         block &= kHighBitOfEachByte;
         if (block) {
           break;
