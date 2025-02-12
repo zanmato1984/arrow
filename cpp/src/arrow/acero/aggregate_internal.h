@@ -195,6 +195,7 @@ class ScalarAggregateNode : public ExecNode, public TracedNode {
 
   Status StartProducing() override {
     NoteStartProducing(ToStringExtra(0));
+    local_states_.resize(plan_->query_context()->max_concurrency());
     return Status::OK();
   }
 
@@ -212,6 +213,19 @@ class ScalarAggregateNode : public ExecNode, public TracedNode {
   std::string ToStringExtra(int indent) const override;
 
  private:
+  struct ThreadLocalState {
+    // Holds the value of segment keys of the most recent input batch
+    // The values are updated every time an input batch is processed
+    std::vector<Datum> segmenter_values;
+  };
+
+  // TODO: Abstract this into a common base class for all aggregate nodes.
+  // Generalize the ThreadLocalState type, maybe by CRTP.
+  ThreadLocalState* GetLocalState() {
+    size_t thread_index = plan_->query_context()->GetThreadIndex();
+    return &local_states_[thread_index];
+  }
+
   Status ResetKernelStates();
 
   Status OutputResult(bool is_last);
@@ -220,9 +234,6 @@ class ScalarAggregateNode : public ExecNode, public TracedNode {
   std::unique_ptr<RowSegmenter> segmenter_;
   // Field indices corresponding to the segment-keys
   const std::vector<int> segment_field_ids_;
-  // Holds the value of segment keys of the most recent input batch
-  // The values are updated every time an input batch is processed
-  std::vector<Datum> segmenter_values_;
 
   const std::vector<std::vector<int>> target_fieldsets_;
   const std::vector<Aggregate> aggs_;
@@ -233,6 +244,9 @@ class ScalarAggregateNode : public ExecNode, public TracedNode {
   std::vector<std::vector<std::unique_ptr<KernelState>>> states_;
 
   AtomicCounter input_counter_;
+
+  std::vector<ThreadLocalState> local_states_;
+
   /// \brief Total number of output batches produced
   int total_output_batches_ = 0;
 };
