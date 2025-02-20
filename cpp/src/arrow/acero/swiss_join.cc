@@ -2600,27 +2600,18 @@ class SwissJoin : public HashJoinImpl {
     DCHECK_GT(build_side_batches_[batch_id].length, 0);
 
     const HashJoinProjectionMaps* schema = schema_[1];
-    DCHECK_NE(hash_table_build_, nullptr);
-
     ExecBatch input_batch;
     ARROW_ASSIGN_OR_RAISE(
         input_batch, KeyPayloadFromInput(/*side=*/1, &build_side_batches_[batch_id]));
 
-    // Split batch into key batch and optional payload batch
-    //
-    // Input batch is key-payload batch (key columns followed by payload
-    // columns). We split it into two separate batches.
-    //
-    // TODO: Change SwissTableForJoinBuild interface to use key-payload
-    // batch instead to avoid this operation, which involves increasing
-    // shared pointer ref counts.
-    //
     ExecBatch key_batch({}, input_batch.length);
     key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
     for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
       key_batch.values[icol] = input_batch.values[icol];
     }
     arrow::util::TempVectorStack* temp_stack = &local_states_[thread_id].stack;
+
+    DCHECK_NE(hash_table_build_, nullptr);
     return hash_table_build_->PartitionBatch(static_cast<int64_t>(thread_id), batch_id,
                                              key_batch, temp_stack);
   }
@@ -2628,6 +2619,7 @@ class SwissJoin : public HashJoinImpl {
   Status PartitionFinished(size_t thread_id) {
     RETURN_NOT_OK(status());
 
+    DCHECK_NE(hash_table_build_, nullptr);
     return CancelIfNotOK(
         start_task_group_callback_(task_group_build_, hash_table_build_->num_prtns()));
   }
@@ -2638,9 +2630,14 @@ class SwissJoin : public HashJoinImpl {
     }
 
     const HashJoinProjectionMaps* schema = schema_[1];
-    bool no_payload = hash_table_build_->no_payload();
-    arrow::util::TempVectorStack* temp_stack = &local_states_[thread_id].stack;
     DCHECK_NE(hash_table_build_, nullptr);
+    bool no_payload = hash_table_build_->no_payload();
+    ExecBatch key_batch, payload_batch;
+    key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
+    if (!no_payload) {
+      payload_batch.values.resize(schema->num_cols(HashJoinProjection::PAYLOAD));
+    }
+    arrow::util::TempVectorStack* temp_stack = &local_states_[thread_id].stack;
 
     for (int64_t batch_id = 0;
          batch_id < static_cast<int64_t>(build_side_batches_.batch_count()); ++batch_id) {
@@ -2657,22 +2654,19 @@ class SwissJoin : public HashJoinImpl {
       // batch instead to avoid this operation, which involves increasing
       // shared pointer ref counts.
       //
-      ExecBatch key_batch({}, input_batch.length);
-      key_batch.values.resize(schema->num_cols(HashJoinProjection::KEY));
+      key_batch.length = input_batch.length;
       for (size_t icol = 0; icol < key_batch.values.size(); ++icol) {
         key_batch.values[icol] = input_batch.values[icol];
       }
 
-      ExecBatch payload_batch({}, input_batch.length);
       if (!no_payload) {
-        payload_batch.values.resize(schema->num_cols(HashJoinProjection::PAYLOAD));
+        payload_batch.length = input_batch.length;
         for (size_t icol = 0; icol < payload_batch.values.size(); ++icol) {
           payload_batch.values[icol] =
               input_batch.values[schema->num_cols(HashJoinProjection::KEY) + icol];
         }
       }
 
-      DCHECK_NE(hash_table_build_, nullptr);
       RETURN_NOT_OK(CancelIfNotOK(hash_table_build_->ProcessPartition(
           thread_id, batch_id, static_cast<int>(prtn_id), key_batch,
           no_payload ? nullptr : &payload_batch, temp_stack)));
