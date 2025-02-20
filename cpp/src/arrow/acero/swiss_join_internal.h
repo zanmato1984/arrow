@@ -523,7 +523,7 @@ class SwissTableForJoin {
 //
 class SwissTableForJoinBuild {
  public:
-  Status Init(SwissTableForJoin* target, int dop, int64_t num_rows,
+  Status Init(SwissTableForJoin* target, int dop, int64_t num_rows, int64_t num_batches,
               bool reject_duplicate_keys, bool no_payload,
               const std::vector<KeyColumnMetadata>& key_types,
               const std::vector<KeyColumnMetadata>& payload_types, MemoryPool* pool,
@@ -533,9 +533,22 @@ class SwissTableForJoinBuild {
   // exec batches, partition the rows based on hash, and update all of the
   // partitions with information related to that batch of rows.
   //
-  Status PushNextBatch(int64_t thread_id, const ExecBatch& key_batch,
-                       const ExecBatch* payload_batch_maybe_null,
-                       arrow::util::TempVectorStack* temp_stack);
+  Status PartitionBatch(size_t thread_id, int64_t batch_id, const ExecBatch& key_batch,
+                        arrow::util::TempVectorStack* temp_stack);
+
+  // In the first phase of parallel hash table build, threads pick unprocessed
+  // exec batches, partition the rows based on hash, and update all of the
+  // partitions with information related to that batch of rows.
+  //
+  // Status BuildBatch(size_t thread_id, int64_t batch_id, int prtn_id,
+  //                   const ExecBatch& key_batch, const ExecBatch*
+  //                   payload_batch_maybe_null, arrow::util::TempVectorStack*
+  //                   temp_stack);
+
+  Status ProcessPartition(size_t thread_id, int64_t batch_id, int prtn_id,
+                          const ExecBatch& key_batch,
+                          const ExecBatch* payload_batch_maybe_null,
+                          arrow::util::TempVectorStack* temp_stack);
 
   // Allocate memory and initialize counters required for parallel merging of
   // hash table partitions.
@@ -564,9 +577,6 @@ class SwissTableForJoinBuild {
 
  private:
   void InitRowArray();
-  Status ProcessPartition(int64_t thread_id, const ExecBatch& key_batch,
-                          const ExecBatch* payload_batch_maybe_null,
-                          arrow::util::TempVectorStack* temp_stack, int prtn_id);
 
   SwissTableForJoin* target_;
   // DOP stands for Degree Of Parallelism - the maximum number of participating
@@ -604,6 +614,16 @@ class SwissTableForJoinBuild {
   MemoryPool* pool_;
   int64_t hardware_flags_;
 
+  // One per batch.
+  //
+  // Informations like hashes and partitions of each batch.
+  //
+  struct BatchState {
+    std::vector<uint32_t> hashes;
+    std::vector<uint16_t> prtn_ranges;
+    std::vector<uint16_t> prtn_row_ids;
+  };
+
   // One per partition.
   //
   struct PartitionState {
@@ -620,17 +640,13 @@ class SwissTableForJoinBuild {
   // batches.
   //
   struct ThreadState {
-    std::vector<uint32_t> batch_hashes;
-    std::vector<uint16_t> batch_prtn_ranges;
-    std::vector<uint16_t> batch_prtn_row_ids;
-    std::vector<int> temp_prtn_ids;
     std::vector<uint32_t> temp_group_ids;
     std::vector<KeyColumnArray> temp_column_arrays;
   };
 
+  std::vector<BatchState> batch_states_;
   std::vector<PartitionState> prtn_states_;
   std::vector<ThreadState> thread_states_;
-  PartitionLocks prtn_locks_;
 
   std::vector<int64_t> partition_keys_first_row_id_;
   std::vector<int64_t> partition_payloads_first_row_id_;
