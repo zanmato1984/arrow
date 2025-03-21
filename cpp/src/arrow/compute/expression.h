@@ -56,6 +56,21 @@ class ARROW_EXPORT Expression {
     const Kernel* kernel = NULLPTR;
     std::shared_ptr<KernelState> kernel_state;
     TypeHolder type;
+    bool selection_vector_aware;
+
+    void ComputeHash();
+  };
+
+  struct Special {
+    std::shared_ptr<SpecialForm> special_form;
+    std::vector<Expression> arguments;
+    // Cached hash value
+    size_t hash;
+
+    // post-Bind properties:
+    std::shared_ptr<SpecialExec> special_exec;
+    TypeHolder type;
+    bool selection_vector_aware;
 
     void ComputeHash();
   };
@@ -112,11 +127,15 @@ class ARROW_EXPORT Expression {
   const Datum* literal() const;
   /// Access a FieldRef or return nullptr if this expression is not a field_ref
   const FieldRef* field_ref() const;
+  /// Access a FieldRef or return nullptr if this expression is not a field_ref
+  const Special* special() const;
 
   /// The type to which this expression will evaluate
   const DataType* type() const;
   // XXX someday
   // NullGeneralization::type nullable() const;
+
+  bool selection_vector_aware() const;
 
   struct Parameter {
     FieldRef ref;
@@ -131,9 +150,10 @@ class ARROW_EXPORT Expression {
   explicit Expression(Call call);
   explicit Expression(Datum literal);
   explicit Expression(Parameter parameter);
+  explicit Expression(Special special);
 
  private:
-  using Impl = std::variant<Datum, Parameter, Call>;
+  using Impl = std::variant<Datum, Parameter, Call, Special>;
   std::shared_ptr<Impl> impl_;
 
   ARROW_FRIEND_EXPORT friend bool Identical(const Expression& l, const Expression& r);
@@ -168,6 +188,8 @@ Expression call(std::string function, std::vector<Expression> arguments,
   return call(std::move(function), std::move(arguments),
               std::make_shared<Options>(std::move(options)));
 }
+
+Expression if_else_special(Expression cond, Expression if_true, Expression if_false);
 
 /// Assemble a list of all fields referenced by an Expression at any depth.
 ARROW_EXPORT

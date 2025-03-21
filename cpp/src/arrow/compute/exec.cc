@@ -27,6 +27,7 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
+#include "arrow/array/builder_primitive.h"
 #include "arrow/array/data.h"
 #include "arrow/array/util.h"
 #include "arrow/buffer.h"
@@ -50,6 +51,7 @@
 #include "arrow/util/logging_internal.h"
 #include "arrow/util/thread_pool.h"
 #include "arrow/util/vector.h"
+#include "arrow/visit_data_inline.h"
 
 namespace arrow {
 
@@ -367,6 +369,7 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   value_offsets_.clear();
   value_offsets_.resize(args_->size(), 0);
   max_chunksize_ = std::min(length_, max_chunksize);
+  selection_vector_ = batch.selection_vector.get();
   return Status::OK();
 }
 
@@ -440,6 +443,15 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
 
     if (have_all_scalars_ && promote_if_all_scalars_) {
       PromoteExecSpanScalars(span);
+    } else {
+      if (selection_vector_) {
+        if (have_chunked_arrays_) {
+          span->selection_vector = SelectionVectorSpan(selection_vector_->indices(), 0);
+        } else {
+          span->selection_vector = SelectionVectorSpan(selection_vector_->indices(),
+                                                       selection_vector_->length());
+        }
+      }
     }
 
     initialized_ = true;
@@ -452,6 +464,19 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
   int64_t iteration_size = std::min(length_ - position_, max_chunksize_);
   if (have_chunked_arrays_) {
     iteration_size = GetNextChunkSpan(iteration_size, span);
+    if (selection_vector_) {
+      auto indices_begin =
+          span->selection_vector.indices() + span->selection_vector.length();
+      auto indices_end = selection_vector_->indices() + selection_vector_->length();
+      DCHECK_LE(indices_begin, indices_end);
+      auto chunk_row_id_end = position_ + iteration_size;
+      int64_t num_indices = 0;
+      while (indices_begin + num_indices < indices_end &&
+             *(indices_begin + num_indices) < chunk_row_id_end) {
+        ++num_indices;
+      }
+      span->selection_vector.SetSlice(span->selection_vector.length(), num_indices);
+    }
   }
 
   // Now, adjust the span
@@ -1352,11 +1377,31 @@ SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
 
 SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
 
-int32_t SelectionVector::length() const { return static_cast<int32_t>(data_->length); }
-
 Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(
-    const BooleanArray& arr) {
-  return Status::NotImplemented("FromMask");
+    const BooleanArray& arr, MemoryPool* pool) {
+  Int32Builder builder(pool);
+  RETURN_NOT_OK(builder.Reserve(arr.true_count()));
+  ArraySpan span(*arr.data());
+  int32_t i = 0;
+  VisitArraySpanInline<BooleanType>(
+      span,
+      [&](bool mask) {
+        if (mask) {
+          builder.UnsafeAppend(i);
+        }
+        ++i;
+      },
+      [&]() { ++i; });
+  ARROW_ASSIGN_OR_RAISE(auto indices, builder.Finish());
+  return std::make_shared<SelectionVector>(indices->data());
+}
+
+int64_t SelectionVector::length() const { return data_->length; }
+
+void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length) {
+  DCHECK_NE(indices_, nullptr);
+  offset_ += offset;
+  length_ = length;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
