@@ -158,14 +158,12 @@ env:
   - name: Install gemfury client on ARM self-hosted
     if: runner.arch != 'X64'
     run: |
-      # GH-36692: Pin gemfury due to wrong faraday dependency declaration.
-      gem install --user-install gemfury -v 0.12.0
+      gem install --user-install gemfury
       ruby -r rubygems -e 'puts("#{Gem.user_dir}/bin")' >> $GITHUB_PATH
   - name: Install gemfury client
     if: runner.arch == 'X64'
     run: |
-      # GH-36692: Pin gemfury due to wrong faraday dependency declaration.
-      gem install gemfury -v 0.12.0
+      gem install gemfury
   - name: Upload package to Gemfury
     shell: bash
     run: |
@@ -188,6 +186,12 @@ env:
   - name: Upload wheel to Anaconda scientific-python
     shell: bash
     run: |
+      # check if completion actually expands to wheel files
+      # to prevent empty dirs from failing silently
+      if ! compgen -G "{{ pattern }}" > /dev/null; then
+          echo "No wheel files found!"
+          exit 1
+      fi
       python3 -m pip install git+https://github.com/Anaconda-Platform/anaconda-client.git@1.12.3
       anaconda -t ${CROSSBOW_SCIENTIFIC_PYTHON_UPLOAD_TOKEN} upload --force -u scientific-python-nightly-wheels --label main {{ pattern }}
     env:

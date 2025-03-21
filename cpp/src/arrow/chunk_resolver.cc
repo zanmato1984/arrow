@@ -26,7 +26,9 @@
 #include "arrow/array.h"
 #include "arrow/record_batch.h"
 
-namespace arrow::internal {
+namespace arrow {
+
+using util::span;
 
 namespace {
 template <typename T>
@@ -42,7 +44,7 @@ int64_t GetLength<std::shared_ptr<RecordBatch>>(
 }
 
 template <typename T>
-inline std::vector<int64_t> MakeChunksOffsets(const std::vector<T>& chunks) {
+inline std::vector<int64_t> MakeChunksOffsets(span<T> chunks) {
   std::vector<int64_t> offsets(chunks.size() + 1);
   int64_t offset = 0;
   std::transform(chunks.begin(), chunks.end(), offsets.begin(),
@@ -112,13 +114,13 @@ void ResolveManyInline(uint32_t num_offsets, const int64_t* signed_offsets,
 }  // namespace
 
 ChunkResolver::ChunkResolver(const ArrayVector& chunks) noexcept
-    : offsets_(MakeChunksOffsets(chunks)), cached_chunk_(0) {}
+    : offsets_(MakeChunksOffsets(span(chunks))), cached_chunk_(0) {}
 
-ChunkResolver::ChunkResolver(const std::vector<const Array*>& chunks) noexcept
+ChunkResolver::ChunkResolver(span<const Array* const> chunks) noexcept
     : offsets_(MakeChunksOffsets(chunks)), cached_chunk_(0) {}
 
 ChunkResolver::ChunkResolver(const RecordBatchVector& batches) noexcept
-    : offsets_(MakeChunksOffsets(batches)), cached_chunk_(0) {}
+    : offsets_(MakeChunksOffsets(span(batches))), cached_chunk_(0) {}
 
 ChunkResolver::ChunkResolver(ChunkResolver&& other) noexcept
     : offsets_(std::move(other.offsets_)),
@@ -167,4 +169,4 @@ void ChunkResolver::ResolveManyImpl(int64_t n_indices, const uint64_t* logical_i
                     logical_index_vec, out_chunk_location_vec, chunk_hint);
 }
 
-}  // namespace arrow::internal
+}  // namespace arrow
