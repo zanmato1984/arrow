@@ -795,7 +795,6 @@ if(ARROW_COMPUTE)
        compute/row/row_internal.cc
        compute/util.cc
        compute/util_internal.cc)
->>>>>>> vector-placement
 
   append_runtime_avx2_src(ARROW_COMPUTE_SRCS compute/kernels/aggregate_basic_avx2.cc)
   append_runtime_avx512_src(ARROW_COMPUTE_SRCS compute/kernels/aggregate_basic_avx512.cc)
