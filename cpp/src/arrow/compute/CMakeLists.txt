@@ -117,7 +117,11 @@ add_arrow_compute_test(row_test
                        EXTRA_LINK_LIBS
                        arrow_compute_testing)
 
+add_arrow_compute_test(special_form_test SOURCES special_form_test.cc)
+
 add_arrow_benchmark(function_benchmark PREFIX "arrow-compute")
+
+add_arrow_benchmark(special_form_benchmark PREFIX "arrow-compute")
 
 add_subdirectory(kernels)
 
