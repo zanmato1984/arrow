@@ -19,7 +19,6 @@
 
 """Dataset support for Parquet file format."""
 
-from cython cimport binding
 from cython.operator cimport dereference as deref
 
 import os
@@ -165,7 +164,7 @@ cdef class ParquetFileFormat(FileFormat):
             metadata = deref(
                 deref(parquet_file_writer).parquet_writer()).metadata()
         if metadata:
-            parquet_metadata = FileMetaData()
+            parquet_metadata = FileMetaData.__new__(FileMetaData)
             parquet_metadata.init(metadata)
             parquet_metadata.set_file_path(os.path.relpath(path, base_dir))
 
@@ -391,7 +390,7 @@ cdef class ParquetFileFragment(FileFragment):
     @property
     def metadata(self):
         self.ensure_complete_metadata()
-        cdef FileMetaData metadata = FileMetaData()
+        cdef FileMetaData metadata = FileMetaData.__new__(FileMetaData)
         metadata.init(self.parquet_file_fragment.metadata())
         return metadata
 
@@ -890,7 +889,6 @@ cdef class ParquetFragmentScanOptions(FragmentScanOptions):
         return attrs == other_attrs
 
     @staticmethod
-    @binding(True)  # Required for Cython < 3
     def _reconstruct(kwargs):
         # __reduce__ doesn't allow passing named arguments directly to the
         # reconstructor, hence this wrapper.

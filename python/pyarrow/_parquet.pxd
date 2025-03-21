@@ -484,11 +484,9 @@ cdef extern from "parquet/arrow/reader.h" namespace "parquet::arrow" nogil:
                               const vector[int]& column_indices,
                               shared_ptr[CTable]* out)
 
-        CStatus GetRecordBatchReader(const vector[int]& row_group_indices,
-                                     const vector[int]& column_indices,
-                                     unique_ptr[CRecordBatchReader]* out)
-        CStatus GetRecordBatchReader(const vector[int]& row_group_indices,
-                                     unique_ptr[CRecordBatchReader]* out)
+        CResult[unique_ptr[CRecordBatchReader]] GetRecordBatchReader(const vector[int]& row_group_indices,
+                                                                     const vector[int]& column_indices)
+        CResult[unique_ptr[CRecordBatchReader]] GetRecordBatchReader(const vector[int]& row_group_indices)
 
         CStatus ReadTable(shared_ptr[CTable]* out)
         CStatus ReadTable(const vector[int]& column_indices,
@@ -556,7 +554,7 @@ cdef extern from "parquet/arrow/writer.h" namespace "parquet::arrow" nogil:
                                              const shared_ptr[ArrowWriterProperties]& arrow_properties)
 
         CStatus WriteTable(const CTable& table, int64_t chunk_size)
-        CStatus NewRowGroup(int64_t chunk_size)
+        CStatus NewRowGroup()
         CStatus Close()
         CStatus AddKeyValueMetadata(const shared_ptr[const CKeyValueMetadata]& key_value_metadata)
 
@@ -632,6 +630,15 @@ cdef class RowGroupMetaData(_Weakrefable):
         unique_ptr[CRowGroupMetaData] up_metadata
         CRowGroupMetaData* metadata
         FileMetaData parent
+
+    cdef inline init(self, FileMetaData parent, int index):
+        if index < 0 or index >= parent.num_row_groups:
+            raise IndexError('{0} out of bounds'.format(index))
+        self.up_metadata = parent._metadata.RowGroup(index)
+        self.metadata = self.up_metadata.get()
+        self.parent = parent
+        self.index = index
+
 
 cdef class ColumnChunkMetaData(_Weakrefable):
     cdef:

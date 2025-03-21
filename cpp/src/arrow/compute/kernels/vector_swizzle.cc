@@ -42,7 +42,8 @@ const InversePermutationOptions* GetDefaultInversePermutationOptions() {
 using InversePermutationState = OptionsWrapper<InversePermutationOptions>;
 
 /// Resolve the output type of inverse_permutation. The output type is specified in the
-/// options, and if null, set it to the input type. The output type must be integer.
+/// options, and if null, set it to the input type. The output type must be signed
+/// integer.
 Result<TypeHolder> ResolveInversePermutationOutputType(
     KernelContext* ctx, const std::vector<TypeHolder>& input_types) {
   DCHECK_EQ(input_types.size(), 1);
@@ -52,9 +53,10 @@ Result<TypeHolder> ResolveInversePermutationOutputType(
   if (!output_type) {
     output_type = input_types[0].owned_type;
   }
-  if (!is_integer(output_type->id())) {
-    return Status::Invalid("Output type of inverse_permutation must be integer, got " +
-                           output_type->ToString());
+  if (!is_signed_integer(output_type->id())) {
+    return Status::TypeError(
+        "Output type of inverse_permutation must be signed integer, got " +
+        output_type->ToString());
   }
 
   return TypeHolder(std::move(output_type));
@@ -83,29 +85,7 @@ struct InversePermutationImpl {
     RETURN_NOT_OK(VisitTypeInline(*output_type, &impl));
 
     return ArrayData::Make(std::move(output_type), output_length,
-                           {std::move(impl.validity_buf), std::move(impl.data_buf)});
-  }
-
- private:
-  KernelContext* ctx;
-  const ShapeType& indices;
-  const int64_t input_length;
-  const int64_t output_length;
-
-  std::shared_ptr<Buffer> validity_buf = nullptr;
-  std::shared_ptr<Buffer> data_buf = nullptr;
-
- private:
-  InversePermutationImpl(KernelContext* ctx, const ShapeType& indices,
-                         int64_t input_length, int64_t output_length)
-      : ctx(ctx),
-        indices(indices),
-        input_length(input_length),
-        output_length(output_length) {}
-
-  Status Visit(const DataType& output_type) {
-    DCHECK(false) << "Shouldn't reach here";
-    return Status::Invalid("Shouldn't reach here");
+                           {std::move(impl.validity_buf_), std::move(impl.data_buf_)});
   }
 
   template <typename Type>
@@ -116,58 +96,86 @@ struct InversePermutationImpl {
 
     // Dispatch the execution based on whether there are likely many nulls in the output.
     // - If many nulls (i.e. the output is "sparse"), preallocate an all-false validity
-    // buffer and an uninitialized data buffer. The subsequent processing will fill the
-    // valid values only.
+    // buffer and a zero-initialized data buffer (just to avoid exposing previous memory
+    // contents - even if it is shadowed by the validity bit). The subsequent processing
+    // will fill the valid values only.
     // - Otherwise (i.e. the output is "dense"), the validity buffer is lazily allocated
     // and initialized all-true in the subsequent processing only when needed. The data
-    // buffer is preallocated and filled with all "impossible" values (that is,
-    // input_length - note that the range of inverse_permutation is [0, input_length)) for
-    // the subsequent processing to detect validity.
-    bool likely_many_nulls = LikelyManyNulls();
-    if (likely_many_nulls) {
+    // buffer is preallocated and filled with "impossible" values (that is, input_length -
+    // note that the range of inverse_permutation is [0, input_length)) for the subsequent
+    // processing to detect validity.
+    if (LikelyManyNulls()) {
       RETURN_NOT_OK(AllocateValidityBufAndFill(false));
-      RETURN_NOT_OK(AllocateDataBuf(output_type));
+      RETURN_NOT_OK(AllocateDataBufAndZero(output_type));
       return Execute<Type, true>();
     } else {
       RETURN_NOT_OK(
-          AllocateDataBufAndFill(output_type, static_cast<OutputCType>(input_length)));
+          AllocateDataBufAndFill(output_type, static_cast<OutputCType>(input_length_)));
       return Execute<Type, false>();
     }
   }
+
+  Status Visit(const DataType& output_type) {
+    DCHECK(false) << "Shouldn't reach here";
+    return Status::Invalid("Shouldn't reach here");
+  }
+
+ private:
+  KernelContext* ctx_;
+  const ShapeType& indices_;
+  const int64_t input_length_;
+  const int64_t output_length_;
+
+  std::shared_ptr<Buffer> validity_buf_;
+  std::shared_ptr<Buffer> data_buf_;
+
+  InversePermutationImpl(KernelContext* ctx, const ShapeType& indices,
+                         int64_t input_length, int64_t output_length)
+      : ctx_(ctx),
+        indices_(indices),
+        input_length_(input_length),
+        output_length_(output_length) {}
 
   template <typename Type>
   Status CheckInput(const Type& output_type) {
     using OutputCType = typename Type::c_type;
 
-    if constexpr (!std::is_same_v<OutputCType, uint64_t>) {
-      if (static_cast<int64_t>(std::numeric_limits<OutputCType>::max()) < input_length) {
-        return Status::Invalid(
-            "Output type " + output_type.ToString() +
-            " of inverse_permutation is insufficient to store indices of length " +
-            std::to_string(input_length));
-      }
+    if (static_cast<int64_t>(std::numeric_limits<OutputCType>::max()) < input_length_) {
+      return Status::Invalid(
+          "Output type " + output_type.ToString() +
+          " of inverse_permutation is insufficient to store indices of length " +
+          std::to_string(input_length_));
     }
 
     return Status::OK();
   }
 
-  bool LikelyManyNulls() { return output_length > 2 * input_length; }
+  bool LikelyManyNulls() { return output_length_ > 2 * input_length_; }
 
   Status AllocateValidityBufAndFill(bool valid) {
-    DCHECK_EQ(validity_buf, nullptr);
+    DCHECK_EQ(validity_buf_, nullptr);
 
-    ARROW_ASSIGN_OR_RAISE(validity_buf, ctx->AllocateBitmap(output_length));
-    auto validity = validity_buf->mutable_data_as<uint8_t>();
-    std::memset(validity, valid ? 0xff : 0, bit_util::BytesForBits(output_length));
+    ARROW_ASSIGN_OR_RAISE(validity_buf_, ctx_->Allocate(output_length_));
+    auto validity = validity_buf_->mutable_data_as<uint8_t>();
+    std::memset(validity, valid ? 0xff : 0, validity_buf_->capacity());
 
     return Status::OK();
   }
 
   Status AllocateDataBuf(const DataType& output_type) {
-    DCHECK_EQ(data_buf, nullptr);
+    DCHECK_EQ(data_buf_, nullptr);
 
-    ARROW_ASSIGN_OR_RAISE(data_buf,
-                          ctx->Allocate(output_length * output_type.byte_width()));
+    ARROW_ASSIGN_OR_RAISE(data_buf_,
+                          ctx_->Allocate(output_length_ * output_type.byte_width()));
+
+    return Status::OK();
+  }
+
+  Status AllocateDataBufAndZero(const DataType& output_type) {
+    RETURN_NOT_OK(AllocateDataBuf(output_type));
+
+    uint8_t* data = data_buf_->mutable_data();
+    std::memset(data, 0, output_length_ * output_type.byte_width());
 
     return Status::OK();
   }
@@ -176,8 +184,8 @@ struct InversePermutationImpl {
   Status AllocateDataBufAndFill(const Type& output_type, OutputCType value) {
     RETURN_NOT_OK(AllocateDataBuf(output_type));
 
-    OutputCType* data = data_buf->mutable_data_as<OutputCType>();
-    for (int64_t i = 0; i < output_length; ++i) {
+    OutputCType* data = data_buf_->mutable_data_as<OutputCType>();
+    for (int64_t i = 0; i < output_length_; ++i) {
       data[i] = value;
     }
 
@@ -190,24 +198,25 @@ struct InversePermutationImpl {
 
     uint8_t* validity = nullptr;
     if constexpr (likely_many_nulls) {
-      DCHECK_NE(validity_buf, nullptr);
-      validity = validity_buf->mutable_data_as<uint8_t>();
+      DCHECK_NE(validity_buf_, nullptr);
+      validity = validity_buf_->mutable_data_as<uint8_t>();
     } else {
-      DCHECK_EQ(validity_buf, nullptr);
+      DCHECK_EQ(validity_buf_, nullptr);
     }
-    DCHECK_NE(data_buf, nullptr);
-    OutputCType* data = data_buf->mutable_data_as<OutputCType>();
+    DCHECK_NE(data_buf_, nullptr);
+    OutputCType* data = data_buf_->mutable_data_as<OutputCType>();
     int64_t inverse = 0;
-    RETURN_NOT_OK(ExecType::template VisitIndices(
-        indices,
+    RETURN_NOT_OK(ExecType::VisitIndices(
+        indices_,
         [&](IndexCType index) {
-          if (ARROW_PREDICT_TRUE(index >= 0 &&
-                                 static_cast<int64_t>(index) < output_length)) {
-            data[index] = static_cast<OutputCType>(inverse);
-            // If many nulls, set validity to true for valid values.
-            if constexpr (likely_many_nulls) {
-              bit_util::SetBitTo(validity, index, true);
-            }
+          if (ARROW_PREDICT_FALSE(index < 0 ||
+                                  static_cast<int64_t>(index) >= output_length_)) {
+            return Status::IndexError("Index out of bounds: ", std::to_string(index));
+          }
+          data[index] = static_cast<OutputCType>(inverse);
+          // If many nulls, set validity to true for valid values.
+          if constexpr (likely_many_nulls) {
+            bit_util::SetBitTo(validity, index, true);
           }
           ++inverse;
           return Status::OK();
@@ -221,11 +230,11 @@ struct InversePermutationImpl {
     // to false if the value is "impossible". The validity buffer is on demand allocated
     // and initialized all-true when the first "impossible" value is seen.
     if constexpr (!likely_many_nulls) {
-      for (int64_t i = 0; i < output_length; ++i) {
-        if (ARROW_PREDICT_FALSE(data[i] == static_cast<OutputCType>(input_length))) {
-          if (ARROW_PREDICT_FALSE(!validity_buf)) {
+      for (int64_t i = 0; i < output_length_; ++i) {
+        if (data[i] == static_cast<OutputCType>(input_length_)) {
+          if (ARROW_PREDICT_FALSE(!validity_buf_)) {
             RETURN_NOT_OK(AllocateValidityBufAndFill(true));
-            validity = validity_buf->mutable_data_as<uint8_t>();
+            validity = validity_buf_->mutable_data_as<uint8_t>();
           }
           bit_util::SetBitTo(validity, i, false);
         }
@@ -234,9 +243,6 @@ struct InversePermutationImpl {
 
     return Status::OK();
   }
-
-  template <typename VISITOR, typename... ARGS>
-  friend Status arrow::VisitTypeInline(const DataType&, VISITOR*, ARGS&&... args);
 };
 
 template <typename Ignored, typename Type>
@@ -312,7 +318,7 @@ void RegisterVectorInversePermutation(FunctionRegistry* registry) {
     kernel.output_chunked = false;
     DCHECK_OK(function->AddKernel(std::move(kernel)));
   };
-  for (const auto& t : IntTypes()) {
+  for (const auto& t : SignedIntTypes()) {
     add_kernel(t->id());
   }
 
@@ -360,20 +366,18 @@ class ScatterMetaFunction : public MetaFunction {
           "Input and indices of scatter must have the same length, got " +
           std::to_string(values.length()) + " and " + std::to_string(indices.length()));
     }
-    if (!is_integer(indices.type()->id())) {
-      return Status::Invalid("Indices of scatter must be of integer type, got ",
-                             indices.type()->ToString());
+    if (!is_signed_integer(indices.type()->id())) {
+      return Status::TypeError("Indices of scatter must be of signed integer type, got ",
+                               indices.type()->ToString());
     }
     // Internally invoke Take(values, InversePermutation(indices)) to implement scatter.
     // For example, with
     //   values = [a, b, c, d, e, f, g]
     //   indices = [null, 0, 3, 2, 4, 1, 1]
     // the InversePermutation(indices) is
-    //   [1, 6, 3]                    if max_index = 2,
-    //   [1, 6, 3, 2, 4, null, null]  if max_index = 6.
+    // [1, 6, 3, 2, 4, null, null]  if max_index = 6.
     // and Take(values, InversePermutation(indices)) is
-    //   [b, g, d]                    if max_index = 2,
-    //   [b, g, d, c, e, null, null]  if max_index = 6.
+    // [b, g, d, c, e, null, null]  if max_index = 6.
     InversePermutationOptions inverse_permutation_options{
         scatter_options->max_index,
         // Use the smallest possible uint type to store inverse permutation.
@@ -388,14 +392,15 @@ class ScatterMetaFunction : public MetaFunction {
  private:
   static std::shared_ptr<DataType> InferSmallestInversePermutationType(
       int64_t input_length) {
-    if (input_length <= std::numeric_limits<uint8_t>::max()) {
-      return uint8();
-    } else if (input_length <= std::numeric_limits<uint16_t>::max()) {
-      return uint16();
-    } else if (input_length <= std::numeric_limits<uint32_t>::max()) {
-      return uint32();
+    DCHECK_GE(input_length, 0);
+    if (input_length <= std::numeric_limits<int8_t>::max()) {
+      return int8();
+    } else if (input_length <= std::numeric_limits<int16_t>::max()) {
+      return int16();
+    } else if (input_length <= std::numeric_limits<int32_t>::max()) {
+      return int32();
     } else {
-      return uint64();
+      return int64();
     }
   }
 };
