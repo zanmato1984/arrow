@@ -955,8 +955,8 @@ struct GrouperFastImpl : public Grouper {
 }  // namespace
 
 Result<std::unique_ptr<Grouper>> Grouper::Make(const std::vector<TypeHolder>& key_types,
-                                               ExecContext* ctx) {
-  if (GrouperFastImpl::CanUse(key_types)) {
+                                               ExecContext* ctx, bool fast) {
+  if (fast && GrouperFastImpl::CanUse(key_types)) {
     return GrouperFastImpl::Make(key_types, ctx);
   }
   return GrouperImpl::Make(key_types, ctx);
