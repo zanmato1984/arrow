@@ -26,6 +26,7 @@
 #include "arrow/acero/exec_plan.h"
 #include "arrow/acero/options.h"
 #include "arrow/array/array_primitive.h"
+#include "arrow/array/concatenate.h"
 #include "arrow/compute/api.h"
 #include "arrow/table.h"
 #include "arrow/testing/generator.h"
@@ -362,14 +363,14 @@ std::shared_ptr<RecordBatch> RecordBatchFromArrays(
 
 Result<std::shared_ptr<Table>> BatchGroupBy(
     std::shared_ptr<RecordBatch> batch, std::vector<Aggregate> aggregates,
-    std::vector<FieldRef> keys, std::vector<FieldRef> segment_keys,
+    std::vector<FieldRef> keys, std::vector<FieldRef> segment_keys, bool fast,
     bool use_threads = false, MemoryPool* memory_pool = default_memory_pool()) {
   ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Table> table,
                         Table::FromRecordBatches({std::move(batch)}));
   Declaration plan = Declaration::Sequence(
       {{"table_source", TableSourceNodeOptions(std::move(table))},
        {"aggregate", AggregateNodeOptions(std::move(aggregates), std::move(keys),
-                                          std::move(segment_keys))}});
+                                          std::move(segment_keys), fast)}});
   return DeclarationToTable(std::move(plan), use_threads, memory_pool);
 }
 
@@ -377,7 +378,7 @@ static void BenchmarkAggregate(
     benchmark::State& state, std::vector<Aggregate> aggregates,
     const std::vector<std::shared_ptr<Array>>& arguments,
     const std::vector<std::shared_ptr<Array>>& keys,
-    const std::vector<std::shared_ptr<Array>>& segment_keys = {}) {
+    const std::vector<std::shared_ptr<Array>>& segment_keys = {}, bool fast = true) {
   std::shared_ptr<RecordBatch> batch =
       RecordBatchFromArrays(arguments, keys, segment_keys);
   std::vector<FieldRef> key_refs;
@@ -395,23 +396,91 @@ static void BenchmarkAggregate(
   }
   int64_t total_bytes = TotalBufferSize(*batch);
   for (auto _ : state) {
-    ABORT_NOT_OK(BatchGroupBy(batch, aggregates, key_refs, segment_key_refs));
+    ABORT_NOT_OK(BatchGroupBy(batch, aggregates, key_refs, segment_key_refs, fast));
   }
   state.SetBytesProcessed(total_bytes * state.iterations());
   state.SetItemsProcessed(batch->num_rows() * state.iterations());
 }
 
-#define GROUP_BY_BENCHMARK(Name, Impl)                               \
-  static void Name(benchmark::State& state) {                        \
-    RegressionArgs args(state, false);                               \
-    auto rng = random::RandomArrayGenerator(1923);                   \
-    (Impl)();                                                        \
-  }                                                                  \
-  BENCHMARK(Name)->Apply([](benchmark::internal::Benchmark* bench) { \
-    BenchmarkSetArgsWithSizes(bench, {1 * 1024 * 1024});             \
+#define GROUP_BY_BENCHMARK(Name, Impl)                                        \
+  static void Name(benchmark::State& state) {                                 \
+    RegressionArgs args(state, false);                                        \
+    auto rng = random::RandomArrayGenerator(1923);                            \
+    (Impl)();                                                                 \
+  }                                                                           \
+  BENCHMARK(Name)->Apply([](benchmark::internal::Benchmark* bench) {          \
+    BenchmarkSetArgsWithSizes(bench, {1000, 10000, 100000, 1 * 1024 * 1024}); \
   })
 
 // Grouped Sum
+
+GROUP_BY_BENCHMARK(SumIntRangeIntKey, [&] {
+  ASSERT_OK_AND_ASSIGN(auto key, gen::Step<int64_t>()->Generate(args.size));
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_sum", ""}}, {summand}, {key}, {}, args.fast);
+});
+
+GROUP_BY_BENCHMARK(SumIntRangeX2IntKey, [&] {
+  ASSERT_OK_AND_ASSIGN(auto range, gen::Step<int64_t>()->Generate(args.size / 2));
+  ASSERT_OK_AND_ASSIGN(auto key, Concatenate({range, range}));
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_sum", ""}}, {summand}, {key}, {}, args.fast);
+});
+
+GROUP_BY_BENCHMARK(SumIntRandomIntKey, [&] {
+  auto key = rng.Int64(args.size,
+                       /*min=*/0,
+                       /*max=*/std::numeric_limits<int64_t>::max(),
+                       /*null_probability=*/0);
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_sum", ""}}, {summand}, {key}, {}, args.fast);
+});
+
+GROUP_BY_BENCHMARK(CountIntRangeIntKey, [&] {
+  ASSERT_OK_AND_ASSIGN(auto key, gen::Step<int64_t>()->Generate(args.size));
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_count", ""}}, {summand}, {key}, {}, args.fast);
+});
+
+GROUP_BY_BENCHMARK(CountIntRangeX2IntKey, [&] {
+  ASSERT_OK_AND_ASSIGN(auto range, gen::Step<int64_t>()->Generate(args.size / 2));
+  ASSERT_OK_AND_ASSIGN(auto key, Concatenate({range, range}));
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_count", ""}}, {summand}, {key}, {}, args.fast);
+});
+
+GROUP_BY_BENCHMARK(CountIntRandomIntKey, [&] {
+  auto key = rng.Int64(args.size,
+                       /*min=*/0,
+                       /*max=*/std::numeric_limits<int64_t>::max(),
+                       /*null_probability=*/0);
+  auto summand = rng.Int64(args.size,
+                           /*min=*/0,
+                           /*max=*/std::numeric_limits<int64_t>::max(),
+                           /*null_probability=*/0);
+
+  BenchmarkAggregate(state, {{"hash_count", ""}}, {summand}, {key}, {}, args.fast);
+});
 
 GROUP_BY_BENCHMARK(SumDoublesGroupedByTinyStringSet, [&] {
   auto summand = rng.Float64(args.size,

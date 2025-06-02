@@ -246,7 +246,7 @@ class GroupByNode : public ExecNode, public TracedNode {
               std::vector<std::vector<TypeHolder>> agg_src_types,
               std::vector<std::vector<int>> agg_src_fieldsets,
               std::vector<Aggregate> aggs,
-              std::vector<const HashAggregateKernel*> agg_kernels)
+              std::vector<const HashAggregateKernel*> agg_kernels, bool fast = true)
       : ExecNode(input->plan(), {input}, {"groupby"}, std::move(output_schema)),
         TracedNode(this),
         segmenter_(std::move(segmenter)),
@@ -256,7 +256,8 @@ class GroupByNode : public ExecNode, public TracedNode {
         agg_src_types_(std::move(agg_src_types)),
         agg_src_fieldsets_(std::move(agg_src_fieldsets)),
         aggs_(std::move(aggs)),
-        agg_kernels_(std::move(agg_kernels)) {}
+        agg_kernels_(std::move(agg_kernels)),
+        fast_(fast) {}
 
   Status Init() override;
 
@@ -348,6 +349,7 @@ class GroupByNode : public ExecNode, public TracedNode {
   /// \brief Total number of output batches produced
   int total_output_batches_ = 0;
 
+  bool fast_;
   std::vector<ThreadLocalState> local_states_;
   ExecBatch out_data_;
 };
