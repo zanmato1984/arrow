@@ -52,7 +52,6 @@ constexpr std::string_view kBaseDir = "";
 using arrow::internal::checked_pointer_cast;
 
 namespace arrow {
-
 namespace dataset {
 
 struct EncryptionTestParam {
