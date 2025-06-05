@@ -33,7 +33,6 @@ namespace arrow {
 
 using internal::checked_pointer_cast;
 
-using compute::ComputeKernelEnvironment;
 using compute::SortKey;
 using compute::SortOrder;
 

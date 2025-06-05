@@ -34,12 +34,7 @@
 
 namespace arrow {
 
-using compute::ComputeKernelEnvironment;
 using compute::ExecBatchFromJSON;
-
-// Initialize the compute module
-::testing::Environment* compute_kernels_env =
-    ::testing::AddGlobalTestEnvironment(new ComputeKernelEnvironment);
 
 namespace acero {
 

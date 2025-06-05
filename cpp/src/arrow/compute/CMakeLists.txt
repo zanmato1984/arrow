@@ -35,7 +35,11 @@ endif()
 
 # Define arrow_compute_testing object library for common test files
 if(ARROW_TESTING)
-  add_library(arrow_compute_testing OBJECT test_util_internal.cc)
+  set(ARROW_COMPUTE_TESTING_SRCS test_util_internal.cc)
+  if(ARROW_COMPUTE)
+    list(APPEND ARROW_COMPUTE_TESTING_SRCS test_env.cc)
+  endif()
+  add_library(arrow_compute_testing OBJECT ${ARROW_COMPUTE_TESTING_SRCS})
   # Even though this is still just an object library we still need to "link" our
   # dependencies so that include paths are configured correctly
   target_link_libraries(arrow_compute_testing PUBLIC ${ARROW_GTEST_GMOCK})

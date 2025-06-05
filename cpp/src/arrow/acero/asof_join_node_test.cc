@@ -70,15 +70,10 @@ using testing::UnorderedElementsAreArray;
 namespace arrow {
 
 using compute::Cast;
-using compute::ComputeKernelEnvironment;
 using compute::Divide;
 using compute::ExecBatchFromJSON;
 using compute::Multiply;
 using compute::Subtract;
-
-// Initialize the compute module
-::testing::Environment* compute_kernels_env =
-    ::testing::AddGlobalTestEnvironment(new ComputeKernelEnvironment);
 
 namespace acero {
 
