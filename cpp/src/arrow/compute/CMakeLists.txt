@@ -33,16 +33,23 @@ else()
   set(ARROW_COMPUTE_TEST_LINK_LIBS arrow_compute_shared ${ARROW_TEST_SHARED_LINK_LIBS})
 endif()
 
-# Define arrow_compute_testing object library for common test files
+# Define arrow_compute_core_testing object library for common test files requiring
+# only core compute. No extra kernels are required.
 if(ARROW_TESTING)
-  set(ARROW_COMPUTE_TESTING_SRCS test_util_internal.cc)
-  if(ARROW_COMPUTE)
-    list(APPEND ARROW_COMPUTE_TESTING_SRCS test_env.cc)
-  endif()
-  add_library(arrow_compute_testing OBJECT ${ARROW_COMPUTE_TESTING_SRCS})
+  add_library(arrow_compute_core_testing OBJECT test_util_internal.cc)
   # Even though this is still just an object library we still need to "link" our
   # dependencies so that include paths are configured correctly
-  target_link_libraries(arrow_compute_testing PUBLIC ${ARROW_GTEST_GMOCK})
+  target_link_libraries(arrow_compute_core_testing PUBLIC ${ARROW_GTEST_GMOCK})
+endif()
+
+# Define arrow_compute_testing object library for test files requiring extra kernels.
+if(ARROW_TESTING AND ARROW_COMPUTE)
+  set(ARROW_COMPUTE_TESTING_SRCS test_env.cc)
+  add_library(arrow_compute_testing OBJECT ${ARROW_COMPUTE_TESTING_SRCS})
+  # Even though this is still just an object library we still need to "link"
+  # arrow_compute_core_testing so that is also included correctly
+  target_link_libraries(arrow_compute_testing
+                        PUBLIC $<TARGET_OBJECTS:arrow_compute_core_testing>)
 endif()
 
 set(ARROW_COMPUTE_TEST_PREFIX "arrow-compute")
@@ -108,7 +115,7 @@ add_arrow_test(internals_test
                kernel_test.cc
                registry_test.cc
                EXTRA_LINK_LIBS
-               arrow_compute_testing)
+               arrow_compute_core_testing)
 
 add_arrow_compute_test(expression_test
                        SOURCES
@@ -126,7 +133,7 @@ add_arrow_compute_test(row_test
                        row/row_test.cc
                        util_internal_test.cc
                        EXTRA_LINK_LIBS
-                       arrow_compute_testing)
+                       arrow_compute_core_testing)
 
 add_arrow_benchmark(function_benchmark PREFIX "arrow-compute")
 
