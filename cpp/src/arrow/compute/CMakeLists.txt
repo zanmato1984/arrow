@@ -49,7 +49,8 @@ if(ARROW_TESTING AND ARROW_COMPUTE)
   # Even though this is still just an object library we still need to "link"
   # arrow_compute_core_testing so that is also included correctly
   target_link_libraries(arrow_compute_testing
-                        PUBLIC $<TARGET_OBJECTS:arrow_compute_core_testing>)
+                        PUBLIC $<TARGET_OBJECTS:arrow_compute_core_testing>
+                        PUBLIC ${ARROW_GTEST_GTEST_MAIN})
 endif()
 
 set(ARROW_COMPUTE_TEST_PREFIX "arrow-compute")
