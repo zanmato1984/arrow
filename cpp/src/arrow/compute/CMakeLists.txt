@@ -134,7 +134,7 @@ add_arrow_compute_test(row_test
                        row/row_test.cc
                        util_internal_test.cc
                        EXTRA_LINK_LIBS
-                       arrow_compute_core_testing)
+                       arrow_compute_testing)
 
 add_arrow_benchmark(function_benchmark PREFIX "arrow-compute")
 
