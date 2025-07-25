@@ -141,14 +141,36 @@ class ARROW_EXPORT SelectionVector {
   explicit SelectionVector(const Array& arr);
 
   /// \brief Create SelectionVector from boolean mask
-  static Result<std::shared_ptr<SelectionVector>> FromMask(const BooleanArray& arr);
+  static Result<std::shared_ptr<SelectionVector>> FromMask(
+      const BooleanArray& arr, MemoryPool* pool = default_memory_pool());
 
+  std::shared_ptr<ArrayData> data() const { return data_; }
   const int32_t* indices() const { return indices_; }
-  int32_t length() const;
+  int64_t length() const;
 
  private:
   std::shared_ptr<ArrayData> data_;
   const int32_t* indices_;
+};
+
+class ARROW_EXPORT SelectionVectorSpan {
+ public:
+  explicit SelectionVectorSpan(const int32_t* indices = NULLPTR, int64_t length = 0,
+                               int64_t offset = 0)
+      : indices_(indices), length_(length), offset_(offset) {}
+
+  void SetSlice(int64_t offset, int64_t length);
+
+  const int32_t* indices() const { return indices_ + offset_; }
+
+  int64_t length() const { return length_; }
+
+  int64_t offset() const { return offset_; }
+
+ private:
+  const int32_t* indices_;
+  int64_t length_;
+  int64_t offset_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
@@ -173,8 +195,11 @@ constexpr int64_t kUnsequencedIndex = -1;
 
 struct ARROW_EXPORT ExecBatch {
   ExecBatch() = default;
-  ExecBatch(std::vector<Datum> values, int64_t length)
-      : values(std::move(values)), length(length) {}
+  ExecBatch(std::vector<Datum> values, int64_t length,
+            std::shared_ptr<SelectionVector> selection_vector = NULLPTR)
+      : values(std::move(values)),
+        length(length),
+        selection_vector(std::move(selection_vector)) {}
 
   explicit ExecBatch(const RecordBatch& batch);
 
@@ -196,13 +221,6 @@ struct ARROW_EXPORT ExecBatch {
   /// exec function for processing.
   std::vector<Datum> values;
 
-  /// A deferred filter represented as an array of indices into the values.
-  ///
-  /// For example, the filter [true, true, false, true] would be represented as
-  /// the selection vector [0, 1, 3]. When the selection vector is set,
-  /// ExecBatch::length is equal to the length of this array.
-  std::shared_ptr<SelectionVector> selection_vector;
-
   /// A predicate Expression guaranteed to evaluate to true for all rows in this batch.
   Expression guarantee = literal(true);
 
@@ -217,6 +235,13 @@ struct ARROW_EXPORT ExecBatch {
   /// If the array values are of length 0 then the length is 0 regardless of
   /// whether any values are Scalar.
   int64_t length = 0;
+
+  /// A deferred filter represented as an array of indices into the values.
+  ///
+  /// For example, the filter [true, true, false, true] would be represented as
+  /// the selection vector [0, 1, 3]. When the selection vector is set,
+  /// ExecBatch::length is equal to the length of this array.
+  std::shared_ptr<SelectionVector> selection_vector;
 
   /// \brief index of this batch in a sorted stream of batches
   ///
@@ -422,6 +447,7 @@ struct ARROW_EXPORT ExecSpan {
 
   int64_t length = 0;
   std::vector<ExecValue> values;
+  SelectionVectorSpan selection_vector;
 };
 
 /// \defgroup compute-call-function One-shot calls to compute functions
