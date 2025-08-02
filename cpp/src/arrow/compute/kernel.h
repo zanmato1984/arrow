@@ -542,8 +542,6 @@ struct ARROW_EXPORT Kernel {
   /// so that the most optimized kernel supported on a host's processor can be chosen.
   SimdLevel::type simd_level = SimdLevel::NONE;
 
-  bool selection_vector_aware = false;
-
   // Additional kernel-specific data
   std::shared_ptr<KernelState> data;
 };
