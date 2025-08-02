@@ -195,11 +195,11 @@ class IfElseSpecialFormTest : public ::testing::Test {
   static Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
                                           ExecResult* out) {
     if constexpr (sv_existence) {
-      if (!span.selection_vector.indices()) {
+      if (!span.selection_vector->indices()) {
         return Status::Invalid("There is no selection vector");
       }
     } else {
-      if (span.selection_vector.indices()) {
+      if (span.selection_vector->indices()) {
         return Status::Invalid("There is a selection vector");
       }
     }
@@ -1016,7 +1016,7 @@ Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out)
   DCHECK(out->is_array_span());
   DCHECK_EQ(out->length(), 1);
   if constexpr (!selection_vector_aware) {
-    if (span.selection_vector.length() > 0) {
+    if (span.selection_vector->length() > 0) {
       return Status::Invalid("There is a selection vector");
     }
   }
