@@ -739,10 +739,8 @@ struct ConditionalExecutor {
   Result<std::shared_ptr<const BodyMask>> ApplyCond(
       const std::shared_ptr<const BranchMask>& branch_mask, const Expression& cond,
       const ExecBatch& input, ExecContext* exec_context) const {
-    if (cond.selection_vector_aware()) {
-      return branch_mask->ApplyCondSparse(cond, input, exec_context);
-    }
-    return branch_mask->ApplyCondDense(cond, input, exec_context);
+    return branch_mask->ApplyCondSparse(cond, input, exec_context);
+    // return branch_mask->ApplyCondDense(cond, input, exec_context);
   }
 
  protected:
@@ -940,9 +938,6 @@ class IfElseSpecialExec : public SpecialExec {
     DCHECK_EQ(type, *if_true.type());
     DCHECK_EQ(type, *if_false.type());
 
-    all_bodies_selection_vector_aware =
-        if_true.selection_vector_aware() && if_false.selection_vector_aware();
-
     branches[0] = {cond, if_true};
     branches[1] = {literal(true), if_false};
 
@@ -951,11 +946,8 @@ class IfElseSpecialExec : public SpecialExec {
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    // if (all_bodies_selection_vector_aware) {
-      return SparseConditionalExecutor(branches, type).Execute(input, exec_context);
-    // } else {
-    //   return DenseConditionalExecutor(branches, type).Execute(input, exec_context);
-    // }
+    return SparseConditionalExecutor(branches, type).Execute(input, exec_context);
+    // return DenseConditionalExecutor(branches, type).Execute(input, exec_context);
   }
 
  private:
@@ -965,14 +957,12 @@ class IfElseSpecialExec : public SpecialExec {
 
   // Post-bind, for Execute.
   TypeHolder type;
-  bool all_bodies_selection_vector_aware;
   std::vector<Branch> branches;
 };
 
 class IfElseSpecialForm : public SpecialForm {
  public:
-  IfElseSpecialForm()
-      : SpecialForm(/*name=*/"if_else", /*selection_vector_aware=*/true) {}
+  IfElseSpecialForm() : SpecialForm(/*name=*/"if_else") {}
 
   Result<std::unique_ptr<SpecialExec>> DispatchExact(
       const std::vector<TypeHolder>& types, ExecContext* exec_context) const override {

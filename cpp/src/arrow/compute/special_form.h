@@ -32,8 +32,7 @@ class ARROW_EXPORT SpecialExec {
 
 class ARROW_EXPORT SpecialForm {
  public:
-  explicit SpecialForm(std::string name, bool selection_vector_aware = false)
-      : name(std::move(name)), selection_vector_aware(selection_vector_aware) {}
+  explicit SpecialForm(std::string name) : name(std::move(name)) {}
 
   virtual ~SpecialForm() = default;
 
@@ -45,7 +44,6 @@ class ARROW_EXPORT SpecialForm {
 
  public:
   const std::string name;
-  const bool selection_vector_aware = false;
 };
 
 std::shared_ptr<SpecialForm> GetIfElseSpecialForm();
