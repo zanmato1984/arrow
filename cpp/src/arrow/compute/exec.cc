@@ -451,6 +451,8 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
           span->selection_vector = SelectionVectorSpan(selection_vector_->indices(),
                                                        selection_vector_->length());
         }
+      } else {
+        span->selection_vector = std::nullopt;
       }
     }
 
@@ -466,7 +468,7 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
     iteration_size = GetNextChunkSpan(iteration_size, span);
     if (selection_vector_) {
       auto indices_begin =
-          span->selection_vector.indices() + span->selection_vector.length();
+          span->selection_vector->indices() + span->selection_vector->length();
       auto indices_end = selection_vector_->indices() + selection_vector_->length();
       DCHECK_LE(indices_begin, indices_end);
       auto chunk_row_id_end = position_ + iteration_size;
@@ -475,7 +477,7 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
              *(indices_begin + num_indices) < chunk_row_id_end) {
         ++num_indices;
       }
-      span->selection_vector.SetSlice(span->selection_vector.length(), num_indices);
+      span->selection_vector->SetSlice(span->selection_vector->length(), num_indices);
     }
   }
 
@@ -806,8 +808,6 @@ class KernelExecutorImpl : public KernelExecutor {
 class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
  public:
   Status Execute(const ExecBatch& batch, ExecListener* listener) override {
-    RETURN_NOT_OK(span_iterator_.Init(batch, exec_context()->exec_chunksize()));
-
     if (batch.length == 0) {
       // For zero-length batches, we do nothing except return a zero-length
       // array of the correct output type
@@ -816,6 +816,31 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
                                             exec_context()->memory_pool()));
       return EmitResult(result->data(), listener);
     }
+
+    if (!batch.selection_vector || kernel_->selective_exec) {
+      return ExecuteSparse(batch, listener);
+    }
+
+    return ExecuteDense(batch, listener);
+  }
+
+  Datum WrapResults(const std::vector<Datum>& inputs,
+                    const std::vector<Datum>& outputs) override {
+    // If execution yielded multiple chunks (because large arrays were split
+    // based on the ExecContext parameters, then the result is a ChunkedArray
+    if (HaveChunkedArray(inputs) || outputs.size() > 1) {
+      return ToChunkedArray(outputs, output_type_);
+    } else {
+      // Outputs have just one element
+      return outputs[0];
+    }
+  }
+
+ protected:
+  Status ExecuteSparse(const ExecBatch& batch, ExecListener* listener) {
+    DCHECK(!batch.selection_vector || kernel_->selective_exec);
+
+    RETURN_NOT_OK(span_iterator_.Init(batch, exec_context()->exec_chunksize()));
 
     // If the executor is configured to produce a single large Array output for
     // kernels supporting preallocation, then we do so up front and then
@@ -836,19 +861,47 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Datum WrapResults(const std::vector<Datum>& inputs,
-                    const std::vector<Datum>& outputs) override {
-    // If execution yielded multiple chunks (because large arrays were split
-    // based on the ExecContext parameters, then the result is a ChunkedArray
-    if (HaveChunkedArray(inputs) || outputs.size() > 1) {
-      return ToChunkedArray(outputs, output_type_);
-    } else {
-      // Outputs have just one element
-      return outputs[0];
+  Status ExecuteDense(const ExecBatch& batch, ExecListener* listener) {
+    DCHECK(batch.selection_vector && !kernel_->selective_exec);
+
+    if (CheckIfAllScalar(batch)) {
+      ExecBatch input = batch;
+      input.selection_vector = nullptr;
+      return ExecuteSparse(input, listener);
     }
+
+    std::vector<Datum> values(batch.num_values());
+    for (int i = 0; i < batch.num_values(); ++i) {
+      if (batch[i].is_scalar()) {
+        // Skip Take for scalars since it is not currently supported.
+        values[i] = batch[i];
+        continue;
+      }
+      ARROW_ASSIGN_OR_RAISE(values[i],
+                            Take(batch[i], *batch.selection_vector->data(),
+                                 TakeOptions{/*boundcheck=*/false}, exec_context()));
+    }
+    ExecBatch input;
+    ARROW_ASSIGN_OR_RAISE(
+        input, ExecBatch::Make(std::move(values), batch.selection_vector->length()));
+
+    DatumAccumulator dense_listener;
+    RETURN_NOT_OK(ExecuteSparse(input, &dense_listener));
+    auto dense_results = dense_listener.values();
+
+    Datum dense_datum;
+    if (dense_results.size() > 1) {
+      dense_datum = ToChunkedArray(dense_results, output_type_);
+    } else {
+      dense_datum = dense_results[0];
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto result,
+                          Scatter(dense_datum, *batch.selection_vector->data(),
+                                  ScatterOptions{/*max_index=*/batch.length - 1}));
+    return listener->OnResult(std::move(result));
   }
 
- protected:
   Status EmitResult(std::shared_ptr<ArrayData> out, ExecListener* listener) {
     if (span_iterator_.have_all_scalars()) {
       // ARROW-16757 We boxed scalar inputs as ArraySpan, so now we have to
@@ -913,7 +966,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     } else if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
       result_span->null_count = 0;
     }
-    RETURN_NOT_OK(kernel_->exec(kernel_ctx_, input, out));
+    RETURN_NOT_OK(InvokeKernel(input, out));
     // Output type didn't change
     DCHECK(out->is_array_span());
     return Status::OK();
@@ -942,7 +995,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         out_arr->null_count = 0;
       }
 
-      RETURN_NOT_OK(kernel_->exec(kernel_ctx_, input, &output));
+      RETURN_NOT_OK(InvokeKernel(input, &output));
 
       // Output type didn't change
       DCHECK(output.is_array_data());
@@ -1006,6 +1059,14 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         (exec_context()->preallocate_contiguous() && kernel_->can_write_into_slices &&
          preallocating_all_buffers_);
     return Status::OK();
+  }
+
+  Status InvokeKernel(const ExecSpan& input, ExecResult* out) {
+    if (input.selection_vector) {
+      DCHECK_NE(kernel_->selective_exec, nullptr);
+      return kernel_->selective_exec(kernel_ctx_, input, out);
+    }
+    return kernel_->exec(kernel_ctx_, input, out);
   }
 
   // Used to account for the case where we do not preallocate a
