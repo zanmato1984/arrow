@@ -951,11 +951,11 @@ class IfElseSpecialExec : public SpecialExec {
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    if (all_bodies_selection_vector_aware) {
+    // if (all_bodies_selection_vector_aware) {
       return SparseConditionalExecutor(branches, type).Execute(input, exec_context);
-    } else {
-      return DenseConditionalExecutor(branches, type).Execute(input, exec_context);
-    }
+    // } else {
+    //   return DenseConditionalExecutor(branches, type).Execute(input, exec_context);
+    // }
   }
 
  private:

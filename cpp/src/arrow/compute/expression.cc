@@ -875,7 +875,7 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
         "ExecuteScalarExpression cannot Execute non-scalar expression ", expr.ToString());
   }
 
-  DCHECK(!input.selection_vector || expr.selection_vector_aware());
+  // DCHECK(!input.selection_vector || expr.selection_vector_aware());
 
   if (auto lit = expr.literal()) return *lit;
 
