@@ -90,7 +90,6 @@ Expression if_else_regular(Expression cond, Expression if_true, Expression if_fa
   return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
 Expression unreachable(Expression arg) { return call("unreachable", {std::move(arg)}); }
-Expression sv_aware(Expression arg) { return call("sv_aware", {std::move(arg)}); }
 Expression sv_suppress(Expression arg) { return call("sv_suppress", {std::move(arg)}); }
 Expression assert_sv_exist(Expression arg) {
   return call("assert_sv_exist", {std::move(arg)});
@@ -195,11 +194,11 @@ class IfElseSpecialFormTest : public ::testing::Test {
   static Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
                                           ExecResult* out) {
     if constexpr (sv_existence) {
-      if (!span.selection_vector->indices()) {
+      if (!span.selection_vector) {
         return Status::Invalid("There is no selection vector");
       }
     } else {
-      if (span.selection_vector->indices()) {
+      if (span.selection_vector) {
         return Status::Invalid("There is a selection vector");
       }
     }
@@ -215,7 +214,6 @@ class IfElseSpecialFormTest : public ::testing::Test {
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
         ScalarKernel kernel({InputType::Any()}, internal::FirstType, UnreachableExec);
-        kernel.selection_vector_aware = true;
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
         kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
@@ -234,7 +232,6 @@ class IfElseSpecialFormTest : public ::testing::Test {
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
         ScalarKernel kernel({InputType::Any()}, internal::FirstType, IdentityExec);
-        kernel.selection_vector_aware = sv_awareness;
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
         kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
@@ -243,7 +240,6 @@ class IfElseSpecialFormTest : public ::testing::Test {
         return Status::OK();
       };
 
-      RETURN_NOT_OK(register_sv_awareness_func("sv_aware", true));
       RETURN_NOT_OK(register_sv_awareness_func("sv_suppress", false));
     }
 
@@ -253,14 +249,13 @@ class IfElseSpecialFormTest : public ::testing::Test {
         auto func =
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-        ArrayKernelExec exec;
+        ArrayKernelExec exec = AssertSelectionVectorExec<false>;
+        ArrayKernelSelectiveExec selective_exec = nullptr;
         if (sv_existence) {
-          exec = AssertSelectionVectorExec<true>;
-        } else {
-          exec = AssertSelectionVectorExec<false>;
+          selective_exec = AssertSelectionVectorExec<true>;
         }
-        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec));
-        kernel.selection_vector_aware = true;
+        ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec),
+                            /*init=*/nullptr, std::move(selective_exec));
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
         kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
@@ -330,29 +325,6 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
                                 "Invalid: Unreachable");
   }
   {
-    ARROW_SCOPED_TRACE("selection vector awareness");
-    {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(a).Bind(*schema));
-      ASSERT_TRUE(bound.selection_vector_aware());
-    }
-    {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_suppress(a).Bind(*schema));
-      ASSERT_FALSE(bound.selection_vector_aware());
-    }
-    {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_aware(a)).Bind(*schema));
-      ASSERT_TRUE(bound.selection_vector_aware());
-    }
-    {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_aware(sv_suppress(a)).Bind(*schema));
-      ASSERT_FALSE(bound.selection_vector_aware());
-    }
-    {
-      ASSERT_OK_AND_ASSIGN(auto bound, sv_suppress(sv_aware(a)).Bind(*schema));
-      ASSERT_FALSE(bound.selection_vector_aware());
-    }
-  }
-  {
     ARROW_SCOPED_TRACE("assert selection vector existence");
     {
       ARROW_SCOPED_TRACE("if (a) then a else a");
@@ -368,14 +340,12 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       {
         auto if_else_sp =
             if_else_special(cond, sv_suppress(if_true), assert_sv_exist(if_false));
-        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
-                                    "Invalid: There is no selection vector");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
         auto if_else_sp =
             if_else_special(cond, assert_sv_exist(if_true), sv_suppress(if_false));
-        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
-                                    "Invalid: There is no selection vector");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
         auto if_else_sp =
@@ -389,13 +359,11 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       }
       {
         auto if_else_sp = if_else_special(cond, assert_sv_empty(if_true), if_false);
-        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
-                                    "Invalid: There is a selection vector");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
         auto if_else_sp = if_else_special(cond, if_true, assert_sv_empty(if_false));
-        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
-                                    "Invalid: There is a selection vector");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
     }
     {
@@ -406,43 +374,12 @@ TEST_F(IfElseSpecialFormTest, AuxilaryFunction) {
       auto expected = ArrayFromJSON(boolean(), "[null, true, false]");
       {
         auto if_else_sp = if_else_special(cond, assert_sv_exist(if_true), if_false);
-        AssertExprRaisesWithMessage(if_else_sp, schema, batch, Invalid,
-                                    "Invalid: There is no selection vector");
+        AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
       {
         auto if_else_sp = if_else_special(cond, assert_sv_empty(if_true), if_false);
         AssertExprEqualIgnoreShape(if_else_sp, schema, batch, expected);
       }
-    }
-  }
-}
-
-TEST_F(IfElseSpecialFormTest, SelectionVectorAwareness) {
-  {
-    ARROW_SCOPED_TRACE("literal");
-    ASSERT_TRUE(kBooleanNull.selection_vector_aware());
-    ASSERT_TRUE(kIntNull.selection_vector_aware());
-  }
-  {
-    ARROW_SCOPED_TRACE("field ref");
-    auto schema = arrow::schema({field("a", int32())});
-    ASSERT_OK_AND_ASSIGN(auto bound, field_ref("a").Bind(*schema));
-    ASSERT_TRUE(bound.selection_vector_aware());
-  }
-  {
-    ARROW_SCOPED_TRACE("if else special");
-    auto schema = arrow::schema({});
-    auto cond = literal(true);
-    auto if_true = literal(1);
-    auto if_false = literal(0);
-    for (const auto& if_else_sp :
-         {if_else_special(cond, if_true, if_false),
-          if_else_special(sv_suppress(cond), if_true, if_false),
-          if_else_special(cond, sv_suppress(if_true), if_false),
-          if_else_special(cond, if_true, sv_suppress(if_false))}) {
-      ARROW_SCOPED_TRACE(if_else_sp.ToString());
-      ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema));
-      ASSERT_TRUE(bound.selection_vector_aware());
     }
   }
 }
@@ -658,7 +595,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
         auto if_else_sp =
             if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-        ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
@@ -666,7 +602,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
         auto if_else_sp =
             if_else_special(b, assert_sv_exist(i), assert_sv_empty(literal(0)));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-        ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
@@ -674,14 +609,12 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
         auto if_else_sp =
             if_else_special(b, assert_sv_empty(literal(1)), assert_sv_exist(i));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-        ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
       {
         ARROW_SCOPED_TRACE("all array bodies");
         auto if_else_sp = if_else_special(b, assert_sv_exist(i), assert_sv_exist(i));
         ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-        ASSERT_TRUE(bound.selection_vector_aware());
         ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
       }
     }
@@ -694,7 +627,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
       auto if_else_sp =
           if_else_special(b, assert_sv_empty(literal(1)), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
@@ -702,7 +634,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
       auto if_else_sp =
           if_else_special(b, assert_sv_exist(i), assert_sv_empty(literal(0)));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
@@ -710,14 +641,12 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
       auto if_else_sp =
           if_else_special(b, assert_sv_empty(literal(1)), assert_sv_exist(i));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
       ARROW_SCOPED_TRACE("all array bodies");
       auto if_else_sp = if_else_special(b, assert_sv_exist(i), assert_sv_exist(i));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
   }
@@ -733,7 +662,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
           assert_sv_exist(if_else_special(assert_sv_exist(b), assert_sv_exist(i),
                                           assert_sv_exist(i))));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
     {
@@ -749,7 +677,6 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
                                               assert_sv_exist(i))),
               assert_sv_exist(i))));
       ASSERT_OK_AND_ASSIGN(auto bound, if_else_sp.Bind(*schema, &exec_context));
-      ASSERT_TRUE(bound.selection_vector_aware());
       ASSERT_OK(ExecuteScalarExpression(bound, batch, &exec_context));
     }
   }
@@ -1008,79 +935,79 @@ TEST_F(IfElseSpecialFormTest, NestedComplex) {
 
 // TODO: ChunkedArray.
 
-namespace {
-template <bool selection_vector_aware>
-Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
-  DCHECK_EQ(span.num_values(), 1);
-  DCHECK_EQ(span.length, 1);
-  DCHECK(out->is_array_span());
-  DCHECK_EQ(out->length(), 1);
-  if constexpr (!selection_vector_aware) {
-    if (span.selection_vector->length() > 0) {
-      return Status::Invalid("There is a selection vector");
-    }
-  }
-  int32_t* out_values = out->array_span_mutable()->GetValues<int32_t>(1);
-  *out_values = 0;
-  return Status::OK();
-}
+// namespace {
+// template <bool selection_vector_aware>
+// Status ConstantKernelExec(KernelContext*, const ExecSpan& span, ExecResult* out) {
+//   DCHECK_EQ(span.num_values(), 1);
+//   DCHECK_EQ(span.length, 1);
+//   DCHECK(out->is_array_span());
+//   DCHECK_EQ(out->length(), 1);
+//   if constexpr (!selection_vector_aware) {
+//     if (span.selection_vector->length() > 0) {
+//       return Status::Invalid("There is a selection vector");
+//     }
+//   }
+//   int32_t* out_values = out->array_span_mutable()->GetValues<int32_t>(1);
+//   *out_values = 0;
+//   return Status::OK();
+// }
 
-static Status RegisterConstantFunctions() {
-  auto registry = GetFunctionRegistry();
+// static Status RegisterConstantFunctions() {
+//   auto registry = GetFunctionRegistry();
 
-  auto register_test_func = [&](const std::string& name,
-                                bool selection_vector_aware) -> Status {
-    auto zero =
-        std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
+//   auto register_test_func = [&](const std::string& name,
+//                                 bool selection_vector_aware) -> Status {
+//     auto zero =
+//         std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-    ArrayKernelExec exec;
-    if (selection_vector_aware) {
-      exec = ConstantKernelExec<true>;
-    } else {
-      exec = ConstantKernelExec<false>;
-    }
-    ScalarKernel kernel({InputType::Any()}, OutputType{int32()}, std::move(exec));
-    kernel.selection_vector_aware = selection_vector_aware;
-    kernel.can_write_into_slices = true;
-    kernel.null_handling = NullHandling::OUTPUT_NOT_NULL;
-    kernel.mem_allocation = MemAllocation::PREALLOCATE;
-    RETURN_NOT_OK(zero->AddKernel(kernel));
-    RETURN_NOT_OK(registry->AddFunction(std::move(zero)));
-    return Status::OK();
-  };
+//     ArrayKernelExec exec;
+//     if (selection_vector_aware) {
+//       exec = ConstantKernelExec<true>;
+//     } else {
+//       exec = ConstantKernelExec<false>;
+//     }
+//     ScalarKernel kernel({InputType::Any()}, OutputType{int32()}, std::move(exec));
+//     kernel.selection_vector_aware = selection_vector_aware;
+//     kernel.can_write_into_slices = true;
+//     kernel.null_handling = NullHandling::OUTPUT_NOT_NULL;
+//     kernel.mem_allocation = MemAllocation::PREALLOCATE;
+//     RETURN_NOT_OK(zero->AddKernel(kernel));
+//     RETURN_NOT_OK(registry->AddFunction(std::move(zero)));
+//     return Status::OK();
+//   };
 
-  RETURN_NOT_OK(register_test_func("zero_panic", false));
-  RETURN_NOT_OK(register_test_func("zero_calm", true));
+//   RETURN_NOT_OK(register_test_func("zero_panic", false));
+//   RETURN_NOT_OK(register_test_func("zero_calm", true));
 
-  return Status::OK();
-}
+//   return Status::OK();
+// }
 
-}  // namespace
+// }  // namespace
 
-TEST(IfElseSpecialForm, Reference) {
-  ASSERT_OK(RegisterConstantFunctions());
+// TEST(IfElseSpecialForm, Reference) {
+//   ASSERT_OK(RegisterConstantFunctions());
 
-  auto schema = arrow::schema({field("a", int32()), field("b", int32())});
-  std::vector<ExecBatch> batches = {
-      ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
-      ExecBatch(*RecordBatchFromJSON(schema, R"([
-            [1, 0],
-            [1, 0],
-            [1, 0]
-          ])")),
-      ExecBatch(*RecordBatchFromJSON(schema, R"([
-            [1, 0],
-            [null, 0],
-            [1, null]
-          ])")),
-  };
-  for (const auto& batch : batches) {
-    auto expr = call("zero_panic", {literal(42)});
-    ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schema));
-    ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
-    std::cout << result.ToString() << std::endl;
-  }
-  // TODO: The result shape of exec_chunksize, chunked input, and preallocate.
-}
+//   auto schema = arrow::schema({field("a", int32()), field("b", int32())});
+//   std::vector<ExecBatch> batches = {
+//       ExecBatch(*RecordBatchFromJSON(schema, R"([])")),
+//       ExecBatch(*RecordBatchFromJSON(schema, R"([
+//             [1, 0],
+//             [1, 0],
+//             [1, 0]
+//           ])")),
+//       ExecBatch(*RecordBatchFromJSON(schema, R"([
+//             [1, 0],
+//             [null, 0],
+//             [1, null]
+//           ])")),
+//   };
+//   for (const auto& batch : batches) {
+//     auto expr = call("zero_panic", {literal(42)});
+//     ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schema));
+//     ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, batch));
+//     std::cout << result.ToString() << std::endl;
+//   }
+//   // TODO: The result shape of exec_chunksize, chunked input, and preallocate.
+// }
 
 }  // namespace arrow::compute

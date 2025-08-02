@@ -152,20 +152,6 @@ const DataType* Expression::type() const {
   return CallNotNull(*this)->type.type;
 }
 
-bool Expression::selection_vector_aware() const {
-  DCHECK(IsBound());
-
-  if (literal() || field_ref()) {
-    return true;
-  }
-
-  if (auto special = this->special()) {
-    return special->selection_vector_aware;
-  }
-
-  return CallNotNull(*this)->selection_vector_aware;
-}
-
 namespace {
 
 std::string PrintDatum(const Datum& datum) {
@@ -681,11 +667,6 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
       kernel_context.SetState(call.kernel_state.get());
     }
 
-    call.selection_vector_aware =
-        call.kernel->selection_vector_aware &&
-        std::all_of(call.arguments.begin(), call.arguments.end(),
-                    [](const Expression& arg) { return arg.selection_vector_aware(); });
-
     ARROW_ASSIGN_OR_RAISE(
         call.type, call.kernel->signature->out_type().Resolve(&kernel_context, types));
     return Status::OK();
@@ -713,10 +694,6 @@ Result<Expression> BindNonRecursive(Expression::Special special,
   auto FinishBind = [&](const std::vector<TypeHolder>& types,
                         std::unique_ptr<SpecialExec>&& special_exec) {
     special.special_exec = std::move(special_exec);
-
-    // Selection vector awareness-es of the subexpressions is fully taken over by the
-    // special form so not recursive.
-    special.selection_vector_aware = special.special_form->selection_vector_aware;
 
     ARROW_ASSIGN_OR_RAISE(special.type,
                           special.special_exec->Bind(special.arguments, exec_context));
@@ -874,8 +851,6 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
     return Status::Invalid(
         "ExecuteScalarExpression cannot Execute non-scalar expression ", expr.ToString());
   }
-
-  // DCHECK(!input.selection_vector || expr.selection_vector_aware());
 
   if (auto lit = expr.literal()) return *lit;
 
