@@ -27,7 +27,6 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
-#include "arrow/array/builder_primitive.h"
 #include "arrow/array/data.h"
 #include "arrow/array/util.h"
 #include "arrow/buffer.h"
