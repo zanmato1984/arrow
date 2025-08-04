@@ -406,7 +406,7 @@ int64_t ExecSpanIterator::GetNextChunkSpan(int64_t iteration_size, ExecSpan* spa
   return iteration_size;
 }
 
-bool ExecSpanIterator::Next(ExecSpan* span) {
+bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span) {
   if (!initialized_) {
     span->length = 0;
 
@@ -445,14 +445,15 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
       PromoteExecSpanScalars(span);
     } else {
       if (selection_vector_) {
+        DCHECK_NE(selection_span, nullptr);
         if (have_chunked_arrays_) {
-          span->selection_vector = SelectionVectorSpan(selection_vector_->indices(), 0);
+          *selection_span = SelectionVectorSpan(selection_vector_->indices(), 0);
         } else {
-          span->selection_vector = SelectionVectorSpan(selection_vector_->indices(),
-                                                       selection_vector_->length());
+          *selection_span = SelectionVectorSpan(selection_vector_->indices(),
+                                                selection_vector_->length());
         }
       } else {
-        span->selection_vector = std::nullopt;
+        DCHECK_EQ(selection_span, nullptr);
       }
     }
 
@@ -467,8 +468,8 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
   if (have_chunked_arrays_) {
     iteration_size = GetNextChunkSpan(iteration_size, span);
     if (selection_vector_) {
-      auto indices_begin =
-          span->selection_vector->indices() + span->selection_vector->length();
+      DCHECK_NE(selection_span, nullptr);
+      auto indices_begin = selection_vector_->indices() + selection_position_;
       auto indices_end = selection_vector_->indices() + selection_vector_->length();
       DCHECK_LE(indices_begin, indices_end);
       auto chunk_row_id_end = position_ + iteration_size;
@@ -477,7 +478,8 @@ bool ExecSpanIterator::Next(ExecSpan* span) {
              *(indices_begin + num_indices) < chunk_row_id_end) {
         ++num_indices;
       }
-      span->selection_vector->SetSlice(span->selection_vector->length(), num_indices);
+      selection_span->SetSlice(selection_position_, num_indices);
+      selection_position_ += num_indices;
     }
   }
 
@@ -814,6 +816,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Array> result,
                             MakeArrayOfNull(output_type_.GetSharedPtr(), /*length=*/0,
                                             exec_context()->memory_pool()));
+      RETURN_NOT_OK(span_iterator_.Init(batch, exec_context()->exec_chunksize()));
       return EmitResult(result->data(), listener);
     }
 
@@ -920,6 +923,11 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // eventually skip the creation of ArrayData altogether
     std::shared_ptr<ArrayData> preallocation;
     ExecSpan input;
+    SelectionVectorSpan selection;
+    SelectionVectorSpan* selection_ptr = nullptr;
+    if (span_iterator_.have_selection_vector()) {
+      selection_ptr = &selection;
+    }
     ExecResult output;
     ArraySpan* output_span = output.array_span_mutable();
 
@@ -931,10 +939,10 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       output_span->SetMembers(*preallocation);
       output_span->offset = 0;
       int64_t result_offset = 0;
-      while (span_iterator_.Next(&input)) {
+      while (span_iterator_.Next(&input, selection_ptr)) {
         // Set absolute output span position and length
         output_span->SetSlice(result_offset, input.length);
-        RETURN_NOT_OK(ExecuteSingleSpan(input, &output));
+        RETURN_NOT_OK(ExecuteSingleSpan(input, selection_ptr, &output));
         result_offset = span_iterator_.position();
       }
 
@@ -944,10 +952,10 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       // Fully preallocating, but not contiguously
       // We preallocate (maybe) only for the output of processing the current
       // chunk
-      while (span_iterator_.Next(&input)) {
+      while (span_iterator_.Next(&input, selection_ptr)) {
         ARROW_ASSIGN_OR_RAISE(preallocation, PrepareOutput(input.length));
         output_span->SetMembers(*preallocation);
-        RETURN_NOT_OK(ExecuteSingleSpan(input, &output));
+        RETURN_NOT_OK(ExecuteSingleSpan(input, selection_ptr, &output));
         // Emit the result for this chunk
         RETURN_NOT_OK(EmitResult(std::move(preallocation), listener));
       }
@@ -955,7 +963,8 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Status ExecuteSingleSpan(const ExecSpan& input, ExecResult* out) {
+  Status ExecuteSingleSpan(const ExecSpan& input, const SelectionVectorSpan* selection,
+                           ExecResult* out) {
     ArraySpan* result_span = out->array_span_mutable();
     if (output_type_.type->id() == Type::NA) {
       result_span->null_count = result_span->length;
@@ -966,7 +975,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     } else if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
       result_span->null_count = 0;
     }
-    RETURN_NOT_OK(InvokeKernel(input, out));
+    RETURN_NOT_OK(InvokeKernel(input, selection, out));
     // Output type didn't change
     DCHECK(out->is_array_span());
     return Status::OK();
@@ -981,8 +990,13 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // We will eventually delete the Scalar output path per
     // ARROW-16757.
     ExecSpan input;
+    SelectionVectorSpan selection;
+    SelectionVectorSpan* selection_ptr = nullptr;
+    if (span_iterator_.have_selection_vector()) {
+      selection_ptr = &selection;
+    }
     ExecResult output;
-    while (span_iterator_.Next(&input)) {
+    while (span_iterator_.Next(&input, selection_ptr)) {
       ARROW_ASSIGN_OR_RAISE(output.value, PrepareOutput(input.length));
       DCHECK(output.is_array_data());
 
@@ -995,7 +1009,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         out_arr->null_count = 0;
       }
 
-      RETURN_NOT_OK(InvokeKernel(input, &output));
+      RETURN_NOT_OK(InvokeKernel(input, selection_ptr, &output));
 
       // Output type didn't change
       DCHECK(output.is_array_data());
@@ -1061,10 +1075,11 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     return Status::OK();
   }
 
-  Status InvokeKernel(const ExecSpan& input, ExecResult* out) {
-    if (input.selection_vector) {
+  Status InvokeKernel(const ExecSpan& input, const SelectionVectorSpan* selection,
+                      ExecResult* out) {
+    if (selection) {
       DCHECK_NE(kernel_->selective_exec, nullptr);
-      return kernel_->selective_exec(kernel_ctx_, input, out);
+      return kernel_->selective_exec(kernel_ctx_, input, *selection, out);
     }
     return kernel_->exec(kernel_ctx_, input, out);
   }
@@ -1437,25 +1452,6 @@ SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
 }
 
 SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
-
-Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(
-    const BooleanArray& arr, MemoryPool* pool) {
-  Int32Builder builder(pool);
-  RETURN_NOT_OK(builder.Reserve(arr.true_count()));
-  ArraySpan span(*arr.data());
-  int32_t i = 0;
-  VisitArraySpanInline<BooleanType>(
-      span,
-      [&](bool mask) {
-        if (mask) {
-          builder.UnsafeAppend(i);
-        }
-        ++i;
-      },
-      [&]() { ++i; });
-  ARROW_ASSIGN_OR_RAISE(auto indices, builder.Finish());
-  return std::make_shared<SelectionVector>(indices->data());
-}
 
 int64_t SelectionVector::length() const { return data_->length; }
 
