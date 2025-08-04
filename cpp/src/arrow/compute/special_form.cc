@@ -60,7 +60,7 @@ struct BranchMask : public std::enable_shared_from_this<BranchMask> {
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDatum(
       const Datum& datum, ExecContext* exec_context) const;
 
-  friend struct NestedBodyMask;
+  friend struct DelegateBodyMask;
 };
 
 struct BodyMask : public std::enable_shared_from_this<BodyMask> {
@@ -140,8 +140,8 @@ struct AllFailBranchMask : public BranchMask {
   }
 };
 
-struct NestedBodyMask : public BodyMask {
-  explicit NestedBodyMask(std::shared_ptr<const BranchMask> branch_mask)
+struct DelegateBodyMask : public BodyMask {
+  explicit DelegateBodyMask(std::shared_ptr<const BranchMask> branch_mask)
       : branch_mask_(std::move(branch_mask)) {}
 
  protected:
@@ -158,8 +158,8 @@ struct NestedBodyMask : public BodyMask {
   std::shared_ptr<const BranchMask> branch_mask_;
 };
 
-struct AllNullBodyMask : public NestedBodyMask {
-  using NestedBodyMask::NestedBodyMask;
+struct AllNullBodyMask : public DelegateBodyMask {
+  using DelegateBodyMask::DelegateBodyMask;
 
   bool empty() const override { return true; }
 
@@ -179,8 +179,8 @@ struct AllNullBodyMask : public NestedBodyMask {
   }
 };
 
-struct AllPassBodyMask : public NestedBodyMask {
-  using NestedBodyMask::NestedBodyMask;
+struct AllPassBodyMask : public DelegateBodyMask {
+  using DelegateBodyMask::DelegateBodyMask;
 
   bool empty() const override { return false; }
 
@@ -198,8 +198,8 @@ struct AllPassBodyMask : public NestedBodyMask {
   }
 };
 
-struct AllFailBodyMask : public NestedBodyMask {
-  using NestedBodyMask::NestedBodyMask;
+struct AllFailBodyMask : public DelegateBodyMask {
+  using DelegateBodyMask::DelegateBodyMask;
 
   bool empty() const override { return true; }
 
@@ -460,7 +460,7 @@ struct ConditionalExecutor {
       results.Emplace(std::move(body_result), std::move(selection_vector));
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
     }
-    return MultiplexBranchResults(input, results, exec_context);
+    return MultiplexResults(input, results, exec_context);
   }
 
  private:
@@ -511,9 +511,8 @@ struct ConditionalExecutor {
     return body_mask->ApplyCond(body, input, exec_context);
   }
 
-  Result<Datum> MultiplexBranchResults(const ExecBatch& input,
-                                       const BranchResults& results,
-                                       ExecContext* exec_context) const {
+  Result<Datum> MultiplexResults(const ExecBatch& input, const BranchResults& results,
+                                 ExecContext* exec_context) const {
     if (results.empty()) {
       return MakeArrayOfNull(result_type.GetSharedPtr(), input.length,
                              exec_context->memory_pool());
