@@ -467,20 +467,6 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
   int64_t iteration_size = std::min(length_ - position_, max_chunksize_);
   if (have_chunked_arrays_) {
     iteration_size = GetNextChunkSpan(iteration_size, span);
-    if (selection_vector_) {
-      DCHECK_NE(selection_span, nullptr);
-      auto indices_begin = selection_vector_->indices() + selection_position_;
-      auto indices_end = selection_vector_->indices() + selection_vector_->length();
-      DCHECK_LE(indices_begin, indices_end);
-      auto chunk_row_id_end = position_ + iteration_size;
-      int64_t num_indices = 0;
-      while (indices_begin + num_indices < indices_end &&
-             *(indices_begin + num_indices) < chunk_row_id_end) {
-        ++num_indices;
-      }
-      selection_span->SetSlice(selection_position_, num_indices);
-      selection_position_ += num_indices;
-    }
   }
 
   // Now, adjust the span
@@ -492,6 +478,23 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
       arr->SetSlice(value_positions_[i] + value_offsets_[i], iteration_size);
       value_positions_[i] += iteration_size;
     }
+  }
+
+  // Then the selection span
+  if (selection_vector_) {
+    DCHECK_NE(selection_span, nullptr);
+    auto indices_begin = selection_vector_->indices() + selection_position_;
+    auto indices_end = selection_vector_->indices() + selection_vector_->length();
+    DCHECK_LE(indices_begin, indices_end);
+    auto chunk_row_id_end = position_ + iteration_size;
+    int64_t num_indices = 0;
+    while (indices_begin + num_indices < indices_end &&
+           *(indices_begin + num_indices) < chunk_row_id_end) {
+      ++num_indices;
+    }
+    selection_span->SetSlice(selection_position_, num_indices,
+                             static_cast<int32_t>(position_));
+    selection_position_ += num_indices;
   }
 
   position_ += iteration_size;
@@ -1455,10 +1458,18 @@ SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data())
 
 int64_t SelectionVector::length() const { return data_->length; }
 
-void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length) {
+void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length, int32_t backstep) {
   DCHECK_NE(indices_, nullptr);
-  offset_ += offset;
+  offset_ = offset;
   length_ = length;
+  backstep_ = backstep;
+}
+
+int32_t SelectionVectorSpan::operator[](int64_t i) const {
+  DCHECK_GE(i, 0);
+  DCHECK_LT(i, length_);
+  DCHECK_GE(indices_[i + offset_], backstep_);
+  return indices_[i + offset_] - backstep_;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
