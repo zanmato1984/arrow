@@ -190,18 +190,15 @@ class IfElseSpecialFormTest : public ::testing::Test {
     return Status::OK();
   }
 
-  template <bool sv_existence>
-  static Status AssertSelectionVectorExec(KernelContext* kernel_ctx, const ExecSpan& span,
-                                          ExecResult* out) {
-    if constexpr (sv_existence) {
-      if (!span.selection_vector) {
-        return Status::Invalid("There is no selection vector");
-      }
-    } else {
-      if (span.selection_vector) {
-        return Status::Invalid("There is a selection vector");
-      }
-    }
+  static Status AssertSelectionVectorNotExistExec(KernelContext* kernel_ctx,
+                                                  const ExecSpan& span, ExecResult* out) {
+    return IdentityExec(kernel_ctx, span, out);
+  }
+
+  static Status AssertSelectionVectorExistExec(KernelContext* kernel_ctx,
+                                               const ExecSpan& span,
+                                               const SelectionVectorSpan& selection,
+                                               ExecResult* out) {
     return IdentityExec(kernel_ctx, span, out);
   }
 
@@ -249,10 +246,10 @@ class IfElseSpecialFormTest : public ::testing::Test {
         auto func =
             std::make_shared<ScalarFunction>(name, Arity::Unary(), FunctionDoc::Empty());
 
-        ArrayKernelExec exec = AssertSelectionVectorExec<false>;
+        ArrayKernelExec exec = AssertSelectionVectorNotExistExec;
         ArrayKernelSelectiveExec selective_exec = nullptr;
         if (sv_existence) {
-          selective_exec = AssertSelectionVectorExec<true>;
+          selective_exec = AssertSelectionVectorExistExec;
         }
         ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec),
                             /*init=*/nullptr, std::move(selective_exec));
@@ -587,7 +584,7 @@ TEST_F(IfElseSpecialFormTest, SelectionVectorExistenceExecChunkSize) {
       num_rows);
   {
     ARROW_SCOPED_TRACE("exec_chunksize >= batch_size");
-    for (auto chunksize : {num_rows, num_rows + 1}) {
+    for (auto chunksize : {num_rows / 2, num_rows, num_rows + 1}) {
       ARROW_SCOPED_TRACE("exec_chunksize: " + std::to_string(chunksize));
       exec_context.set_exec_chunksize(chunksize);
       {
