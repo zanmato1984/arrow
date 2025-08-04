@@ -140,10 +140,6 @@ class ARROW_EXPORT SelectionVector {
 
   explicit SelectionVector(const Array& arr);
 
-  /// \brief Create SelectionVector from boolean mask
-  static Result<std::shared_ptr<SelectionVector>> FromMask(
-      const BooleanArray& arr, MemoryPool* pool = default_memory_pool());
-
   std::shared_ptr<ArrayData> data() const { return data_; }
   const int32_t* indices() const { return indices_; }
   int64_t length() const;
@@ -447,7 +443,6 @@ struct ARROW_EXPORT ExecSpan {
 
   int64_t length = 0;
   std::vector<ExecValue> values;
-  std::optional<SelectionVectorSpan> selection_vector;
 };
 
 /// \defgroup compute-call-function One-shot calls to compute functions
