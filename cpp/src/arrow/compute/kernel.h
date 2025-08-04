@@ -536,7 +536,8 @@ struct ARROW_EXPORT Kernel {
 /// employed this may not be possible.
 using ArrayKernelExec = Status (*)(KernelContext*, const ExecSpan&, ExecResult*);
 
-using ArrayKernelSelectiveExec = Status (*)(KernelContext*, const ExecSpan&, ExecResult*);
+using ArrayKernelSelectiveExec = Status (*)(KernelContext*, const ExecSpan&,
+                                            const SelectionVectorSpan&, ExecResult*);
 
 /// \brief Kernel data structure for implementations of ScalarFunction. In
 /// addition to the members found in Kernel, contains the null handling
