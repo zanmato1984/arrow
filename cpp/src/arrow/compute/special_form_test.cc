@@ -276,7 +276,7 @@ class IfElseSpecialFormTest : public ::testing::Test {
       const Expression& cond, const Expression& if_true, const Expression& if_false) {
     auto suppress_if_else_recursive =
         [&](const Expression& expr) -> std::vector<Expression> {
-      if (const auto& sp = expr.special(); sp && sp->special_form->name == "if_else") {
+      if (const auto& sp = expr.special(); sp && sp->special_form->name() == "if_else") {
         const auto& cond = sp->arguments[0];
         const auto& if_true = sp->arguments[1];
         const auto& if_false = sp->arguments[2];

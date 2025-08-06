@@ -19,31 +19,34 @@
 
 namespace arrow::compute {
 
-class ARROW_EXPORT SpecialExec {
+class ARROW_EXPORT SpecialExecutor {
  public:
-  virtual ~SpecialExec() = default;
+  explicit SpecialExecutor(TypeHolder out_type) : out_type_(std::move(out_type)) {}
 
-  virtual Result<TypeHolder> Bind(const std::vector<Expression>& arguments,
-                                  ExecContext* exec_context) = 0;
+  virtual ~SpecialExecutor() = default;
+
+  const TypeHolder& out_type() const { return out_type_; }
 
   virtual Result<Datum> Execute(const ExecBatch& input,
                                 ExecContext* exec_context) const = 0;
+
+ private:
+  const TypeHolder out_type_;
 };
 
 class ARROW_EXPORT SpecialForm {
  public:
-  explicit SpecialForm(std::string name) : name(std::move(name)) {}
+  explicit SpecialForm(std::string name) : name_(std::move(name)) {}
 
   virtual ~SpecialForm() = default;
 
-  virtual Result<std::unique_ptr<SpecialExec>> DispatchExact(
-      const std::vector<TypeHolder>& types, ExecContext* exec_context) const = 0;
+  const std::string& name() const { return name_; }
 
-  virtual Result<std::unique_ptr<SpecialExec>> DispatchBest(
-      std::vector<TypeHolder>* types, ExecContext* exec_context) const = 0;
+  virtual Result<std::unique_ptr<SpecialExecutor>> Bind(
+      std::vector<Expression>& arguments, ExecContext* exec_context) = 0;
 
- public:
-  const std::string name;
+ private:
+  std::string name_;
 };
 
 std::shared_ptr<SpecialForm> GetIfElseSpecialForm();
