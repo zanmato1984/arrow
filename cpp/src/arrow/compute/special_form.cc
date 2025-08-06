@@ -433,8 +433,8 @@ struct Branch {
   Expression body;
 };
 
-struct ConditionalExecutor {
-  ConditionalExecutor(const std::vector<Branch>& branches, const TypeHolder& result_type)
+struct ConditionalExec {
+  ConditionalExec(const std::vector<Branch>& branches, const TypeHolder& result_type)
       : branches(branches), result_type(result_type) {}
 
   Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const&& {
@@ -574,79 +574,108 @@ struct ConditionalExecutor {
   const TypeHolder& result_type;
 };
 
-class IfElseSpecialExec : public SpecialExec {
+class ConditionalSpecialExecutor : public SpecialExecutor {
  public:
-  explicit IfElseSpecialExec(std::shared_ptr<Function> function, const Kernel* kernel)
-      : function(std::move(function)), kernel(kernel), branches(2) {}
-
-  Result<TypeHolder> Bind(const std::vector<Expression>& arguments,
-                          ExecContext* exec_context) override {
-    DCHECK(std::all_of(arguments.begin(), arguments.end(),
-                       [](const Expression& argument) { return argument.IsBound(); }));
-
-    DCHECK_EQ(arguments.size(), 3);
-    const auto& cond = arguments[0];
-    const auto& if_true = arguments[1];
-    const auto& if_false = arguments[2];
-
-    {
-      auto types = GetTypes(arguments);
-      KernelContext kernel_context(exec_context, kernel);
-      std::unique_ptr<KernelState> kernel_state;
-      if (kernel->init) {
-        const FunctionOptions* options = function->default_options();
-        ARROW_ASSIGN_OR_RAISE(kernel_state,
-                              kernel->init(&kernel_context, {kernel, types, options}));
-        kernel_context.SetState(kernel_state.get());
-      }
-      ARROW_ASSIGN_OR_RAISE(
-          type, kernel->signature->out_type().Resolve(&kernel_context, types));
-    }
-
-    DCHECK_EQ(cond.type()->id(), Type::BOOL);
-    DCHECK_EQ(type, *if_true.type());
-    DCHECK_EQ(type, *if_false.type());
-
-    branches[0] = {cond, if_true};
-    branches[1] = {literal(true), if_false};
-
-    return type;
-  }
+  explicit ConditionalSpecialExecutor(TypeHolder out_type, std::vector<Branch> branches)
+      : SpecialExecutor(std::move(out_type)), branches(std::move(branches)) {}
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    return ConditionalExecutor(branches, type).Execute(input, exec_context);
+    return ConditionalExec(branches, out_type()).Execute(input, exec_context);
   }
 
  private:
-  // For Bind.
-  std::shared_ptr<Function> function;
-  const Kernel* kernel;
-
-  // Post-bind, for Execute.
-  TypeHolder type;
   std::vector<Branch> branches;
 };
 
-class IfElseSpecialForm : public SpecialForm {
+template <typename Impl>
+class KernelBackedSpecialForm : public SpecialForm {
  public:
-  IfElseSpecialForm() : SpecialForm(/*name=*/"if_else") {}
+  using SpecialForm::SpecialForm;
 
-  Result<std::unique_ptr<SpecialExec>> DispatchExact(
-      const std::vector<TypeHolder>& types, ExecContext* exec_context) const override {
+  ARROW_DISALLOW_COPY_AND_ASSIGN(KernelBackedSpecialForm);
+  ARROW_DEFAULT_MOVE_AND_ASSIGN(KernelBackedSpecialForm);
+
+  Result<std::unique_ptr<SpecialExecutor>> Bind(std::vector<Expression>& arguments,
+                                                ExecContext* exec_context) override {
+    DCHECK(std::all_of(arguments.begin(), arguments.end(),
+                       [](const Expression& argument) { return argument.IsBound(); }));
+
     ARROW_ASSIGN_OR_RAISE(auto function,
-                          exec_context->func_registry()->GetFunction(name));
-    ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchExact(types));
-    return std::make_unique<IfElseSpecialExec>(std::move(function), kernel);
+                          exec_context->func_registry()->GetFunction(name()));
+    const Kernel* kernel = nullptr;
+    std::vector<TypeHolder> types = GetTypes(arguments);
+
+    // First try and bind exactly
+    auto maybe_exact_match = function->DispatchExact(types);
+    if (maybe_exact_match.ok()) {
+      kernel = std::move(*maybe_exact_match);
+    } else {
+      // If exact binding fails, and we are allowed to cast, then prefer casting literals
+      // first.  Since DispatchBest generally prefers up-casting the best way to do this
+      // is first down-cast the literals as much as possible
+      types = GetTypesWithSmallestLiteralRepresentation(arguments);
+      ARROW_ASSIGN_OR_RAISE(kernel, function->DispatchBest(&types));
+      ARROW_RETURN_NOT_OK(ImplicitCastArguments(arguments, types, exec_context));
+    }
+
+    KernelContext kernel_context(exec_context, kernel);
+    std::unique_ptr<KernelState> kernel_state;
+    if (kernel->init) {
+      const FunctionOptions* options = function->default_options();
+      ARROW_ASSIGN_OR_RAISE(kernel_state,
+                            kernel->init(&kernel_context, {kernel, types, options}));
+      kernel_context.SetState(kernel_state.get());
+    }
+    ARROW_ASSIGN_OR_RAISE(auto out_type,
+                          kernel->signature->out_type().Resolve(&kernel_context, types));
+
+    return static_cast<const Impl*>(this)->BindImpl(
+        std::move(out_type), std::move(kernel), std::move(arguments), exec_context);
+  }
+};
+
+template <typename Impl>
+class ConditionalSpecialForm
+    : public KernelBackedSpecialForm<ConditionalSpecialForm<Impl>> {
+ public:
+  using KernelBackedSpecialForm<ConditionalSpecialForm<Impl>>::KernelBackedSpecialForm;
+
+  ARROW_DISALLOW_COPY_AND_ASSIGN(ConditionalSpecialForm);
+  ARROW_DEFAULT_MOVE_AND_ASSIGN(ConditionalSpecialForm);
+
+ protected:
+  Result<std::unique_ptr<SpecialExecutor>> BindImpl(TypeHolder out_type,
+                                                    const Kernel* kernel,
+                                                    std::vector<Expression> arguments,
+                                                    ExecContext* exec_context) const {
+    auto branches = static_cast<const Impl*>(this)->GetBranches(arguments);
+    return std::make_unique<ConditionalSpecialExecutor>(std::move(out_type),
+                                                        std::move(branches));
   }
 
-  Result<std::unique_ptr<SpecialExec>> DispatchBest(
-      std::vector<TypeHolder>* types, ExecContext* exec_context) const override {
-    ARROW_ASSIGN_OR_RAISE(auto function,
-                          exec_context->func_registry()->GetFunction(name));
-    ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchBest(types));
-    return std::make_unique<IfElseSpecialExec>(std::move(function), kernel);
+  friend class KernelBackedSpecialForm<ConditionalSpecialForm<Impl>>;
+};
+
+class IfElseSpecialForm : public ConditionalSpecialForm<IfElseSpecialForm> {
+ public:
+  IfElseSpecialForm() : ConditionalSpecialForm<IfElseSpecialForm>("if_else") {}
+
+  ARROW_DISALLOW_COPY_AND_ASSIGN(IfElseSpecialForm);
+  ARROW_DEFAULT_MOVE_AND_ASSIGN(IfElseSpecialForm);
+
+ protected:
+  std::vector<Branch> GetBranches(std::vector<Expression> arguments) const {
+    DCHECK_EQ(arguments.size(), 3);
+    auto cond = std::move(arguments[0]);
+    auto if_true = std::move(arguments[1]);
+    auto if_false = std::move(arguments[2]);
+
+    return std::vector<Branch>{{std::move(cond), std::move(if_true)},
+                               {literal(true), std::move(if_false)}};
   }
+
+  friend class ConditionalSpecialForm<IfElseSpecialForm>;
 };
 
 }  // namespace
