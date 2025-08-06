@@ -571,17 +571,35 @@ TypeHolder SmallestTypeFor(const arrow::Datum& value) {
   }
 }
 
+std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
+    const std::vector<Expression>& exprs) {
+  std::vector<TypeHolder> types(exprs.size());
+  for (size_t i = 0; i < exprs.size(); ++i) {
+    DCHECK(exprs[i].IsBound());
+    if (const Datum* literal = exprs[i].literal()) {
+      if (literal->is_scalar()) {
+        types[i] = SmallestTypeFor(*literal);
+      }
+    } else {
+      types[i] = exprs[i].type();
+    }
+  }
+  return types;
+}
+
 // Produce a bound Expression from unbound Call and bound arguments.
 Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
-                                    compute::ExecContext* exec_context) {
+                                    ExecContext* exec_context) {
   DCHECK(std::all_of(call.arguments.begin(), call.arguments.end(),
                      [](const Expression& argument) { return argument.IsBound(); }));
 
   std::vector<TypeHolder> types = GetTypes(call.arguments);
   ARROW_ASSIGN_OR_RAISE(call.function, GetFunction(call, exec_context));
 
-  auto FinishBind = [&] {
-    compute::KernelContext kernel_context(exec_context, call.kernel);
+  auto finish_bind = [&](const Kernel* kernel,
+                         const std::vector<TypeHolder>& types) -> Status {
+    call.kernel = kernel;
+    KernelContext kernel_context(exec_context, call.kernel);
     if (call.kernel->init) {
       const FunctionOptions* options =
           call.options ? call.options.get() : call.function->default_options();
@@ -597,28 +615,8 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
     return Status::OK();
   };
 
-  // First try and bind exactly
-  Result<const Kernel*> maybe_exact_match = call.function->DispatchExact(types);
-  if (maybe_exact_match.ok()) {
-    call.kernel = *maybe_exact_match;
-    if (FinishBind().ok()) {
-      return Expression(std::move(call));
-    }
-  }
-
-  if (!insert_implicit_casts) {
-    return maybe_exact_match.status();
-  }
-
-  // If exact binding fails, and we are allowed to cast, then prefer casting literals
-  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
-  // first down-cast the literals as much as possible
-  types = GetTypesWithSmallestLiteralRepresentation(call.arguments);
-  ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
-
-  ARROW_RETURN_NOT_OK(ImplicitCastArguments(call.arguments, types, exec_context));
-
-  RETURN_NOT_OK(FinishBind());
+  RETURN_NOT_OK(DispatchForBind(call.function.get(), call.arguments,
+                                insert_implicit_casts, exec_context, finish_bind));
   return Expression(std::move(call));
 }
 
@@ -663,26 +661,29 @@ Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
 
 }  // namespace
 
-std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
-    const std::vector<Expression>& exprs) {
-  std::vector<TypeHolder> types(exprs.size());
-  for (size_t i = 0; i < exprs.size(); ++i) {
-    DCHECK(exprs[i].IsBound());
-    if (const Datum* literal = exprs[i].literal()) {
-      if (literal->is_scalar()) {
-        types[i] = SmallestTypeFor(*literal);
-      }
-    } else {
-      types[i] = exprs[i].type();
+Status DispatchForBind(
+    const Function* function, std::vector<Expression> arguments,
+    bool insert_implicit_casts, ExecContext* exec_context,
+    std::function<Status(const Kernel*, const std::vector<TypeHolder>&)> finish_bind) {
+  std::vector<TypeHolder> types = GetTypes(arguments);
+
+  // First try and bind exactly
+  Result<const Kernel*> maybe_exact_match = function->DispatchExact(types);
+  if (maybe_exact_match.ok()) {
+    if (finish_bind(*maybe_exact_match, types).ok()) {
+      return Status::OK();
     }
   }
-  return types;
-}
 
-Status ImplicitCastArguments(std::vector<Expression>& arguments,
-                             const std::vector<TypeHolder>& types,
-                             ExecContext* exec_context) {
-  DCHECK_EQ(arguments.size(), types.size());
+  if (!insert_implicit_casts) {
+    return maybe_exact_match.status();
+  }
+
+  // If exact binding fails, and we are allowed to cast, then prefer casting literals
+  // first. Since DispatchBest generally prefers up-casting the best way to do this is
+  // first down-cast the literals as much as possible
+  types = GetTypesWithSmallestLiteralRepresentation(arguments);
+  ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchBest(&types));
 
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] == arguments[i].type()) continue;
@@ -707,7 +708,7 @@ Status ImplicitCastArguments(std::vector<Expression>& arguments,
                                        /*insert_implicit_casts=*/false, exec_context));
   }
 
-  return Status::OK();
+  return finish_bind(kernel, types);
 }
 
 Result<Expression> Expression::Bind(const TypeHolder& in,
