@@ -290,5 +290,12 @@ inline Result<std::shared_ptr<compute::Function>> GetFunction(
   return GetCastFunction(*to_type);
 }
 
+std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
+    const std::vector<Expression>& exprs);
+
+Status ImplicitCastArguments(std::vector<Expression>& arguments,
+                             const std::vector<TypeHolder>& types,
+                             ExecContext* exec_context);
+
 }  // namespace compute
 }  // namespace arrow
