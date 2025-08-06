@@ -67,7 +67,7 @@ class ARROW_EXPORT Expression {
     size_t hash;
 
     // post-Bind properties:
-    std::shared_ptr<SpecialExec> special_exec;
+    std::shared_ptr<SpecialExecutor> special_executor;
     TypeHolder type;
 
     void ComputeHash();
