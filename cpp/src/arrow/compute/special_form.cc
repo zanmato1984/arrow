@@ -603,35 +603,30 @@ class KernelBackedSpecialForm : public SpecialForm {
 
     ARROW_ASSIGN_OR_RAISE(auto function,
                           exec_context->func_registry()->GetFunction(name()));
+
     const Kernel* kernel = nullptr;
-    std::vector<TypeHolder> types = GetTypes(arguments);
+    TypeHolder out_type;
+    auto finish_bind = [&](const Kernel* dispatched_kernel,
+                           const std::vector<TypeHolder>& types) -> Status {
+      kernel = dispatched_kernel;
+      KernelContext kernel_context(exec_context, kernel);
+      std::unique_ptr<KernelState> kernel_state;
+      if (kernel->init) {
+        const FunctionOptions* options = function->default_options();
+        ARROW_ASSIGN_OR_RAISE(kernel_state,
+                              kernel->init(&kernel_context, {kernel, types, options}));
+        kernel_context.SetState(kernel_state.get());
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          out_type, kernel->signature->out_type().Resolve(&kernel_context, types));
+      return Status::OK();
+    };
 
-    // First try and bind exactly
-    auto maybe_exact_match = function->DispatchExact(types);
-    if (maybe_exact_match.ok()) {
-      kernel = std::move(*maybe_exact_match);
-    } else {
-      // If exact binding fails, and we are allowed to cast, then prefer casting literals
-      // first.  Since DispatchBest generally prefers up-casting the best way to do this
-      // is first down-cast the literals as much as possible
-      types = GetTypesWithSmallestLiteralRepresentation(arguments);
-      ARROW_ASSIGN_OR_RAISE(kernel, function->DispatchBest(&types));
-      ARROW_RETURN_NOT_OK(ImplicitCastArguments(arguments, types, exec_context));
-    }
-
-    KernelContext kernel_context(exec_context, kernel);
-    std::unique_ptr<KernelState> kernel_state;
-    if (kernel->init) {
-      const FunctionOptions* options = function->default_options();
-      ARROW_ASSIGN_OR_RAISE(kernel_state,
-                            kernel->init(&kernel_context, {kernel, types, options}));
-      kernel_context.SetState(kernel_state.get());
-    }
-    ARROW_ASSIGN_OR_RAISE(auto out_type,
-                          kernel->signature->out_type().Resolve(&kernel_context, types));
-
-    return static_cast<const Impl*>(this)->BindImpl(
-        std::move(out_type), std::move(kernel), std::move(arguments), exec_context);
+    RETURN_NOT_OK(DispatchForBind(function.get(), arguments,
+                                  /*insert_implicit_casts=*/true, exec_context,
+                                  finish_bind));
+    return static_cast<const Impl*>(this)->BindImpl(kernel, std::move(out_type),
+                                                    std::move(arguments), exec_context);
   }
 };
 
@@ -645,8 +640,8 @@ class ConditionalSpecialForm
   ARROW_DEFAULT_MOVE_AND_ASSIGN(ConditionalSpecialForm);
 
  protected:
-  Result<std::unique_ptr<SpecialExecutor>> BindImpl(TypeHolder out_type,
-                                                    const Kernel* kernel,
+  Result<std::unique_ptr<SpecialExecutor>> BindImpl(const Kernel* kernel,
+                                                    TypeHolder out_type,
                                                     std::vector<Expression> arguments,
                                                     ExecContext* exec_context) const {
     auto branches = static_cast<const Impl*>(this)->GetBranches(arguments);
