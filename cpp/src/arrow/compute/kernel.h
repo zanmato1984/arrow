@@ -348,6 +348,16 @@ class ARROW_EXPORT OutputType {
   Resolver resolver_ = NULLPTR;
 };
 
+class ARROW_EXPORT InputConstraint {
+ public:
+  virtual ~InputConstraint() = default;
+
+  virtual bool Validate(const std::vector<TypeHolder>& types) const = 0;
+};
+
+ARROW_EXPORT std::shared_ptr<InputConstraint> DecimalsHaveSameScale();
+ARROW_EXPORT std::shared_ptr<InputConstraint> BinaryDecimalS1GEThanS2();
+
 /// \brief Holds the input types and output type of the kernel.
 ///
 /// VarArgs functions with minimum N arguments should pass up to N input types to be
@@ -357,12 +367,13 @@ class ARROW_EXPORT OutputType {
 class ARROW_EXPORT KernelSignature {
  public:
   KernelSignature(std::vector<InputType> in_types, OutputType out_type,
-                  bool is_varargs = false);
+                  bool is_varargs = false,
+                  std::shared_ptr<InputConstraint> in_constraint = NULLPTR);
 
   /// \brief Convenience ctor since make_shared can be awkward
-  static std::shared_ptr<KernelSignature> Make(std::vector<InputType> in_types,
-                                               OutputType out_type,
-                                               bool is_varargs = false);
+  static std::shared_ptr<KernelSignature> Make(
+      std::vector<InputType> in_types, OutputType out_type, bool is_varargs = false,
+      std::shared_ptr<InputConstraint> in_constraint = NULLPTR);
 
   /// \brief Return true if the signature if compatible with the list of input
   /// value descriptors.
@@ -401,6 +412,7 @@ class ARROW_EXPORT KernelSignature {
   std::vector<InputType> in_types_;
   OutputType out_type_;
   bool is_varargs_;
+  std::shared_ptr<InputConstraint> in_constraint_;
 
   // For caching the hash code after it's computed the first time
   mutable uint64_t hash_code_;
