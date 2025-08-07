@@ -52,8 +52,8 @@ struct KernelState;
 
 class Expression;
 
-class SpecialExec;
 class SpecialForm;
+class SpecialExecutor;
 
 ARROW_EXPORT ExecContext* default_exec_context();
 ARROW_EXPORT ExecContext* threaded_exec_context();

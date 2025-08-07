@@ -290,5 +290,10 @@ inline Result<std::shared_ptr<compute::Function>> GetFunction(
   return GetCastFunction(*to_type);
 }
 
+Status DispatchForBind(
+    const Function* function, std::vector<Expression> arguments,
+    bool insert_implicit_casts, ExecContext* exec_context,
+    std::function<Status(const Kernel*, const std::vector<TypeHolder>&)> finish_bind);
+
 }  // namespace compute
 }  // namespace arrow

@@ -53,19 +53,34 @@ const PayloadOptions* GetDefaultPayloadOptions() {
 
 using PayloadState = internal::OptionsWrapper<PayloadOptions>;
 
+void DoLoad(int64_t load, int64_t length) {
+  for (int64_t i = 0; i < length; ++i) {
+    volatile int64_t j = load;
+    while (j-- > 0) {
+      // Do nothing, just burn CPU cycles
+    }
+  }
+}
+
 Status PayloadExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
   ARROW_CHECK_EQ(span.num_values(), 1);
   const auto& arg = span[0];
   ARROW_CHECK(arg.is_array());
 
   int64_t load = PayloadState::Get(ctx).load;
-  int64_t load_length =
-      span.selection_vector.indices() ? span.selection_vector.length() : arg.length();
-  for (int64_t i = 0; i < load_length; ++i) {
-    volatile int64_t j = load;
-    while (j-- > 0) {
-    }
-  }
+  DoLoad(load, arg.length());
+  *out->array_data_mutable() = *arg.array.ToArrayData();
+  return Status::OK();
+}
+
+Status PayloadSelectiveExec(KernelContext* ctx, const ExecSpan& span,
+                            const SelectionVectorSpan selection_span, ExecResult* out) {
+  ARROW_CHECK_EQ(span.num_values(), 1);
+  const auto& arg = span[0];
+  ARROW_CHECK(arg.is_array());
+
+  int64_t load = PayloadState::Get(ctx).load;
+  DoLoad(load, span.length);
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }
@@ -85,7 +100,7 @@ Status RegisterAuxilaryFunctions() {
           name, Arity::Unary(), FunctionDoc::Empty(), GetDefaultPayloadOptions());
 
       ScalarKernel kernel({InputType::Any()}, internal::FirstType, PayloadExec,
-                          PayloadState::Init);
+                          PayloadState::Init, PayloadSelectiveExec);
       kernel.selection_vector_aware = sv_awareness;
       kernel.can_write_into_slices = false;
       kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
@@ -150,7 +165,7 @@ void BenchmarkIfElse(
 }  // namespace
 
 #ifdef BM
-#  error("BM is defined")
+#  error ("BM is defined")
 #else
 #  define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, name, ...)      \
     BM(name##_regular, if_else_regular, ##__VA_ARGS__);                       \

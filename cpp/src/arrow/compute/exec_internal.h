@@ -42,8 +42,6 @@ namespace detail {
 /// \brief Break std::vector<Datum> into a sequence of non-owning
 /// ExecSpan for kernel execution. The lifetime of the Datum vector
 /// must be longer than the lifetime of this object
-// TODO: Can this struct sense the presence of selection vector and not split ExecBatch if
-// so?
 class ARROW_EXPORT ExecSpanIterator {
  public:
   ExecSpanIterator() = default;
@@ -68,12 +66,13 @@ class ARROW_EXPORT ExecSpanIterator {
   /// with a blank ExecSpan after the first iteration, it will not
   /// work correctly (maybe we will change this later). Return false
   /// if the iteration is exhausted
-  bool Next(ExecSpan* span);
+  bool Next(ExecSpan* span, SelectionVectorSpan* selection_span = NULLPTR);
 
   int64_t length() const { return length_; }
   int64_t position() const { return position_; }
 
   bool have_all_scalars() const { return have_all_scalars_; }
+  bool have_selection_vector() const { return selection_vector_ != NULLPTR; }
 
  private:
   ExecSpanIterator(const std::vector<Datum>& args, int64_t length, int64_t max_chunksize);
@@ -96,6 +95,7 @@ class ARROW_EXPORT ExecSpanIterator {
   std::vector<int64_t> value_offsets_;
   int64_t position_ = 0;
   int64_t length_ = 0;
+  int64_t selection_position_ = 0;
   int64_t max_chunksize_;
 };
 
