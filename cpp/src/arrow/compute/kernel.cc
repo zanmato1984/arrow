@@ -476,41 +476,56 @@ std::string OutputType::ToString() const {
 }
 
 // ----------------------------------------------------------------------
-// InputConstraint
+// MatchConstraint
 
-std::shared_ptr<InputConstraint> DecimalsHaveSameScale() {
-  class DecimalsHaveSameScaleConstraint : public InputConstraint {
+std::shared_ptr<MatchConstraint> DecimalsHaveSameScale() {
+  class DecimalsHaveSameScaleConstraint : public MatchConstraint {
    public:
     bool Validate(const std::vector<TypeHolder>& types) const override {
-      DCHECK(types.size() >= 2)
-          << "DecimalsHaveSameScaleConstraint expects at least two types";
+      DCHECK(types.size() >= 2);
       DCHECK(std::all_of(types.begin(), types.end(),
                          [](const TypeHolder& type) { return is_decimal(type.id()); }));
-      auto s0 = dynamic_cast<const DecimalType&>(*types[0]).scale();
+      auto ty0 = dynamic_cast<const DecimalType*>(types[0].type);
+      DCHECK_NE(ty0, nullptr);
+      auto s0 = ty0->scale();
       for (size_t i = 1; i < types.size(); ++i) {
-        if (dynamic_cast<const DecimalType&>(*types[i]).scale() != s0) {
+        auto ty = dynamic_cast<const DecimalType*>(types[i].type);
+        DCHECK_NE(ty, nullptr);
+        if (ty->scale() != s0) {
           return false;
         }
       }
       return true;
     }
   };
-  return std::make_shared<DecimalsHaveSameScaleConstraint>();
+  static auto instance = std::make_shared<DecimalsHaveSameScaleConstraint>();
+  return instance;
 }
 
-std::shared_ptr<InputConstraint> BinaryDecimalS1GEThanS2() {
-  class BinaryDecimalS1GEThanS2Constraint : public InputConstraint {
-   public:
-    bool Validate(const std::vector<TypeHolder>& types) const override {
-      DCHECK_EQ(types.size(), 2)
-          << "BinaryDecimalS1GEThanS2Constraint expects exactly two types";
-      DCHECK(is_decimal(types[0].id()));
-      DCHECK(is_decimal(types[1].id()));
-      return dynamic_cast<const DecimalType&>(*types[0]).scale() >=
-             dynamic_cast<const DecimalType&>(*types[1]).scale();
-    }
-  };
-  return std::make_shared<BinaryDecimalS1GEThanS2Constraint>();
+namespace {
+
+template <typename Op>
+class BinaryDecimalScaleComparisonConstraint : public MatchConstraint {
+ public:
+  bool Validate(const std::vector<TypeHolder>& types) const override {
+    DCHECK_EQ(types.size(), 2);
+    DCHECK(is_decimal(types[0].id()));
+    DCHECK(is_decimal(types[1].id()));
+    auto ty0 = dynamic_cast<const DecimalType*>(types[0].type);
+    DCHECK_NE(ty0, nullptr);
+    auto ty1 = dynamic_cast<const DecimalType*>(types[1].type);
+    DCHECK_NE(ty1, nullptr);
+    return Op{}(ty0->scale(), ty1->scale());
+  }
+};
+
+}  // namespace
+
+std::shared_ptr<MatchConstraint> BinaryDecimalScaleComparisonGE() {
+  using BinaryDecimalScaleComparisonGEConstraint =
+      BinaryDecimalScaleComparisonConstraint<std::greater_equal<>>;
+  static auto instance = std::make_shared<BinaryDecimalScaleComparisonGEConstraint>();
+  return instance;
 }
 
 // ----------------------------------------------------------------------
@@ -518,20 +533,20 @@ std::shared_ptr<InputConstraint> BinaryDecimalS1GEThanS2() {
 
 KernelSignature::KernelSignature(std::vector<InputType> in_types, OutputType out_type,
                                  bool is_varargs,
-                                 std::shared_ptr<InputConstraint> in_constraint)
+                                 std::shared_ptr<MatchConstraint> constraint)
     : in_types_(std::move(in_types)),
       out_type_(std::move(out_type)),
       is_varargs_(is_varargs),
-      in_constraint_(std::move(in_constraint)),
+      constraint_(std::move(constraint)),
       hash_code_(0) {
   DCHECK(!is_varargs || (is_varargs && (in_types_.size() >= 1)));
 }
 
 std::shared_ptr<KernelSignature> KernelSignature::Make(
     std::vector<InputType> in_types, OutputType out_type, bool is_varargs,
-    std::shared_ptr<InputConstraint> in_constraint) {
+    std::shared_ptr<MatchConstraint> constraint) {
   return std::make_shared<KernelSignature>(std::move(in_types), std::move(out_type),
-                                           is_varargs, std::move(in_constraint));
+                                           is_varargs, std::move(constraint));
 }
 
 bool KernelSignature::Equals(const KernelSignature& other) const {
@@ -565,7 +580,7 @@ bool KernelSignature::MatchesInputs(const std::vector<TypeHolder>& types) const 
         return false;
       }
     }
-    if (in_constraint_ && !in_constraint_->Validate(types)) {
+    if (constraint_ && !constraint_->Validate(types)) {
       return false;
     }
   }

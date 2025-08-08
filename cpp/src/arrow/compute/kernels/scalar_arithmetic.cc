@@ -669,16 +669,16 @@ void AddDecimalUnaryKernels(ScalarFunction* func) {
 template <typename Op>
 void AddDecimalBinaryKernels(const std::string& name, ScalarFunction* func) {
   OutputType out_type(null());
-  std::shared_ptr<InputConstraint> in_constraint = nullptr;
+  std::shared_ptr<MatchConstraint> constraint = nullptr;
   const std::string op = name.substr(0, name.find("_"));
   if (op == "add" || op == "subtract") {
     out_type = OutputType(ResolveDecimalAdditionOrSubtractionOutput);
-    in_constraint = DecimalsHaveSameScale();
+    constraint = DecimalsHaveSameScale();
   } else if (op == "multiply") {
     out_type = OutputType(ResolveDecimalMultiplicationOutput);
   } else if (op == "divide") {
     out_type = OutputType(ResolveDecimalDivisionOutput);
-    in_constraint = BinaryDecimalS1GEThanS2();
+    constraint = BinaryDecimalScaleComparisonGE();
   } else {
     DCHECK(false);
   }
@@ -687,10 +687,10 @@ void AddDecimalBinaryKernels(const std::string& name, ScalarFunction* func) {
   auto in_type256 = InputType(Type::DECIMAL256);
   auto exec128 = ScalarBinaryNotNullEqualTypes<Decimal128Type, Decimal128Type, Op>::Exec;
   auto exec256 = ScalarBinaryNotNullEqualTypes<Decimal256Type, Decimal256Type, Op>::Exec;
-  DCHECK_OK(func->AddKernel({in_type128, in_type128}, out_type, exec128, nullptr,
-                            in_constraint));
-  DCHECK_OK(func->AddKernel({in_type256, in_type256}, out_type, exec256, nullptr,
-                            in_constraint));
+  DCHECK_OK(
+      func->AddKernel({in_type128, in_type128}, out_type, exec128, nullptr, constraint));
+  DCHECK_OK(
+      func->AddKernel({in_type256, in_type256}, out_type, exec256, nullptr, constraint));
 }
 
 template <typename Op>
