@@ -152,12 +152,17 @@ class ARROW_EXPORT SelectionVector {
 class ARROW_EXPORT SelectionVectorSpan {
  public:
   explicit SelectionVectorSpan(const int32_t* indices = NULLPTR, int64_t length = 0,
-                               int64_t offset = 0, int32_t backstep = 0)
-      : indices_(indices), length_(length), offset_(offset), backstep_(backstep) {}
+                               int64_t offset = 0, int32_t index_back_shift = 0)
+      : indices_(indices),
+        length_(length),
+        offset_(offset),
+        index_back_shift_(index_back_shift) {}
 
-  void SetSlice(int64_t offset, int64_t length, int32_t backward = 0);
+  void SetSlice(int64_t offset, int64_t length, int32_t index_back_shift = 0);
 
-  int32_t operator[](int64_t i) const;
+  int32_t operator[](int64_t i) const {
+    return indices_[i + offset_] - index_back_shift_;
+  }
 
   int64_t length() const { return length_; }
 
@@ -165,7 +170,7 @@ class ARROW_EXPORT SelectionVectorSpan {
   const int32_t* indices_;
   int64_t length_;
   int64_t offset_;
-  int32_t backstep_;
+  int32_t index_back_shift_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
