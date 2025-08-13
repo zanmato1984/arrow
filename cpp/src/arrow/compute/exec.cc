@@ -1457,18 +1457,12 @@ SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data())
 
 int64_t SelectionVector::length() const { return data_->length; }
 
-void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length, int32_t backstep) {
+void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length,
+                                   int32_t index_back_shift) {
   DCHECK_NE(indices_, nullptr);
   offset_ = offset;
   length_ = length;
-  backstep_ = backstep;
-}
-
-int32_t SelectionVectorSpan::operator[](int64_t i) const {
-  DCHECK_GE(i, 0);
-  DCHECK_LT(i, length_);
-  DCHECK_GE(indices_[i + offset_], backstep_);
-  return indices_[i + offset_] - backstep_;
+  index_back_shift_ = index_back_shift;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
