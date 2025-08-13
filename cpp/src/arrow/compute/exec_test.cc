@@ -153,6 +153,24 @@ TEST(SelectionVector, Basics) {
   ASSERT_EQ(3, sel_vector->indices()[1]);
 }
 
+TEST(SelectionVectorSpan, Basics) {
+  auto indices = ArrayFromJSON(int32(), "[0, 3, 7]");
+  SelectionVectorSpan sel_span(indices->data()->GetValues<int32_t>(1),
+                               indices->length() - 1,
+                               /*offset=*/1, /*index_back_shift=*/1);
+  ASSERT_EQ(sel_span[0], 2);
+  ASSERT_EQ(sel_span[1], 6);
+
+  sel_span.SetSlice(/*offset=*/1, /*length=*/2, /*index_back_shift=*/0);
+  ASSERT_EQ(sel_span[0], 3);
+  ASSERT_EQ(sel_span[1], 7);
+
+  sel_span.SetSlice(/*offset=*/0, /*length=*/3);
+  ASSERT_EQ(sel_span[0], 0);
+  ASSERT_EQ(sel_span[1], 3);
+  ASSERT_EQ(sel_span[2], 7);
+}
+
 void AssertValidityZeroExtraBits(const uint8_t* data, int64_t length, int64_t offset) {
   const int64_t bit_extent = ((offset + length + 7) / 8) * 8;
   for (int64_t i = offset + length; i < bit_extent; ++i) {
