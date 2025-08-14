@@ -565,16 +565,25 @@ struct ARROW_EXPORT ScalarKernel : public Kernel {
   ScalarKernel() = default;
 
   ScalarKernel(std::shared_ptr<KernelSignature> sig, ArrayKernelExec exec,
-               KernelInit init = NULLPTR,
-               ArrayKernelSelectiveExec selective_exec = NULLPTR)
-      : Kernel(std::move(sig), init), exec(exec), selective_exec(selective_exec) {}
+               ArrayKernelSelectiveExec selective_exec, KernelInit init = NULLPTR)
+      : Kernel(std::move(sig), std::move(init)),
+        exec(std::move(exec)),
+        selective_exec(std::move(selective_exec)) {}
 
   ScalarKernel(std::vector<InputType> in_types, OutputType out_type, ArrayKernelExec exec,
-               KernelInit init = NULLPTR,
-               ArrayKernelSelectiveExec selective_exec = NULLPTR)
+               ArrayKernelSelectiveExec selective_exec, KernelInit init = NULLPTR)
       : Kernel(std::move(in_types), std::move(out_type), std::move(init)),
-        exec(exec),
-        selective_exec(selective_exec) {}
+        exec(std::move(exec)),
+        selective_exec(std::move(selective_exec)) {}
+
+  ScalarKernel(std::shared_ptr<KernelSignature> sig, ArrayKernelExec exec,
+               KernelInit init = NULLPTR)
+      : ScalarKernel(std::move(sig), std::move(exec), NULLPTR, std::move(init)) {}
+
+  ScalarKernel(std::vector<InputType> in_types, OutputType out_type, ArrayKernelExec exec,
+               KernelInit init = NULLPTR)
+      : ScalarKernel(std::move(in_types), std::move(out_type), std::move(exec), NULLPTR,
+                     std::move(init)) {}
 
   /// \brief Perform a single invocation of this kernel. Depending on the
   /// implementation, it may only write into preallocated memory, while in some
