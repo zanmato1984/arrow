@@ -69,7 +69,9 @@ class ARROW_EXPORT ExecSpanIterator {
   bool Next(ExecSpan* span, SelectionVectorSpan* selection_span = NULLPTR);
 
   int64_t length() const { return length_; }
+  int64_t selection_length() const { return selection_length_; }
   int64_t position() const { return position_; }
+  int64_t selection_position() const { return selection_position_; }
 
   bool have_all_scalars() const { return have_all_scalars_; }
   bool have_selection_vector() const { return selection_vector_ != NULLPTR; }
@@ -95,6 +97,7 @@ class ARROW_EXPORT ExecSpanIterator {
   std::vector<int64_t> value_offsets_;
   int64_t position_ = 0;
   int64_t length_ = 0;
+  int64_t selection_length_ = 0;
   int64_t selection_position_ = 0;
   int64_t max_chunksize_;
 };
