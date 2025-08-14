@@ -30,6 +30,7 @@
 #include "arrow/chunked_array.h"
 #include "arrow/compute/exec.h"
 #include "arrow/compute/exec_internal.h"
+#include "arrow/compute/expression.h"
 #include "arrow/compute/function.h"
 #include "arrow/compute/function_internal.h"
 #include "arrow/compute/kernel.h"
@@ -39,6 +40,7 @@
 #include "arrow/record_batch.h"
 #include "arrow/scalar.h"
 #include "arrow/status.h"
+#include "arrow/testing/generator.h"
 #include "arrow/type.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
@@ -947,6 +949,20 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
 // ----------------------------------------------------------------------
 // Scalar function execution
 
+template <typename Exec>
+auto TrivialSelectiveExec(Exec&& exec) {
+  return [exec = std::forward<Exec>(exec)](KernelContext* ctx, const ExecSpan& batch,
+                                           const SelectionVectorSpan& selection,
+                                           ExecResult* out) {
+    for (int i = 0; i < selection.length(); ++i) {
+      auto row_id = selection[i];
+      EXPECT_GE(row_id, 0);
+      EXPECT_LT(row_id, batch.length);
+    }
+    return exec(ctx, batch, out);
+  };
+}
+
 Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out) {
   DCHECK_EQ(1, batch.num_values());
   int value_size = batch[0].type()->byte_width();
@@ -959,6 +975,11 @@ Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out)
   return Status::OK();
 }
 
+Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
+                                  const SelectionVectorSpan& selection, ExecResult* out) {
+  return TrivialSelectiveExec(ExecCopyArrayData)(ctx, batch, selection, out);
+}
+
 Status ExecCopyArraySpan(KernelContext*, const ExecSpan& batch, ExecResult* out) {
   DCHECK_EQ(1, batch.num_values());
   int value_size = batch[0].type()->byte_width();
@@ -968,6 +989,11 @@ Status ExecCopyArraySpan(KernelContext*, const ExecSpan& batch, ExecResult* out)
   const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
   std::memcpy(dst, src, batch.length * value_size);
   return Status::OK();
+}
+
+Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
+                                  const SelectionVectorSpan& selection, ExecResult* out) {
+  return TrivialSelectiveExec(ExecCopyArraySpan)(ctx, batch, selection, out);
 }
 
 Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
@@ -986,6 +1012,12 @@ Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult*
   return ExecCopyArraySpan(ctx, batch, out);
 }
 
+Status SelectiveExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch,
+                                   const SelectionVectorSpan& selection,
+                                   ExecResult* out) {
+  return TrivialSelectiveExec(ExecComputedBitmap)(ctx, batch, selection, out);
+}
+
 Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
                               ExecResult* out) {
   // Validity preallocated, but not the data
@@ -995,6 +1027,12 @@ Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
   Status s = (ctx->Allocate(out_arr->length * value_size).Value(&out_arr->buffers[1]));
   DCHECK_OK(s);
   return ExecCopyArrayData(ctx, batch, out);
+}
+
+Status SelectiveExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
+                                       const SelectionVectorSpan& selection,
+                                       ExecResult* out) {
+  return TrivialSelectiveExec(ExecNoPreallocatedData)(ctx, batch, selection, out);
 }
 
 Status ExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
@@ -1010,6 +1048,12 @@ Status ExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
 
   // Reuse the kernel that allocates the data
   return ExecNoPreallocatedData(ctx, batch, out);
+}
+
+Status SelectiveExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
+                                           const SelectionVectorSpan& selection,
+                                           ExecResult* out) {
+  return TrivialSelectiveExec(ExecNoPreallocatedAnything)(ctx, batch, selection, out);
 }
 
 class ExampleOptions : public FunctionOptions {
@@ -1066,6 +1110,11 @@ Status ExecStateful(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
   return Status::OK();
 }
 
+Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
+                             const SelectionVectorSpan& selection, ExecResult* out) {
+  return TrivialSelectiveExec(ExecStateful)(ctx, batch, selection, out);
+}
+
 Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
   const int32_t* left_data = batch[0].array.GetValues<int32_t>(1);
   const int32_t* right_data = batch[1].array.GetValues<int32_t>(1);
@@ -1074,6 +1123,11 @@ Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
     *out_data++ = *left_data++ + *right_data++;
   }
   return Status::OK();
+}
+
+Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
+                             const SelectionVectorSpan& selection, ExecResult* out) {
+  return TrivialSelectiveExec(ExecAddInt32)(ctx, batch, selection, out);
 }
 
 class TestCallScalarFunction : public TestComputeInternals {
@@ -1086,9 +1140,13 @@ class TestCallScalarFunction : public TestComputeInternals {
     if (!initialized_) {
       initialized_ = true;
       AddCopyFunctions();
+      AddSelectiveCopyFunctions();
       AddNoPreallocateFunctions();
+      AddSelectiveNoPreallocateFunctions();
       AddStatefulFunction();
+      AddSelectiveStatefulFunction();
       AddScalarFunction();
+      AddSelectiveScalarFunction();
     }
   }
 
@@ -1110,6 +1168,34 @@ class TestCallScalarFunction : public TestComputeInternals {
     auto func2 = std::make_shared<ScalarFunction>(
         "test_copy_computed_bitmap", Arity::Unary(), /*doc=*/FunctionDoc::Empty());
     ScalarKernel kernel({uint8()}, uint8(), ExecComputedBitmap);
+    kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
+    ASSERT_OK(func2->AddKernel(kernel));
+    ASSERT_OK(registry->AddFunction(func2));
+  }
+
+  void AddSelectiveCopyFunctions() {
+    auto registry = GetFunctionRegistry();
+
+    // This function simply copies memory from the input argument into the
+    // (preallocated) output
+    auto func = std::make_shared<ScalarFunction>("test_copy_selective", Arity::Unary(),
+                                                 /*doc=*/FunctionDoc::Empty());
+
+    // Add a few kernels. Our implementation only accepts arrays
+    ASSERT_OK(func->AddKernel({uint8()}, uint8(), ExecCopyArraySpan,
+                              SelectiveExecCopyArraySpan));
+    ASSERT_OK(func->AddKernel({int32()}, int32(), ExecCopyArraySpan,
+                              SelectiveExecCopyArraySpan));
+    ASSERT_OK(func->AddKernel({float64()}, float64(), ExecCopyArraySpan,
+                              SelectiveExecCopyArraySpan));
+    ASSERT_OK(registry->AddFunction(func));
+
+    // A version which doesn't want the executor to call PropagateNulls
+    auto func2 =
+        std::make_shared<ScalarFunction>("test_copy_computed_bitmap_selective",
+                                         Arity::Unary(), /*doc=*/FunctionDoc::Empty());
+    ScalarKernel kernel({uint8()}, uint8(), ExecComputedBitmap,
+                        SelectiveExecComputedBitmap);
     kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
     ASSERT_OK(func2->AddKernel(kernel));
     ASSERT_OK(registry->AddFunction(func2));
@@ -1137,6 +1223,32 @@ class TestCallScalarFunction : public TestComputeInternals {
     ASSERT_OK(registry->AddFunction(f2));
   }
 
+  void AddSelectiveNoPreallocateFunctions() {
+    auto registry = GetFunctionRegistry();
+
+    // A function that allocates its own output memory. We have cases for both
+    // non-preallocated data and non-preallocated validity bitmap
+    auto f1 =
+        std::make_shared<ScalarFunction>("test_nopre_data_selective", Arity::Unary(),
+                                         /*doc=*/FunctionDoc::Empty());
+    auto f2 =
+        std::make_shared<ScalarFunction>("test_nopre_validity_or_data_selective",
+                                         Arity::Unary(), /*doc=*/FunctionDoc::Empty());
+
+    ScalarKernel kernel({uint8()}, uint8(), ExecNoPreallocatedData,
+                        SelectiveExecNoPreallocatedData);
+    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    ASSERT_OK(f1->AddKernel(kernel));
+
+    kernel.exec = ExecNoPreallocatedAnything;
+    kernel.selective_exec = SelectiveExecNoPreallocatedAnything;
+    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    ASSERT_OK(f2->AddKernel(kernel));
+
+    ASSERT_OK(registry->AddFunction(f1));
+    ASSERT_OK(registry->AddFunction(f2));
+  }
+
   void AddStatefulFunction() {
     auto registry = GetFunctionRegistry();
 
@@ -1150,12 +1262,38 @@ class TestCallScalarFunction : public TestComputeInternals {
     ASSERT_OK(registry->AddFunction(func));
   }
 
+  void AddSelectiveStatefulFunction() {
+    auto registry = GetFunctionRegistry();
+
+    // This function's behavior depends on a static parameter that is made
+    // available to the kernel's execution function through its Options object
+    auto func =
+        std::make_shared<ScalarFunction>("test_stateful_selective", Arity::Unary(),
+                                         /*doc=*/FunctionDoc::Empty());
+
+    ScalarKernel kernel({int32()}, int32(), ExecStateful, SelectiveExecStateful,
+                        InitStateful);
+    ASSERT_OK(func->AddKernel(kernel));
+    ASSERT_OK(registry->AddFunction(func));
+  }
+
   void AddScalarFunction() {
     auto registry = GetFunctionRegistry();
 
     auto func = std::make_shared<ScalarFunction>("test_scalar_add_int32", Arity::Binary(),
                                                  /*doc=*/FunctionDoc::Empty());
     ASSERT_OK(func->AddKernel({int32(), int32()}, int32(), ExecAddInt32));
+    ASSERT_OK(registry->AddFunction(func));
+  }
+
+  void AddSelectiveScalarFunction() {
+    auto registry = GetFunctionRegistry();
+
+    auto func = std::make_shared<ScalarFunction>("test_scalar_add_int32_selective",
+                                                 Arity::Binary(),
+                                                 /*doc=*/FunctionDoc::Empty());
+    ASSERT_OK(func->AddKernel({int32(), int32()}, int32(), ExecAddInt32,
+                              SelectiveExecAddInt32));
     ASSERT_OK(registry->AddFunction(func));
   }
 };
@@ -1169,8 +1307,10 @@ class FunctionCaller {
   virtual Result<Datum> Call(const std::vector<Datum>& args,
                              const FunctionOptions* options,
                              ExecContext* ctx = NULLPTR) = 0;
-  virtual Result<Datum> Call(const std::vector<Datum>& args,
-                             ExecContext* ctx = NULLPTR) = 0;
+
+  virtual Result<Datum> Call(const std::vector<Datum>& args, ExecContext* ctx = NULLPTR) {
+    return Call(args, /*options=*/nullptr, ctx);
+  }
 };
 
 using FunctionCallerMaker = std::function<Result<std::shared_ptr<FunctionCaller>>(
@@ -1192,9 +1332,6 @@ class SimpleFunctionCaller : public FunctionCaller {
   Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
                      ExecContext* ctx) override {
     return CallFunction(func_name, args, options, ctx);
-  }
-  Result<Datum> Call(const std::vector<Datum>& args, ExecContext* ctx) override {
-    return CallFunction(func_name, args, ctx);
   }
 
   std::string func_name;
@@ -1233,11 +1370,90 @@ class ExecFunctionCaller : public FunctionCaller {
     ARROW_RETURN_NOT_OK(func_exec->Init(options, ctx));
     return func_exec->Execute(args);
   }
-  Result<Datum> Call(const std::vector<Datum>& args, ExecContext* ctx) override {
-    return Call(args, nullptr, ctx);
-  }
 
   std::shared_ptr<FunctionExecutor> func_exec;
+};
+
+class ExpressionFunctionCaller : public FunctionCaller {
+ public:
+  ExpressionFunctionCaller(std::string func_name, std::shared_ptr<Schema> schema)
+      : func_name_(std::move(func_name)), schema_(std::move(schema)) {}
+
+  template <typename T>
+  static Result<std::shared_ptr<FunctionCaller>> Make(std::string func_name,
+                                                      std::vector<TypeHolder> in_types) {
+    std::vector<std::shared_ptr<Field>> fields(in_types.size());
+    for (size_t i = 0; i < in_types.size(); ++i) {
+      fields[i] = field("arg" + std::to_string(i), in_types[i].GetSharedPtr());
+    }
+    auto s = schema(std::move(fields));
+    return std::make_shared<T>(std::move(func_name), std::move(s));
+  }
+
+  Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
+                     ExecContext* ctx) override {
+    bool all_same = false;
+    auto length = InferBatchLength(args, &all_same);
+    ARROW_ASSIGN_OR_RAISE(auto selection, GetSelection(length));
+    ExecBatch batch(args, length, std::move(selection));
+    std::vector<Expression> expr_args(args.size());
+    for (int i = 0; i < static_cast<int>(args.size()); ++i) {
+      expr_args[i] = field_ref(i);
+    }
+    Expression expr =
+        call(func_name_, std::move(expr_args), options ? options->Copy() : nullptr);
+    ARROW_ASSIGN_OR_RAISE(auto bound, expr.Bind(*schema_, ctx));
+    return ExecuteScalarExpression(bound, batch, ctx);
+  }
+
+  static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
+                                                       std::vector<TypeHolder> in_types) {
+    return Make<ExpressionFunctionCaller>(func_name, std::move(in_types));
+  }
+
+  Result<Datum> Call(const std::vector<Datum>& args, ExecContext* ctx) override {
+    return Call(args, /*options=*/nullptr, ctx);
+  }
+
+ protected:
+  virtual Result<std::shared_ptr<SelectionVector>> GetSelection(int64_t length) const {
+    return nullptr;
+  }
+
+ private:
+  std::string func_name_;
+  std::shared_ptr<Schema> schema_;
+};
+
+class SelectiveFunctionCaller : public ExpressionFunctionCaller {
+ public:
+  SelectiveFunctionCaller(std::string func_name, std::shared_ptr<Schema> schema)
+      : ExpressionFunctionCaller(std::move(func_name) + "_selective", std::move(schema)) {
+  }
+
+  static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
+                                                       std::vector<TypeHolder> in_types) {
+    return ExpressionFunctionCaller::Make<SelectiveFunctionCaller>(std::move(func_name),
+                                                                   std::move(in_types));
+  }
+};
+
+class SelectAllFunctionCaller : public SelectiveFunctionCaller {
+ public:
+  SelectAllFunctionCaller(std::string func_name, std::shared_ptr<Schema> schema)
+      : SelectiveFunctionCaller(std::move(func_name), std::move(schema)) {}
+
+  static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
+                                                       std::vector<TypeHolder> in_types) {
+    return ExpressionFunctionCaller::Make<SelectAllFunctionCaller>(std::move(func_name),
+                                                                   std::move(in_types));
+  }
+
+ protected:
+  Result<std::shared_ptr<SelectionVector>> GetSelection(int64_t length) const override {
+    ARROW_ASSIGN_OR_RAISE(auto arr, gen::Step<int32_t>()->Generate(length));
+    return std::make_shared<SelectionVector>(*arr);
+  }
 };
 
 class TestCallScalarFunctionArgumentValidation : public TestCallScalarFunction {
@@ -1271,6 +1487,18 @@ TEST_F(TestCallScalarFunctionArgumentValidation, SimpleCall) {
 
 TEST_F(TestCallScalarFunctionArgumentValidation, ExecCall) {
   TestCallScalarFunctionArgumentValidation::DoTest(ExecFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionArgumentValidation, ExpressionCall) {
+  TestCallScalarFunctionArgumentValidation::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionArgumentValidation, SelectiveFunctionCaller) {
+  TestCallScalarFunctionArgumentValidation::DoTest(SelectiveFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionArgumentValidation, SelectAllFunctionCaller) {
+  TestCallScalarFunctionArgumentValidation::DoTest(SelectAllFunctionCaller::Maker);
 }
 
 class TestCallScalarFunctionPreallocationCases : public TestCallScalarFunction {
@@ -1352,6 +1580,18 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ExecCaller) {
   TestCallScalarFunctionPreallocationCases::DoTest(ExecFunctionCaller::Maker);
 }
 
+TEST_F(TestCallScalarFunctionPreallocationCases, ExpressionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, SelectiveFunctionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTest(SelectiveFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, SelectAllFunctionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTest(SelectAllFunctionCaller::Maker);
+}
+
 class TestCallScalarFunctionBasicNonStandardCases : public TestCallScalarFunction {
  protected:
   void DoTest(FunctionCallerMaker caller_maker);
@@ -1407,6 +1647,18 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, ExecCall) {
   TestCallScalarFunctionBasicNonStandardCases::DoTest(ExecFunctionCaller::Maker);
 }
 
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, ExpressionCall) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, SelectiveFunctionCaller) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(SelectiveFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, SelectAllFunctionCaller) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(SelectAllFunctionCaller::Maker);
+}
+
 class TestCallScalarFunctionStatefulKernel : public TestCallScalarFunction {
  protected:
   void DoTest(FunctionCallerMaker caller_maker);
@@ -1433,6 +1685,18 @@ TEST_F(TestCallScalarFunctionStatefulKernel, ExecCall) {
   TestCallScalarFunctionStatefulKernel::DoTest(ExecFunctionCaller::Maker);
 }
 
+TEST_F(TestCallScalarFunctionStatefulKernel, ExpressionCall) {
+  TestCallScalarFunctionStatefulKernel::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionStatefulKernel, SelectiveFunctionCaller) {
+  TestCallScalarFunctionStatefulKernel::DoTest(SelectiveFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionStatefulKernel, SelectAllFunctionCaller) {
+  TestCallScalarFunctionStatefulKernel::DoTest(SelectAllFunctionCaller::Maker);
+}
+
 class TestCallScalarFunctionScalarFunction : public TestCallScalarFunction {
  protected:
   void DoTest(FunctionCallerMaker caller_maker);
@@ -1457,6 +1721,18 @@ TEST_F(TestCallScalarFunctionScalarFunction, SimpleCall) {
 
 TEST_F(TestCallScalarFunctionScalarFunction, ExecCall) {
   TestCallScalarFunctionScalarFunction::DoTest(ExecFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionScalarFunction, ExpressionCall) {
+  TestCallScalarFunctionScalarFunction::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionScalarFunction, SelectiveFunctionCaller) {
+  TestCallScalarFunctionScalarFunction::DoTest(SelectiveFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionScalarFunction, SelectAllFunctionCaller) {
+  TestCallScalarFunctionScalarFunction::DoTest(SelectAllFunctionCaller::Maker);
 }
 
 TEST(Ordering, IsSuborderOf) {

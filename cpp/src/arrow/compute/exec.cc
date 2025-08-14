@@ -446,11 +446,11 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
       }
     }
 
-    if (have_all_scalars_) {
-      if (promote_if_all_scalars_) {
-        PromoteExecSpanScalars(span);
-      }
-    } else {
+    if (have_all_scalars_ && promote_if_all_scalars_) {
+      PromoteExecSpanScalars(span);
+    }
+
+    if (!have_all_scalars_ || promote_if_all_scalars_) {
       if (selection_vector_) {
         DCHECK_NE(selection_span, nullptr);
         *selection_span = SelectionVectorSpan(selection_vector_->indices());
