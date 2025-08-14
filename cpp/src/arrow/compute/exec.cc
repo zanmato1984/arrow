@@ -360,6 +360,7 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   have_all_scalars_ = CheckIfAllScalar(batch);
   promote_if_all_scalars_ = promote_if_all_scalars;
   position_ = 0;
+  selection_position_ = 0;
   length_ = batch.length;
   chunk_indexes_.clear();
   chunk_indexes_.resize(args_->size(), 0);
@@ -369,6 +370,11 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   value_offsets_.resize(args_->size(), 0);
   max_chunksize_ = std::min(length_, max_chunksize);
   selection_vector_ = batch.selection_vector.get();
+  if (selection_vector_) {
+    selection_length_ = selection_vector_->length();
+  } else {
+    selection_length_ = 0;
+  }
   return Status::OK();
 }
 
@@ -440,14 +446,14 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
       }
     }
 
-    if (have_all_scalars_ && promote_if_all_scalars_) {
-      PromoteExecSpanScalars(span);
+    if (have_all_scalars_) {
+      if (promote_if_all_scalars_) {
+        PromoteExecSpanScalars(span);
+      }
     } else {
       if (selection_vector_) {
         DCHECK_NE(selection_span, nullptr);
         *selection_span = SelectionVectorSpan(selection_vector_->indices());
-      } else {
-        DCHECK_EQ(selection_span, nullptr);
       }
     }
 

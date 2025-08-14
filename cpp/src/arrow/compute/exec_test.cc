@@ -750,13 +750,23 @@ class TestExecSpanIterator : public TestComputeInternals {
   }
   void CheckIteration(const ExecBatch& input, int chunksize,
                       const std::vector<int>& ex_batch_sizes) {
+    ASSERT_EQ(input.selection_vector, nullptr);
+    std::vector<int> ex_selection_sizes(ex_batch_sizes.size(), 0);
+    return CheckIteration(input, chunksize, ex_batch_sizes, ex_selection_sizes);
+  }
+  void CheckIteration(const ExecBatch& input, int chunksize,
+                      const std::vector<int>& ex_batch_sizes,
+                      const std::vector<int>& ex_selection_sizes) {
     SetupIterator(input, chunksize);
     ExecSpan batch;
-    int64_t position = 0;
+    SelectionVectorSpan selection;
+    int64_t position = 0, selection_position = 0;
     for (size_t i = 0; i < ex_batch_sizes.size(); ++i) {
       ASSERT_EQ(position, iterator_.position());
-      ASSERT_TRUE(iterator_.Next(&batch));
+      ASSERT_EQ(selection_position, iterator_.selection_position());
+      ASSERT_TRUE(iterator_.Next(&batch, &selection));
       ASSERT_EQ(ex_batch_sizes[i], batch.length);
+      ASSERT_EQ(ex_selection_sizes[i], selection.length());
 
       for (size_t j = 0; j < input.values.size(); ++j) {
         switch (input[j].kind()) {
@@ -782,12 +792,22 @@ class TestExecSpanIterator : public TestComputeInternals {
             break;
         }
       }
+      if (iterator_.have_selection_vector()) {
+        for (int64_t j = 0; j < selection.length(); ++j) {
+          ASSERT_EQ(input.selection_vector->indices()[selection_position + j] - position,
+                    selection[j]);
+          ASSERT_GE(selection[j], 0);
+          ASSERT_LT(selection[j], batch.length);
+        }
+      }
       position += ex_batch_sizes[i];
+      selection_position += ex_selection_sizes[i];
     }
     // Ensure that the iterator is exhausted
-    ASSERT_FALSE(iterator_.Next(&batch));
+    ASSERT_FALSE(iterator_.Next(&batch, &selection));
 
     ASSERT_EQ(iterator_.length(), iterator_.position());
+    ASSERT_EQ(iterator_.selection_length(), iterator_.selection_position());
   }
 
  protected:
@@ -897,6 +917,31 @@ TEST_F(TestExecSpanIterator, ZeroLengthInputs) {
   // ChunkedArray with single empty chunk
   input.values = {Datum(GetInt32Chunked({0}))};
   CheckArgs(input);
+}
+
+TEST_F(TestExecSpanIterator, SelectionSpanBasic) {
+  ExecBatch batch(
+      {Datum(GetInt32Array(30)), Datum(GetInt32Array(30)),
+       Datum(std::make_shared<Int32Scalar>(5)), Datum(MakeNullScalar(boolean()))},
+      30, std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), "[1, 2, 7, 29]")));
+
+  CheckIteration(batch, /*chunksize=*/7, {7, 7, 7, 7, 2}, {2, 1, 0, 0, 1});
+  CheckIteration(batch, /*chunksize=*/10, {10, 10, 10}, {3, 0, 1});
+  CheckIteration(batch, /*chunksize=*/20, {20, 10}, {3, 1});
+  CheckIteration(batch, /*chunksize=*/30, {30}, {4});
+}
+
+TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
+  ExecBatch batch(
+      {Datum(GetInt32Chunked({0, 20, 10})), Datum(GetInt32Chunked({15, 15})),
+       Datum(GetInt32Array(30)), Datum(std::make_shared<Int32Scalar>(5)),
+       Datum(MakeNullScalar(boolean()))},
+      30, std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), "[1, 2, 7, 29]")));
+
+  CheckIteration(batch, /*chunksize=*/7, {7, 7, 1, 5, 7, 3}, {2, 1, 0, 0, 0, 1});
+  CheckIteration(batch, /*chunksize=*/10, {10, 5, 5, 10}, {3, 0, 0, 1});
+  CheckIteration(batch, /*chunksize=*/20, {15, 5, 10}, {3, 0, 1});
+  CheckIteration(batch, /*chunksize=*/30, {15, 5, 10}, {3, 0, 1});
 }
 
 // ----------------------------------------------------------------------
