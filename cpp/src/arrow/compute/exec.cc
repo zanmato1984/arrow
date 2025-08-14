@@ -445,12 +445,7 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
     } else {
       if (selection_vector_) {
         DCHECK_NE(selection_span, nullptr);
-        if (have_chunked_arrays_) {
-          *selection_span = SelectionVectorSpan(selection_vector_->indices(), 0);
-        } else {
-          *selection_span = SelectionVectorSpan(selection_vector_->indices(),
-                                                selection_vector_->length());
-        }
+        *selection_span = SelectionVectorSpan(selection_vector_->indices());
       } else {
         DCHECK_EQ(selection_span, nullptr);
       }
