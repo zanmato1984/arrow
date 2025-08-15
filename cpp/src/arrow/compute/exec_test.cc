@@ -1431,24 +1431,6 @@ class ExpressionFunctionCaller : public FunctionCaller {
   std::shared_ptr<Schema> schema_;
 };
 
-// Call the non-selective function via expression with full selection, triggering the
-// dense execution path.
-class DenseFunctionCaller : public ExpressionFunctionCaller {
- public:
-  using ExpressionFunctionCaller::ExpressionFunctionCaller;
-
-  static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
-                                                       std::vector<TypeHolder> in_types) {
-    return ExpressionFunctionCaller::Make<DenseFunctionCaller>(std::move(func_name),
-                                                               std::move(in_types));
-  }
-
- protected:
-  Result<std::shared_ptr<SelectionVector>> GetSelection(int64_t length) const override {
-    return MakeFullSelection(length);
-  }
-};
-
 // Call the selective counterpart of the function via expression with no selection vector,
 // triggering the regular sparse execution path.
 class RegularSparseFunctionCaller : public ExpressionFunctionCaller {
@@ -1475,6 +1457,24 @@ class SelectiveSparseFunctionCaller : public RegularSparseFunctionCaller {
                                                        std::vector<TypeHolder> in_types) {
     return ExpressionFunctionCaller::Make<SelectiveSparseFunctionCaller>(
         std::move(func_name), std::move(in_types));
+  }
+
+ protected:
+  Result<std::shared_ptr<SelectionVector>> GetSelection(int64_t length) const override {
+    return MakeFullSelection(length);
+  }
+};
+
+// Call the non-selective function via expression with full selection, triggering the
+// dense execution path.
+class DenseFunctionCaller : public ExpressionFunctionCaller {
+ public:
+  using ExpressionFunctionCaller::ExpressionFunctionCaller;
+
+  static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
+                                                       std::vector<TypeHolder> in_types) {
+    return ExpressionFunctionCaller::Make<DenseFunctionCaller>(std::move(func_name),
+                                                               std::move(in_types));
   }
 
  protected:
@@ -1520,10 +1520,6 @@ TEST_F(TestCallScalarFunctionArgumentValidation, ExpressionCall) {
   TestCallScalarFunctionArgumentValidation::DoTest(ExpressionFunctionCaller::Maker);
 }
 
-TEST_F(TestCallScalarFunctionArgumentValidation, DenseFunctionCaller) {
-  TestCallScalarFunctionArgumentValidation::DoTest(DenseFunctionCaller::Maker);
-}
-
 TEST_F(TestCallScalarFunctionArgumentValidation, RegularSparseFunctionCaller) {
   TestCallScalarFunctionArgumentValidation::DoTest(RegularSparseFunctionCaller::Maker);
 }
@@ -1532,9 +1528,14 @@ TEST_F(TestCallScalarFunctionArgumentValidation, SelectiveSparseFunctionCaller) 
   TestCallScalarFunctionArgumentValidation::DoTest(SelectiveSparseFunctionCaller::Maker);
 }
 
+TEST_F(TestCallScalarFunctionArgumentValidation, DenseFunctionCaller) {
+  TestCallScalarFunctionArgumentValidation::DoTest(DenseFunctionCaller::Maker);
+}
+
 class TestCallScalarFunctionPreallocationCases : public TestCallScalarFunction {
  protected:
   void DoTest(FunctionCallerMaker caller_maker);
+  void DoTestIndependentPreallocate(FunctionCallerMaker caller_maker);
 };
 
 void TestCallScalarFunctionPreallocationCases::DoTest(FunctionCallerMaker caller_maker) {
@@ -1580,6 +1581,23 @@ void TestCallScalarFunctionPreallocationCases::DoTest(FunctionCallerMaker caller
       ASSERT_EQ(1, actual->num_chunks());
       AssertChunkedEquivalent(*carr, *actual);
     }
+  };
+
+  ASSERT_OK_AND_ASSIGN(auto test_copy, caller_maker("test_copy", {uint8()}));
+  CheckFunction(test_copy);
+  ASSERT_OK_AND_ASSIGN(auto test_copy_computed_bitmap,
+                       caller_maker("test_copy_computed_bitmap", {uint8()}));
+  CheckFunction(test_copy_computed_bitmap);
+}
+
+void TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+    FunctionCallerMaker caller_maker) {
+  double null_prob = 0.2;
+
+  auto arr = GetUInt8Array(100, null_prob);
+
+  auto CheckFunction = [&](std::shared_ptr<FunctionCaller> test_copy) {
+    ResetContexts();
 
     // Preallocate independently for each batch
     {
@@ -1615,10 +1633,6 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ExpressionCaller) {
   TestCallScalarFunctionPreallocationCases::DoTest(ExpressionFunctionCaller::Maker);
 }
 
-TEST_F(TestCallScalarFunctionPreallocationCases, DenseFunctionCaller) {
-  TestCallScalarFunctionPreallocationCases::DoTest(DenseFunctionCaller::Maker);
-}
-
 TEST_F(TestCallScalarFunctionPreallocationCases, RegularSparseFunctionCaller) {
   TestCallScalarFunctionPreallocationCases::DoTest(RegularSparseFunctionCaller::Maker);
 }
@@ -1627,9 +1641,41 @@ TEST_F(TestCallScalarFunctionPreallocationCases, SelectiveSparseFunctionCaller) 
   TestCallScalarFunctionPreallocationCases::DoTest(SelectiveSparseFunctionCaller::Maker);
 }
 
+TEST_F(TestCallScalarFunctionPreallocationCases, DenseFunctionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTest(DenseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateSimpleCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+      SimpleFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateExecCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+      ExecFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateExpressionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+      ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases,
+       IndependentPreallocateRegularSparseFunctionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+      RegularSparseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases,
+       IndependentPreallocateSelectiveSparseFunctionCaller) {
+  TestCallScalarFunctionPreallocationCases::DoTestIndependentPreallocate(
+      SelectiveSparseFunctionCaller::Maker);
+}
+
 class TestCallScalarFunctionBasicNonStandardCases : public TestCallScalarFunction {
  protected:
   void DoTest(FunctionCallerMaker caller_maker);
+  void DoTestChunked(FunctionCallerMaker caller_maker);
 };
 
 void TestCallScalarFunctionBasicNonStandardCases::DoTest(
@@ -1653,6 +1699,30 @@ void TestCallScalarFunctionBasicNonStandardCases::DoTest(
       ASSERT_OK_AND_ASSIGN(Datum result, test_nopre->Call(args));
       AssertArraysEqual(*arr, *result.make_array(), true);
     }
+  };
+
+  ASSERT_OK_AND_ASSIGN(auto test_nopre_data, caller_maker("test_nopre_data", {uint8()}));
+  CheckFunction(test_nopre_data);
+  ASSERT_OK_AND_ASSIGN(auto test_nopre_validity_or_data,
+                       caller_maker("test_nopre_validity_or_data", {uint8()}));
+  CheckFunction(test_nopre_validity_or_data);
+}
+
+void TestCallScalarFunctionBasicNonStandardCases::DoTestChunked(
+    FunctionCallerMaker caller_maker) {
+  // Test a handful of cases
+  //
+  // * Validity bitmap computed by kernel rather than using PropagateNulls
+  // * Data not pre-allocated
+  // * Validity bitmap not pre-allocated
+
+  double null_prob = 0.2;
+
+  auto arr = GetUInt8Array(1000, null_prob);
+  std::vector<Datum> args = {Datum(arr)};
+
+  auto CheckFunction = [&](std::shared_ptr<FunctionCaller> test_nopre) {
+    ResetContexts();
 
     // Split execution into 3 chunks
     {
@@ -1686,15 +1756,37 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, ExpressionCall) {
   TestCallScalarFunctionBasicNonStandardCases::DoTest(ExpressionFunctionCaller::Maker);
 }
 
-TEST_F(TestCallScalarFunctionBasicNonStandardCases, DenseFunctionCaller) {
-  TestCallScalarFunctionBasicNonStandardCases::DoTest(DenseFunctionCaller::Maker);
-}
-
 TEST_F(TestCallScalarFunctionBasicNonStandardCases, RegularSparseFunctionCaller) {
   TestCallScalarFunctionBasicNonStandardCases::DoTest(RegularSparseFunctionCaller::Maker);
 }
 
 TEST_F(TestCallScalarFunctionBasicNonStandardCases, SelectiveSparseFunctionCaller) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(
+      SelectiveSparseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, DenseFunctionCaller) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(DenseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, ChunkedSimpleCall) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(SimpleFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, ChunkedExecCall) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(ExecFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, ChunkedExpressionCall) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(ExpressionFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases, ChunkedRegularSparseFunctionCaller) {
+  TestCallScalarFunctionBasicNonStandardCases::DoTest(RegularSparseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionBasicNonStandardCases,
+       ChunkedSelectiveSparseFunctionCaller) {
   TestCallScalarFunctionBasicNonStandardCases::DoTest(
       SelectiveSparseFunctionCaller::Maker);
 }
@@ -1729,16 +1821,16 @@ TEST_F(TestCallScalarFunctionStatefulKernel, ExpressionCall) {
   TestCallScalarFunctionStatefulKernel::DoTest(ExpressionFunctionCaller::Maker);
 }
 
-TEST_F(TestCallScalarFunctionStatefulKernel, DenseFunctionCaller) {
-  TestCallScalarFunctionStatefulKernel::DoTest(DenseFunctionCaller::Maker);
-}
-
 TEST_F(TestCallScalarFunctionStatefulKernel, RegularSparseFunctionCaller) {
   TestCallScalarFunctionStatefulKernel::DoTest(RegularSparseFunctionCaller::Maker);
 }
 
 TEST_F(TestCallScalarFunctionStatefulKernel, SelectiveSparseFunctionCaller) {
   TestCallScalarFunctionStatefulKernel::DoTest(SelectiveSparseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionStatefulKernel, DenseFunctionCaller) {
+  TestCallScalarFunctionStatefulKernel::DoTest(DenseFunctionCaller::Maker);
 }
 
 class TestCallScalarFunctionScalarFunction : public TestCallScalarFunction {
@@ -1771,16 +1863,16 @@ TEST_F(TestCallScalarFunctionScalarFunction, ExpressionCall) {
   TestCallScalarFunctionScalarFunction::DoTest(ExpressionFunctionCaller::Maker);
 }
 
-TEST_F(TestCallScalarFunctionScalarFunction, DenseFunctionCaller) {
-  TestCallScalarFunctionScalarFunction::DoTest(DenseFunctionCaller::Maker);
-}
-
 TEST_F(TestCallScalarFunctionScalarFunction, RegularSparseFunctionCaller) {
   TestCallScalarFunctionScalarFunction::DoTest(RegularSparseFunctionCaller::Maker);
 }
 
 TEST_F(TestCallScalarFunctionScalarFunction, SelectiveSparseFunctionCaller) {
   TestCallScalarFunctionScalarFunction::DoTest(SelectiveSparseFunctionCaller::Maker);
+}
+
+TEST_F(TestCallScalarFunctionScalarFunction, DenseFunctionCaller) {
+  TestCallScalarFunctionScalarFunction::DoTest(DenseFunctionCaller::Maker);
 }
 
 TEST(Ordering, IsSuborderOf) {
