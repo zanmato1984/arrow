@@ -1417,8 +1417,15 @@ class FunctionCaller {
   virtual std::string name() const = 0;
 
   virtual Result<Datum> Call(const std::vector<Datum>& args,
+                             std::shared_ptr<SelectionVector> selection,
                              const FunctionOptions* options,
                              ExecContext* ctx = NULLPTR) const = 0;
+
+  virtual Result<Datum> Call(const std::vector<Datum>& args,
+                             const FunctionOptions* options,
+                             ExecContext* ctx = NULLPTR) const {
+    return Call(args, nullptr, options, ctx);
+  }
 
   virtual Result<Datum> Call(const std::vector<Datum>& args,
                              ExecContext* ctx = NULLPTR) const {
@@ -1444,8 +1451,11 @@ class SimpleFunctionCaller : public FunctionCaller {
     return Make(func_name);
   }
 
-  Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
-                     ExecContext* ctx) const override {
+  Result<Datum> Call(const std::vector<Datum>& args,
+                     std::shared_ptr<SelectionVector> selection,
+                     const FunctionOptions* options, ExecContext* ctx) const override {
+    ARROW_RETURN_IF(selection != nullptr,
+                    Status::Invalid("Selection vector not supported"));
     return CallFunction(func_name, args, options, ctx);
   }
 
@@ -1482,8 +1492,11 @@ class ExecFunctionCaller : public FunctionCaller {
     return Make(func_name, std::move(in_types));
   }
 
-  Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
-                     ExecContext* ctx) const override {
+  Result<Datum> Call(const std::vector<Datum>& args,
+                     std::shared_ptr<SelectionVector> selection,
+                     const FunctionOptions* options, ExecContext* ctx) const override {
+    ARROW_RETURN_IF(selection != nullptr,
+                    Status::Invalid("Selection vector not supported"));
     ARROW_RETURN_NOT_OK(func_exec->Init(options, ctx));
     return func_exec->Execute(args);
   }
@@ -1511,18 +1524,9 @@ class ExpressionFunctionCaller : public FunctionCaller {
     return std::make_shared<T>(std::move(func_name), std::move(in_types));
   }
 
-  Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
-                     ExecContext* ctx) const override {
-    bool all_same = false;
-    auto length = InferBatchLength(args, &all_same);
-    ARROW_ASSIGN_OR_RAISE(auto selection, GetSelection(length));
-    return CallWithSelection(args, options, std::move(selection), ctx);
-  }
-
-  Result<Datum> CallWithSelection(const std::vector<Datum>& args,
-                                  const FunctionOptions* options,
-                                  std::shared_ptr<SelectionVector> selection,
-                                  ExecContext* ctx) const {
+  Result<Datum> Call(const std::vector<Datum>& args,
+                     std::shared_ptr<SelectionVector> selection,
+                     const FunctionOptions* options, ExecContext* ctx) const override {
     bool all_same = false;
     auto length = InferBatchLength(args, &all_same);
     ExecBatch batch(args, length, std::move(selection));
@@ -1534,6 +1538,14 @@ class ExpressionFunctionCaller : public FunctionCaller {
         call(func_name_, std::move(expr_args), options ? options->Copy() : nullptr);
     ARROW_ASSIGN_OR_RAISE(auto bound, expr.Bind(*schema_, ctx));
     return ExecuteScalarExpression(bound, batch, ctx);
+  }
+
+  Result<Datum> Call(const std::vector<Datum>& args, const FunctionOptions* options,
+                     ExecContext* ctx) const override {
+    bool all_same = false;
+    auto length = InferBatchLength(args, &all_same);
+    ARROW_ASSIGN_OR_RAISE(auto selection, GetSelection(length));
+    return Call(args, std::move(selection), options, ctx);
   }
 
   static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
