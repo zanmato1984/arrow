@@ -949,18 +949,20 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
 // ----------------------------------------------------------------------
 // Scalar function execution
 
-template <typename Exec>
-auto TrivialSelectiveExec(Exec&& exec) {
-  return [exec = std::forward<Exec>(exec)](KernelContext* ctx, const ExecSpan& batch,
-                                           const SelectionVectorSpan& selection,
-                                           ExecResult* out) {
-    for (int i = 0; i < selection.length(); ++i) {
-      auto row_id = selection[i];
-      EXPECT_GE(row_id, 0);
-      EXPECT_LT(row_id, batch.length);
+template <typename OnSelectionFn, typename OnNonSelectionFn>
+Status VisitSelectionVector(const SelectionVectorSpan& selection, int64_t length,
+                            OnSelectionFn&& on_selection,
+                            OnNonSelectionFn&& on_non_selection) {
+  int64_t selected = 0;
+  for (int64_t i = 0; i < length; ++i) {
+    if (selected < selection.length() && i == selection[selected]) {
+      on_selection(i);
+      ++selected;
+    } else {
+      on_non_selection(i);
     }
-    return exec(ctx, batch, out);
-  };
+  }
+  return Status::OK();
 }
 
 Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out) {
@@ -975,9 +977,32 @@ Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out)
   return Status::OK();
 }
 
+constexpr int8_t kNonSelectionValue = 0xFE;
+
 Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
                                   const SelectionVectorSpan& selection, ExecResult* out) {
-  return TrivialSelectiveExec(ExecCopyArrayData)(ctx, batch, selection, out);
+  DCHECK_EQ(1, batch.num_values());
+  int value_size = batch[0].type()->byte_width();
+
+  const ArraySpan& arg0 = batch[0].array;
+  ArrayData* out_arr = out->array_data().get();
+  uint8_t* dst_validity = out_arr->buffers[0]->mutable_data();
+  int64_t dst_validity_offset = out_arr->offset;
+  uint8_t* dst = out_arr->buffers[1]->mutable_data() + out_arr->offset * value_size;
+  const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
+  return VisitSelectionVector(
+      selection, batch.length,
+      [&](int64_t i) {
+        // Copy the selected value
+        std::memcpy(dst + i * value_size, src + i * value_size, value_size);
+      },
+      [&](int64_t i) {
+        // Set the non-selected as valid (regardless of its precomputed validity) and set
+        // its values with a special value
+        bit_util::SetBit(dst_validity, dst_validity_offset + i);
+        std::memset(dst + i * value_size, kNonSelectionValue, value_size);
+      });
+  return Status::OK();
 }
 
 Status ExecCopyArraySpan(KernelContext*, const ExecSpan& batch, ExecResult* out) {
@@ -993,7 +1018,26 @@ Status ExecCopyArraySpan(KernelContext*, const ExecSpan& batch, ExecResult* out)
 
 Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
                                   const SelectionVectorSpan& selection, ExecResult* out) {
-  return TrivialSelectiveExec(ExecCopyArraySpan)(ctx, batch, selection, out);
+  DCHECK_EQ(1, batch.num_values());
+  int value_size = batch[0].type()->byte_width();
+  const ArraySpan& arg0 = batch[0].array;
+  ArraySpan* out_arr = out->array_span_mutable();
+  uint8_t* dst_validity = out_arr->buffers[0].data;
+  int64_t dst_validity_offset = out_arr->offset;
+  uint8_t* dst = out_arr->buffers[1].data + out_arr->offset * value_size;
+  const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
+  return VisitSelectionVector(
+      selection, batch.length,
+      [&](int64_t i) {
+        // Copy the selected value
+        std::memcpy(dst + i * value_size, src + i * value_size, value_size);
+      },
+      [&](int64_t i) {
+        // Set the non-selected as valid (regardless of its precomputed validity) and set
+        // its values with a special value
+        bit_util::SetBit(dst_validity, dst_validity_offset + i);
+        std::memset(dst + i * value_size, kNonSelectionValue, value_size);
+      });
 }
 
 Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
@@ -1015,7 +1059,19 @@ Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult*
 Status SelectiveExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch,
                                    const SelectionVectorSpan& selection,
                                    ExecResult* out) {
-  return TrivialSelectiveExec(ExecComputedBitmap)(ctx, batch, selection, out);
+  // Propagate nulls not used. Check that the out bitmap isn't the same already
+  // as the input bitmap
+  const ArraySpan& arg0 = batch[0].array;
+  ArraySpan* out_arr = out->array_span_mutable();
+  if (CountSetBits(arg0.buffers[0].data, arg0.offset, batch.length) > 0) {
+    // Check that the bitmap has not been already copied over
+    DCHECK(!BitmapEquals(arg0.buffers[0].data, arg0.offset, out_arr->buffers[0].data,
+                         out_arr->offset, batch.length));
+  }
+
+  CopyBitmap(arg0.buffers[0].data, arg0.offset, batch.length, out_arr->buffers[0].data,
+             out_arr->offset);
+  return SelectiveExecCopyArraySpan(ctx, batch, selection, out);
 }
 
 Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
@@ -1032,7 +1088,13 @@ Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
 Status SelectiveExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
                                        const SelectionVectorSpan& selection,
                                        ExecResult* out) {
-  return TrivialSelectiveExec(ExecNoPreallocatedData)(ctx, batch, selection, out);
+  // Validity preallocated, but not the data
+  ArrayData* out_arr = out->array_data().get();
+  DCHECK_EQ(0, out_arr->offset);
+  int value_size = batch[0].type()->byte_width();
+  Status s = (ctx->Allocate(out_arr->length * value_size).Value(&out_arr->buffers[1]));
+  DCHECK_OK(s);
+  return SelectiveExecCopyArrayData(ctx, batch, selection, out);
 }
 
 Status ExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
@@ -1053,7 +1115,17 @@ Status ExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
 Status SelectiveExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
                                            const SelectionVectorSpan& selection,
                                            ExecResult* out) {
-  return TrivialSelectiveExec(ExecNoPreallocatedAnything)(ctx, batch, selection, out);
+  // Neither validity nor data preallocated
+  ArrayData* out_arr = out->array_data().get();
+  DCHECK_EQ(0, out_arr->offset);
+  Status s = (ctx->AllocateBitmap(out_arr->length).Value(&out_arr->buffers[0]));
+  DCHECK_OK(s);
+  const ArraySpan& arg0 = batch[0].array;
+  CopyBitmap(arg0.buffers[0].data, arg0.offset, batch.length,
+             out_arr->buffers[0]->mutable_data(), /*offset=*/0);
+
+  // Reuse the kernel that allocates the data
+  return SelectiveExecNoPreallocatedData(ctx, batch, selection, out);
 }
 
 class ExampleOptions : public FunctionOptions {
@@ -1112,7 +1184,28 @@ Status ExecStateful(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
 
 Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
                              const SelectionVectorSpan& selection, ExecResult* out) {
-  return TrivialSelectiveExec(ExecStateful)(ctx, batch, selection, out);
+  // We take the value from the state and multiply the data in batch[0] with it
+  ExampleState* state = static_cast<ExampleState*>(ctx->state());
+  int32_t multiplier = checked_cast<const Int32Scalar&>(*state->value).value;
+
+  const ArraySpan& arg0 = batch[0].array;
+  ArraySpan* out_arr = out->array_span_mutable();
+  const int32_t* arg0_data = arg0.GetValues<int32_t>(1);
+  uint8_t* dst_validity = out_arr->buffers[0].data;
+  int64_t dst_validity_offset = out_arr->offset;
+  int32_t* dst = out_arr->GetValues<int32_t>(1);
+  return VisitSelectionVector(
+      selection, batch.length,
+      [&](int64_t i) {
+        // Copy the selected value
+        dst[i] = arg0_data[i] * multiplier;
+      },
+      [&](int64_t i) {
+        // Set the non-selected as valid (regardless of its precomputed validity) and set
+        // its values with a special value
+        bit_util::SetBit(dst_validity, dst_validity_offset + i);
+        dst[i] = kNonSelectionValue;
+      });
 }
 
 Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
@@ -1127,7 +1220,24 @@ Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
 
 Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
                              const SelectionVectorSpan& selection, ExecResult* out) {
-  return TrivialSelectiveExec(ExecAddInt32)(ctx, batch, selection, out);
+  const int32_t* left_data = batch[0].array.GetValues<int32_t>(1);
+  const int32_t* right_data = batch[1].array.GetValues<int32_t>(1);
+  ArraySpan* out_arr = out->array_span_mutable();
+  uint8_t* dst_validity = out_arr->buffers[0].data;
+  int64_t dst_validity_offset = out_arr->offset;
+  int32_t* out_data = out_arr->GetValues<int32_t>(1);
+  return VisitSelectionVector(
+      selection, batch.length,
+      [&](int64_t i) {
+        // Copy the selected value
+        out_data[i] = left_data[i] + right_data[i];
+      },
+      [&](int64_t i) {
+        // Set the non-selected as valid (regardless of its precomputed validity) and set
+        // its values with a special value
+        bit_util::SetBit(dst_validity, dst_validity_offset + i);
+        out_data[i] = kNonSelectionValue;
+      });
 }
 
 class TestCallScalarFunction : public TestComputeInternals {
