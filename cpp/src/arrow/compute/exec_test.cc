@@ -921,11 +921,22 @@ TEST_F(TestExecSpanIterator, ZeroLengthInputs) {
   CheckArgs(input);
 }
 
+std::shared_ptr<SelectionVector> MakeSelectionVector(const std::string& json) {
+  return std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), json));
+}
+
+std::shared_ptr<SelectionVector> MakeSelectionVectorUntil(int64_t length) {
+  auto res = gen::Step<int32_t>()->Generate(length);
+  DCHECK_OK(res.status());
+  auto arr = res.ValueUnsafe();
+  return std::make_shared<SelectionVector>(*arr);
+}
+
 TEST_F(TestExecSpanIterator, SelectionSpanBasic) {
   ExecBatch batch(
       {Datum(GetInt32Array(30)), Datum(GetInt32Array(30)),
        Datum(std::make_shared<Int32Scalar>(5)), Datum(MakeNullScalar(boolean()))},
-      30, std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), "[1, 2, 7, 29]")));
+      30, MakeSelectionVector("[1, 2, 7, 29]"));
 
   CheckIteration(batch, /*chunksize=*/7, {7, 7, 7, 7, 2}, {2, 1, 0, 0, 1});
   CheckIteration(batch, /*chunksize=*/10, {10, 10, 10}, {3, 0, 1});
@@ -934,11 +945,10 @@ TEST_F(TestExecSpanIterator, SelectionSpanBasic) {
 }
 
 TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
-  ExecBatch batch(
-      {Datum(GetInt32Chunked({0, 20, 10})), Datum(GetInt32Chunked({15, 15})),
-       Datum(GetInt32Array(30)), Datum(std::make_shared<Int32Scalar>(5)),
-       Datum(MakeNullScalar(boolean()))},
-      30, std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), "[1, 2, 7, 29]")));
+  ExecBatch batch({Datum(GetInt32Chunked({0, 20, 10})), Datum(GetInt32Chunked({15, 15})),
+                   Datum(GetInt32Array(30)), Datum(std::make_shared<Int32Scalar>(5)),
+                   Datum(MakeNullScalar(boolean()))},
+                  30, MakeSelectionVector("[1, 2, 7, 29]"));
 
   CheckIteration(batch, /*chunksize=*/7, {7, 7, 1, 5, 7, 3}, {2, 1, 0, 0, 0, 1});
   CheckIteration(batch, /*chunksize=*/10, {10, 5, 5, 10}, {3, 0, 0, 1});
@@ -950,9 +960,9 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
 // Scalar function execution
 
 template <typename OnSelectionFn, typename OnNonSelectionFn>
-Status VisitSelectionVector(const SelectionVectorSpan& selection, int64_t length,
-                            OnSelectionFn&& on_selection,
-                            OnNonSelectionFn&& on_non_selection) {
+void VisitSelectionVector(const SelectionVectorSpan& selection, int64_t length,
+                          OnSelectionFn&& on_selection,
+                          OnNonSelectionFn&& on_non_selection) {
   int64_t selected = 0;
   for (int64_t i = 0; i < length; ++i) {
     if (selected < selection.length() && i == selection[selected]) {
@@ -962,7 +972,117 @@ Status VisitSelectionVector(const SelectionVectorSpan& selection, int64_t length
       on_non_selection(i);
     }
   }
-  return Status::OK();
+}
+
+constexpr uint8_t kNonSelectionValue = 0xFE;
+
+void AssertArraysEqualSparseWithSelection(const Array& src,
+                                          const SelectionVectorSpan& selection,
+                                          const Array& dst) {
+  ASSERT_EQ(src.length(), dst.length());
+  ASSERT_EQ(src.type()->id(), dst.type()->id());
+
+  int value_size = src.type()->byte_width();
+  const uint8_t* src_validity = src.data()->buffers[0]->data();
+  const uint8_t* dst_validity = dst.data()->buffers[0]->data();
+  const uint8_t* src_data = src.data()->buffers[1]->data();
+  const uint8_t* dst_data = dst.data()->buffers[1]->data();
+  int64_t src_offset = src.data()->offset;
+  int64_t dst_offset = dst.data()->offset;
+
+  VisitSelectionVector(
+      selection, src.length(),
+      [&](int64_t i) {
+        // Selected values should match
+        ASSERT_EQ(bit_util::GetBit(src_validity, src_offset + i),
+                  bit_util::GetBit(dst_validity, dst_offset + i));
+        if (bit_util::GetBit(src_validity, src_offset + i)) {
+          ASSERT_EQ(memcmp(src_data + (src_offset + i) * value_size,
+                           dst_data + (dst_offset + i) * value_size, value_size),
+                    0);
+        }
+      },
+      [&](int64_t i) {
+        // Non-selected values should be the special value in the output
+        ASSERT_TRUE(bit_util::GetBit(dst_validity, dst_offset + i));
+        for (int j = 0; j < value_size; ++j) {
+          ASSERT_EQ(dst_data[(dst_offset + i) * value_size + j], kNonSelectionValue)
+              << "at index " << i << " and byte " << j;
+        }
+      });
+}
+
+void AssertArraysEqualDenseWithSelection(const Array& src,
+                                         const SelectionVectorSpan& selection,
+                                         const Array& dst) {
+  ASSERT_EQ(src.length(), dst.length());
+  ASSERT_EQ(src.type()->id(), dst.type()->id());
+
+  int value_size = src.type()->byte_width();
+  const uint8_t* src_validity = src.data()->buffers[0]->data();
+  const uint8_t* dst_validity = dst.data()->buffers[0]->data();
+  const uint8_t* src_data = src.data()->buffers[1]->data();
+  const uint8_t* dst_data = dst.data()->buffers[1]->data();
+  int64_t src_offset = src.data()->offset;
+  int64_t dst_offset = dst.data()->offset;
+
+  VisitSelectionVector(
+      selection, src.length(),
+      [&](int64_t i) {
+        // Selected values should match
+        ASSERT_EQ(bit_util::GetBit(src_validity, src_offset + i),
+                  bit_util::GetBit(dst_validity, dst_offset + i));
+        if (bit_util::GetBit(src_validity, src_offset + i)) {
+          ASSERT_EQ(memcmp(src_data + (src_offset + i) * value_size,
+                           dst_data + (dst_offset + i) * value_size, value_size),
+                    0);
+        }
+      },
+      [&](int64_t i) {
+        // Non-selected values should be invalid in the output
+        ASSERT_FALSE(bit_util::GetBit(dst_validity, dst_offset + i));
+      });
+}
+
+void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
+                                                      const Array& input,
+                                                      const SelectionVector* selection,
+                                                      const Datum& result) {
+  ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
+  const ChunkedArray& carr = *result.chunked_array();
+  SelectionVectorSpan selection_span(selection->indices(), selection->length());
+  ASSERT_EQ(bit_util::CeilDiv(input.length(), exec_chunksize), carr.num_chunks());
+  int64_t selection_idx = 0;
+  for (int i = 0; i < carr.num_chunks(); ++i) {
+    auto next_selection_idx = selection_idx;
+    while (next_selection_idx < selection->length() &&
+           selection->indices()[next_selection_idx] < exec_chunksize * (i + 1)) {
+      ++next_selection_idx;
+    }
+    selection_span.SetSlice(selection_idx, next_selection_idx - selection_idx,
+                            static_cast<int32_t>(exec_chunksize * i));
+    selection_idx = next_selection_idx;
+    AssertArraysEqualSparseWithSelection(
+        *input.Slice(exec_chunksize * i,
+                     std::min(exec_chunksize, input.length() - exec_chunksize * i)),
+        selection_span, *carr.chunk(i));
+  }
+}
+
+void AssertChunkedExecResultsEqualDenseWithSelection(int64_t exec_chunksize,
+                                                     const Array& input,
+                                                     const SelectionVector* selection,
+                                                     const Datum& result) {
+  SelectionVectorSpan selection_span(selection->indices(), selection->length());
+  if (selection_span.length() <= exec_chunksize) {
+    ASSERT_EQ(Datum::ARRAY, result.kind());
+    AssertArraysEqualDenseWithSelection(input, selection_span, *result.make_array());
+  } else {
+    ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
+    const ChunkedArray& carr = *result.chunked_array();
+    ASSERT_EQ(1, carr.num_chunks());
+    AssertArraysEqualDenseWithSelection(input, selection_span, *carr.chunk(0));
+  }
 }
 
 Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out) {
@@ -977,8 +1097,6 @@ Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out)
   return Status::OK();
 }
 
-constexpr int8_t kNonSelectionValue = 0xFE;
-
 Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
                                   const SelectionVectorSpan& selection, ExecResult* out) {
   DCHECK_EQ(1, batch.num_values());
@@ -990,7 +1108,7 @@ Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
   int64_t dst_validity_offset = out_arr->offset;
   uint8_t* dst = out_arr->buffers[1]->mutable_data() + out_arr->offset * value_size;
   const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
-  return VisitSelectionVector(
+  VisitSelectionVector(
       selection, batch.length,
       [&](int64_t i) {
         // Copy the selected value
@@ -1026,7 +1144,7 @@ Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
   int64_t dst_validity_offset = out_arr->offset;
   uint8_t* dst = out_arr->buffers[1].data + out_arr->offset * value_size;
   const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
-  return VisitSelectionVector(
+  VisitSelectionVector(
       selection, batch.length,
       [&](int64_t i) {
         // Copy the selected value
@@ -1038,6 +1156,7 @@ Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
         bit_util::SetBit(dst_validity, dst_validity_offset + i);
         std::memset(dst + i * value_size, kNonSelectionValue, value_size);
       });
+  return Status::OK();
 }
 
 Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
@@ -1194,7 +1313,7 @@ Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
   uint8_t* dst_validity = out_arr->buffers[0].data;
   int64_t dst_validity_offset = out_arr->offset;
   int32_t* dst = out_arr->GetValues<int32_t>(1);
-  return VisitSelectionVector(
+  VisitSelectionVector(
       selection, batch.length,
       [&](int64_t i) {
         // Copy the selected value
@@ -1206,6 +1325,7 @@ Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
         bit_util::SetBit(dst_validity, dst_validity_offset + i);
         dst[i] = kNonSelectionValue;
       });
+  return Status::OK();
 }
 
 Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
@@ -1226,7 +1346,7 @@ Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
   uint8_t* dst_validity = out_arr->buffers[0].data;
   int64_t dst_validity_offset = out_arr->offset;
   int32_t* out_data = out_arr->GetValues<int32_t>(1);
-  return VisitSelectionVector(
+  VisitSelectionVector(
       selection, batch.length,
       [&](int64_t i) {
         // Copy the selected value
@@ -1238,6 +1358,7 @@ Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
         bit_util::SetBit(dst_validity, dst_validity_offset + i);
         out_data[i] = kNonSelectionValue;
       });
+  return Status::OK();
 }
 
 class TestCallScalarFunction : public TestComputeInternals {
@@ -1418,7 +1539,7 @@ class FunctionCaller {
 
   virtual Result<Datum> Call(const std::vector<Datum>& args,
                              std::shared_ptr<SelectionVector> selection,
-                             const FunctionOptions* options,
+                             const FunctionOptions* options = NULLPTR,
                              ExecContext* ctx = NULLPTR) const = 0;
 
   virtual Result<Datum> Call(const std::vector<Datum>& args,
@@ -1570,28 +1691,28 @@ class ExpressionFunctionCaller : public FunctionCaller {
 
 // Call the selective counterpart of the function via expression with no selection vector,
 // triggering the regular sparse execution path.
-class RegularSparseFunctionCaller : public ExpressionFunctionCaller {
+class NullSelectionSparseFunctionCaller : public ExpressionFunctionCaller {
  public:
-  RegularSparseFunctionCaller(std::string func_name,
-                              const std::vector<TypeHolder>& in_types)
+  NullSelectionSparseFunctionCaller(std::string func_name,
+                                    const std::vector<TypeHolder>& in_types)
       : ExpressionFunctionCaller(std::move(func_name) + "_selective", in_types) {}
 
   std::string name() const override { return "regular_sparse_caller"; }
 
   static Result<std::shared_ptr<FunctionCaller>> Maker(const std::string& func_name,
                                                        std::vector<TypeHolder> in_types) {
-    return ExpressionFunctionCaller::Make<RegularSparseFunctionCaller>(
+    return ExpressionFunctionCaller::Make<NullSelectionSparseFunctionCaller>(
         std::move(func_name), std::move(in_types));
   }
 };
 
 // Call the selective counterpart of the function via expression with full selection,
 // triggering the selective sparse execution path.
-class SelectiveSparseFunctionCaller : public RegularSparseFunctionCaller {
+class SelectiveSparseFunctionCaller : public NullSelectionSparseFunctionCaller {
  public:
   SelectiveSparseFunctionCaller(std::string func_name,
                                 const std::vector<TypeHolder>& in_types)
-      : RegularSparseFunctionCaller(std::move(func_name), in_types) {}
+      : NullSelectionSparseFunctionCaller(std::move(func_name), in_types) {}
 
   std::string name() const override { return "selective_sparse_caller"; }
 
@@ -1630,10 +1751,8 @@ class DenseFunctionCaller : public ExpressionFunctionCaller {
 class TestCallScalarFunctionArgumentValidation : public TestCallScalarFunction {};
 
 TEST_F(TestCallScalarFunctionArgumentValidation, Basic) {
-  for (const auto& caller_maker :
-       {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-        ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
-        SelectiveSparseFunctionCaller::Maker, DenseFunctionCaller::Maker}) {
+  for (const auto& caller_maker : {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
+                                   NullSelectionSparseFunctionCaller::Maker}) {
     ASSERT_OK_AND_ASSIGN(auto test_copy, caller_maker("test_copy", {int32()}));
     ARROW_SCOPED_TRACE(test_copy->name());
     ResetContexts();
@@ -1659,6 +1778,75 @@ TEST_F(TestCallScalarFunctionArgumentValidation, Basic) {
 class TestCallScalarFunctionPreallocationCases : public TestCallScalarFunction {
  protected:
   std::shared_ptr<Array> GetTestArray() { return GetUInt8Array(100, 0.2); }
+
+  std::vector<std::shared_ptr<SelectionVector>> GetSelectionVectors() {
+    return {MakeSelectionVector("[]"),
+            MakeSelectionVector("[0]"),
+            MakeSelectionVector("[42]"),
+            MakeSelectionVector("[99]"),
+            MakeSelectionVector("[0, 1, 2, 3, 4]"),
+            MakeSelectionVector("[0, 42, 99]"),
+            MakeSelectionVectorUntil(40),
+            MakeSelectionVectorUntil(41),
+            MakeSelectionVectorUntil(99),
+            MakeSelectionVectorUntil(100)};
+  }
+
+  template <typename CheckFunc>
+  void DoTestBasic(const FunctionCaller* caller, const Array& input,
+                   std::shared_ptr<SelectionVector> selection, CheckFunc&& check_func) {
+    // The default should be a single array output
+    {
+      std::vector<Datum> args = {Datum(input)};
+      ASSERT_OK_AND_ASSIGN(Datum result, caller->Call(args, selection));
+      check_func(result);
+    }
+
+    // Set the exec_chunksize to be smaller, so now we have several invocations
+    // of the kernel, but still the output is one array
+    {
+      std::vector<Datum> args = {Datum(input)};
+      exec_ctx_->set_exec_chunksize(80);
+      ASSERT_OK_AND_ASSIGN(
+          Datum result,
+          caller->Call(args, selection, /*options=*/nullptr, exec_ctx_.get()));
+      check_func(result);
+    }
+
+    {
+      // Chunksize not multiple of 8
+      std::vector<Datum> args = {Datum(input)};
+      exec_ctx_->set_exec_chunksize(11);
+      ASSERT_OK_AND_ASSIGN(
+          Datum result,
+          caller->Call(args, selection, /*options=*/nullptr, exec_ctx_.get()));
+      check_func(result);
+    }
+  }
+
+  template <typename CheckFunc>
+  void DoTestChunked(const FunctionCaller* caller, const ChunkedArray& input,
+                     std::shared_ptr<SelectionVector> selection, CheckFunc&& check_func) {
+    // Input is chunked, output has one big chunk
+    std::vector<Datum> args = {Datum(input)};
+    ASSERT_OK_AND_ASSIGN(Datum result, caller->Call(args, selection, /*options=*/nullptr,
+                                                    exec_ctx_.get()));
+    check_func(result);
+  }
+
+  template <typename CheckFunc>
+  void DoTestIndependentPreallocate(const FunctionCaller* caller, int64_t exec_chunksize,
+                                    const Array& input,
+                                    std::shared_ptr<SelectionVector> selection,
+                                    CheckFunc&& check_func) {
+    // Preallocate independently for each batch
+    std::vector<Datum> args = {Datum(input)};
+    exec_ctx_->set_preallocate_contiguous(false);
+    exec_ctx_->set_exec_chunksize(exec_chunksize);
+    ASSERT_OK_AND_ASSIGN(Datum result, caller->Call(args, selection, /*options=*/nullptr,
+                                                    exec_ctx_.get()));
+    check_func(result);
+  }
 };
 
 TEST_F(TestCallScalarFunctionPreallocationCases, Basic) {
@@ -1667,97 +1855,188 @@ TEST_F(TestCallScalarFunctionPreallocationCases, Basic) {
     ARROW_SCOPED_TRACE(name);
     for (const auto& caller_maker :
          {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-          ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
-          SelectiveSparseFunctionCaller::Maker, DenseFunctionCaller::Maker}) {
+          NullSelectionSparseFunctionCaller::Maker}) {
       ASSERT_OK_AND_ASSIGN(auto test_copy, caller_maker(name, {uint8()}));
       ARROW_SCOPED_TRACE(test_copy->name());
       ResetContexts();
 
-      // The default should be a single array output
-      {
-        std::vector<Datum> args = {Datum(arr)};
-        ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args));
+      DoTestBasic(test_copy.get(), *arr, /*selection=*/nullptr, [&](const Datum& result) {
         ASSERT_EQ(Datum::ARRAY, result.kind());
         AssertArraysEqual(*arr, *result.make_array());
-      }
+      });
+    }
+  }
+}
 
-      // Set the exec_chunksize to be smaller, so now we have several invocations
-      // of the kernel, but still the output is one array
-      {
-        std::vector<Datum> args = {Datum(arr)};
-        exec_ctx_->set_exec_chunksize(80);
-        ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args, exec_ctx_.get()));
-        AssertArraysEqual(*arr, *result.make_array());
-      }
+TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveSparse) {
+  auto arr = GetTestArray();
+  auto selections = GetSelectionVectors();
+  for (const auto& name :
+       {"test_copy_selective", "test_copy_computed_bitmap_selective"}) {
+    ARROW_SCOPED_TRACE(name);
+    ASSERT_OK_AND_ASSIGN(auto test_copy,
+                         ExpressionFunctionCaller::Maker(name, {uint8()}));
+    for (const auto& selection : selections) {
+      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      ResetContexts();
 
-      {
-        // Chunksize not multiple of 8
-        std::vector<Datum> args = {Datum(arr)};
-        exec_ctx_->set_exec_chunksize(11);
-        ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args, exec_ctx_.get()));
-        AssertArraysEqual(*arr, *result.make_array());
-      }
+      DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
+        ASSERT_EQ(Datum::ARRAY, result.kind());
+        AssertArraysEqualSparseWithSelection(*arr, selection_span, *result.make_array());
+      });
+    }
+  }
+}
 
-      // Input is chunked, output has one big chunk
-      {
-        auto carr = std::make_shared<ChunkedArray>(
-            ArrayVector{arr->Slice(0, 10), arr->Slice(10)});
-        std::vector<Datum> args = {Datum(carr)};
-        ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args, exec_ctx_.get()));
+TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveDense) {
+  auto arr = GetTestArray();
+  auto selections = GetSelectionVectors();
+  for (const auto& name : {"test_copy", "test_copy_computed_bitmap"}) {
+    ARROW_SCOPED_TRACE(name);
+    ASSERT_OK_AND_ASSIGN(auto test_copy,
+                         ExpressionFunctionCaller::Maker(name, {uint8()}));
+    for (const auto& selection : selections) {
+      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      ResetContexts();
+
+      DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
+        ASSERT_EQ(Datum::ARRAY, result.kind());
+        AssertArraysEqualDenseWithSelection(*arr, selection_span, *result.make_array());
+      });
+    }
+  }
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, Chunked) {
+  auto arr = GetTestArray();
+  auto carr =
+      std::make_shared<ChunkedArray>(ArrayVector{arr->Slice(0, 10), arr->Slice(10)});
+  for (const auto& name : {"test_copy", "test_copy_computed_bitmap"}) {
+    ARROW_SCOPED_TRACE(name);
+    for (const auto& caller_maker :
+         {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
+          NullSelectionSparseFunctionCaller::Maker}) {
+      ASSERT_OK_AND_ASSIGN(auto test_copy, caller_maker(name, {uint8()}));
+      ARROW_SCOPED_TRACE(test_copy->name());
+      ResetContexts();
+
+      DoTestChunked(test_copy.get(), *carr, /*selection=*/nullptr,
+                    [&](const Datum& result) {
+                      ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
+                      std::shared_ptr<ChunkedArray> actual = result.chunked_array();
+                      ASSERT_EQ(1, actual->num_chunks());
+                      AssertChunkedEquivalent(*carr, *actual);
+                    });
+    }
+  }
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveSparse) {
+  auto arr = GetTestArray();
+  auto carr =
+      std::make_shared<ChunkedArray>(ArrayVector{arr->Slice(0, 10), arr->Slice(10)});
+  auto selections = GetSelectionVectors();
+  for (const auto& name :
+       {"test_copy_selective", "test_copy_computed_bitmap_selective"}) {
+    ARROW_SCOPED_TRACE(name);
+    ASSERT_OK_AND_ASSIGN(auto test_copy,
+                         ExpressionFunctionCaller::Maker(name, {uint8()}));
+    for (const auto& selection : selections) {
+      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      ResetContexts();
+
+      DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
+        ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
         std::shared_ptr<ChunkedArray> actual = result.chunked_array();
         ASSERT_EQ(1, actual->num_chunks());
-        AssertChunkedEquivalent(*carr, *actual);
-      }
+        AssertArraysEqualSparseWithSelection(*arr, selection_span, *actual->chunk(0));
+      });
+    }
+  }
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveDense) {
+  auto arr = GetTestArray();
+  auto carr =
+      std::make_shared<ChunkedArray>(ArrayVector{arr->Slice(0, 10), arr->Slice(10)});
+  auto selections = GetSelectionVectors();
+  for (const auto& name : {"test_copy", "test_copy_computed_bitmap"}) {
+    ARROW_SCOPED_TRACE(name);
+    ASSERT_OK_AND_ASSIGN(auto test_copy,
+                         ExpressionFunctionCaller::Maker(name, {uint8()}));
+    for (const auto& selection : selections) {
+      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      ResetContexts();
+
+      DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
+        ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
+        std::shared_ptr<ChunkedArray> actual = result.chunked_array();
+        ASSERT_EQ(1, actual->num_chunks());
+        AssertArraysEqualDenseWithSelection(*arr, selection_span, *actual->chunk(0));
+      });
     }
   }
 }
 
 TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocate) {
   auto arr = GetTestArray();
-  std::vector<Datum> args = {Datum(arr)};
   for (const auto& name : {"test_copy", "test_copy_computed_bitmap"}) {
     ARROW_SCOPED_TRACE(name);
     for (const auto& caller_maker :
          {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-          ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
-          SelectiveSparseFunctionCaller::Maker}) {
+          NullSelectionSparseFunctionCaller::Maker}) {
       ASSERT_OK_AND_ASSIGN(auto test_copy, caller_maker(name, {uint8()}));
       ARROW_SCOPED_TRACE(test_copy->name());
       ResetContexts();
 
-      // Preallocate independently for each batch
-      {
-        exec_ctx_->set_preallocate_contiguous(false);
-        exec_ctx_->set_exec_chunksize(40);
-        ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args, exec_ctx_.get()));
-        ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
-        const ChunkedArray& carr = *result.chunked_array();
-        ASSERT_EQ(3, carr.num_chunks());
-        AssertArraysEqual(*arr->Slice(0, 40), *carr.chunk(0));
-        AssertArraysEqual(*arr->Slice(40, 40), *carr.chunk(1));
-        AssertArraysEqual(*arr->Slice(80), *carr.chunk(2));
-      }
+      DoTestIndependentPreallocate(
+          test_copy.get(), /*exec_chunksize=*/40, *arr, /*selection=*/nullptr,
+          [&](const Datum& result) {
+            ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
+            const ChunkedArray& carr = *result.chunked_array();
+            ASSERT_EQ(3, carr.num_chunks());
+            AssertArraysEqual(*arr->Slice(0, 40), *carr.chunk(0));
+            AssertArraysEqual(*arr->Slice(40, 40), *carr.chunk(1));
+            AssertArraysEqual(*arr->Slice(80), *carr.chunk(2));
+          });
     }
   }
 }
 
-TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateDense) {
+TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateSelectiveSparse) {
   auto arr = GetTestArray();
+  auto selections = GetSelectionVectors();
+  for (const auto& name :
+       {"test_copy_selective", "test_copy_computed_bitmap_selective"}) {
+    ARROW_SCOPED_TRACE(name);
+    ASSERT_OK_AND_ASSIGN(auto test_copy, DenseFunctionCaller::Maker(name, {uint8()}));
+    for (const auto& selection : selections) {
+      ResetContexts();
+
+      const int64_t exec_chunksize = 40;
+      DoTestIndependentPreallocate(test_copy.get(), exec_chunksize, *arr, selection,
+                                   [&](const Datum& result) {
+                                     AssertChunkedExecResultsEqualSparseWithSelection(
+                                         exec_chunksize, *arr, selection.get(), result);
+                                   });
+    }
+  }
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, IndependentPreallocateSelectiveDense) {
+  auto arr = GetTestArray();
+  auto selections = GetSelectionVectors();
   for (const auto& name : {"test_copy", "test_copy_computed_bitmap"}) {
     ARROW_SCOPED_TRACE(name);
     ASSERT_OK_AND_ASSIGN(auto test_copy, DenseFunctionCaller::Maker(name, {uint8()}));
-    ResetContexts();
+    for (const auto& selection : selections) {
+      ResetContexts();
 
-    // Preallocate independently for each batch
-    {
-      std::vector<Datum> args = {Datum(arr)};
-      exec_ctx_->set_preallocate_contiguous(false);
-      exec_ctx_->set_exec_chunksize(40);
-      ASSERT_OK_AND_ASSIGN(Datum result, test_copy->Call(args, exec_ctx_.get()));
-      ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
-      const ChunkedArray& carr = *result.chunked_array();
-      ASSERT_EQ(1, carr.num_chunks());
-      AssertArraysEqual(*arr, *carr.chunk(0));
+      DoTestIndependentPreallocate(test_copy.get(), /*exec_chunksize=*/40, *arr,
+                                   selection, [&](const Datum& result) {
+                                     AssertChunkedExecResultsEqualDenseWithSelection(
+                                         40, *arr, selection.get(), result);
+                                   });
     }
   }
 }
@@ -1779,7 +2058,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, Basic) {
     ARROW_SCOPED_TRACE(name);
     for (const auto& caller_maker :
          {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-          ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
+          ExpressionFunctionCaller::Maker, NullSelectionSparseFunctionCaller::Maker,
           SelectiveSparseFunctionCaller::Maker, DenseFunctionCaller::Maker}) {
       ASSERT_OK_AND_ASSIGN(auto test_nopre, caller_maker(name, {uint8()}));
       ARROW_SCOPED_TRACE(test_nopre->name());
@@ -1801,7 +2080,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, SplitExecution) {
     ARROW_SCOPED_TRACE(name);
     for (const auto& caller_maker :
          {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-          ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
+          ExpressionFunctionCaller::Maker, NullSelectionSparseFunctionCaller::Maker,
           SelectiveSparseFunctionCaller::Maker}) {
       ASSERT_OK_AND_ASSIGN(auto test_nopre, caller_maker(name, {uint8()}));
       ARROW_SCOPED_TRACE(test_nopre->name());
@@ -1847,7 +2126,7 @@ class TestCallScalarFunctionStatefulKernel : public TestCallScalarFunction {};
 TEST_F(TestCallScalarFunctionStatefulKernel, Basic) {
   for (const auto& caller_maker :
        {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-        ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
+        ExpressionFunctionCaller::Maker, NullSelectionSparseFunctionCaller::Maker,
         SelectiveSparseFunctionCaller::Maker, DenseFunctionCaller::Maker}) {
     ASSERT_OK_AND_ASSIGN(auto test_stateful, caller_maker("test_stateful", {int32()}));
     ARROW_SCOPED_TRACE(test_stateful->name());
@@ -1869,7 +2148,7 @@ class TestCallScalarFunctionScalarFunction : public TestCallScalarFunction {};
 TEST_F(TestCallScalarFunctionScalarFunction, Basic) {
   for (const auto& caller_maker :
        {SimpleFunctionCaller::Maker, ExecFunctionCaller::Maker,
-        ExpressionFunctionCaller::Maker, RegularSparseFunctionCaller::Maker,
+        ExpressionFunctionCaller::Maker, NullSelectionSparseFunctionCaller::Maker,
         SelectiveSparseFunctionCaller::Maker, DenseFunctionCaller::Maker}) {
     ASSERT_OK_AND_ASSIGN(auto test_scalar_add_int32,
                          caller_maker("test_scalar_add_int32", {int32(), int32()}));

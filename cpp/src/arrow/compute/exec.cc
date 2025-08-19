@@ -726,7 +726,14 @@ std::shared_ptr<ChunkedArray> ToChunkedArray(const std::vector<Datum>& values,
       // Skip empty chunks
       continue;
     }
-    arrays.emplace_back(val.make_array());
+    if (val.is_chunked_array()) {
+      for (const auto& chunk : val.chunked_array()->chunks()) {
+        arrays.emplace_back(chunk);
+      }
+    } else {
+      DCHECK(val.is_array());
+      arrays.emplace_back(val.make_array());
+    }
   }
   return std::make_shared<ChunkedArray>(std::move(arrays), type.GetSharedPtr());
 }
@@ -887,23 +894,16 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
                             Take(batch[i], *batch.selection_vector->data(),
                                  TakeOptions{/*boundcheck=*/false}, exec_context()));
     }
-    ExecBatch input;
     ARROW_ASSIGN_OR_RAISE(
-        input, ExecBatch::Make(std::move(values), batch.selection_vector->length()));
+        ExecBatch input,
+        ExecBatch::Make(std::move(values), batch.selection_vector->length()));
 
     DatumAccumulator dense_listener;
     RETURN_NOT_OK(ExecuteSparse(input, &dense_listener));
-    auto dense_results = dense_listener.values();
-
-    Datum dense_datum;
-    if (dense_results.size() > 1) {
-      dense_datum = ToChunkedArray(dense_results, output_type_);
-    } else {
-      dense_datum = dense_results[0];
-    }
+    Datum dense_result = WrapResults(input.values, dense_listener.values());
 
     ARROW_ASSIGN_OR_RAISE(auto result,
-                          Scatter(dense_datum, *batch.selection_vector->data(),
+                          Scatter(dense_result, *batch.selection_vector->data(),
                                   ScatterOptions{/*max_index=*/batch.length - 1}));
     return listener->OnResult(std::move(result));
   }
