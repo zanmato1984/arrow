@@ -830,11 +830,11 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return EmitResult(result->data(), listener);
     }
 
-    if (!batch.selection_vector || kernel_->selective_exec) {
-      return ExecuteSparse(batch, listener);
+    if (batch.selection_vector && !kernel_->selective_exec) {
+      return ExecuteSelectiveDense(batch, listener);
     }
 
-    return ExecuteDense(batch, listener);
+    return ExecuteBatch(batch, listener);
   }
 
   Datum WrapResults(const std::vector<Datum>& inputs,
@@ -850,7 +850,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
   }
 
  protected:
-  Status ExecuteSparse(const ExecBatch& batch, ExecListener* listener) {
+  Status ExecuteBatch(const ExecBatch& batch, ExecListener* listener) {
     DCHECK(!batch.selection_vector || kernel_->selective_exec);
 
     RETURN_NOT_OK(span_iterator_.Init(batch, exec_context()->exec_chunksize()));
@@ -874,13 +874,13 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Status ExecuteDense(const ExecBatch& batch, ExecListener* listener) {
+  Status ExecuteSelectiveDense(const ExecBatch& batch, ExecListener* listener) {
     DCHECK(batch.selection_vector && !kernel_->selective_exec);
 
     if (CheckIfAllScalar(batch)) {
       ExecBatch input = batch;
       input.selection_vector = nullptr;
-      return ExecuteSparse(input, listener);
+      return ExecuteBatch(input, listener);
     }
 
     std::vector<Datum> values(batch.num_values());
@@ -899,7 +899,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         ExecBatch::Make(std::move(values), batch.selection_vector->length()));
 
     DatumAccumulator dense_listener;
-    RETURN_NOT_OK(ExecuteSparse(input, &dense_listener));
+    RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
     Datum dense_result = WrapResults(input.values, dense_listener.values());
 
     ARROW_ASSIGN_OR_RAISE(auto result,
