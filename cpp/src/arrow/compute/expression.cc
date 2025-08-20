@@ -30,6 +30,7 @@
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression_internal.h"
 #include "arrow/compute/function_internal.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/compute/util.h"
 #include "arrow/io/memory.h"
 #ifdef ARROW_IPC
@@ -59,6 +60,13 @@ void Expression::Call::ComputeHash() {
   }
 }
 
+void Expression::Special::ComputeHash() {
+  hash = std::hash<std::string>{}(special_form->name());
+  for (const auto& arg : arguments) {
+    arrow::internal::hash_combine(hash, arg.hash());
+  }
+}
+
 Expression::Expression(Call call) {
   call.ComputeHash();
   impl_ = std::make_shared<Impl>(std::move(call));
@@ -69,6 +77,9 @@ Expression::Expression(Datum literal)
 
 Expression::Expression(Parameter parameter)
     : impl_(std::make_shared<Impl>(std::move(parameter))) {}
+
+Expression::Expression(Special special)
+    : impl_(std::make_shared<Impl>(std::move(special))) {}
 
 Expression literal(Datum lit) { return Expression(std::move(lit)); }
 
@@ -83,6 +94,13 @@ Expression call(std::string function, std::vector<Expression> arguments,
   call.arguments = std::move(arguments);
   call.options = std::move(options);
   return Expression(std::move(call));
+}
+
+Expression if_else_special(Expression cond, Expression if_true, Expression if_false) {
+  Expression::Special special;
+  special.special_form = GetIfElseSpecialForm();
+  special.arguments = {std::move(cond), std::move(if_true), std::move(if_false)};
+  return Expression(std::move(special));
 }
 
 const Datum* Expression::literal() const {
@@ -110,6 +128,12 @@ const Expression::Call* Expression::call() const {
   return std::get_if<Call>(impl_.get());
 }
 
+const Expression::Special* Expression::special() const {
+  if (impl_ == nullptr) return nullptr;
+
+  return std::get_if<Special>(impl_.get());
+}
+
 const DataType* Expression::type() const {
   if (impl_ == nullptr) return nullptr;
 
@@ -119,6 +143,10 @@ const DataType* Expression::type() const {
 
   if (const Parameter* parameter = this->parameter()) {
     return parameter->type.type;
+  }
+
+  if (const Special* special = this->special()) {
+    return special->type.type;
   }
 
   return CallNotNull(*this)->type.type;
@@ -167,6 +195,15 @@ std::string Expression::ToString() const {
       return path->ToString();
     }
     return ref->ToString();
+  }
+
+  if (auto sp = special()) {
+    std::string out = sp->special_form->name() + "_special(";
+    for (const auto& arg : sp->arguments) {
+      out += arg.ToString() + ", ";
+    }
+    out.resize(out.size() - 2);
+    return out + ")";
   }
 
   auto call = CallNotNull(*this);
@@ -239,6 +276,12 @@ bool Expression::Equals(const Expression& other) const {
     return ref->Equals(*other.field_ref());
   }
 
+  // TODO
+  // if (auto special = this->special()) {
+  if (this->special()) {
+    return true;
+  }
+
   auto call = CallNotNull(*this);
   auto other_call = CallNotNull(other);
 
@@ -276,6 +319,10 @@ size_t Expression::hash() const {
     return ref->hash();
   }
 
+  if (auto special = this->special()) {
+    return special->hash;
+  }
+
   return CallNotNull(*this)->hash;
 }
 
@@ -299,6 +346,8 @@ bool Expression::IsScalarExpression() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -359,6 +408,8 @@ bool Expression::IsSatisfiable() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -520,7 +571,7 @@ TypeHolder SmallestTypeFor(const arrow::Datum& value) {
   }
 }
 
-inline std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
+std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
     const std::vector<Expression>& exprs) {
   std::vector<TypeHolder> types(exprs.size());
   for (size_t i = 0; i < exprs.size(); ++i) {
@@ -538,15 +589,17 @@ inline std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
 
 // Produce a bound Expression from unbound Call and bound arguments.
 Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
-                                    compute::ExecContext* exec_context) {
+                                    ExecContext* exec_context) {
   DCHECK(std::all_of(call.arguments.begin(), call.arguments.end(),
                      [](const Expression& argument) { return argument.IsBound(); }));
 
   std::vector<TypeHolder> types = GetTypes(call.arguments);
   ARROW_ASSIGN_OR_RAISE(call.function, GetFunction(call, exec_context));
 
-  auto FinishBind = [&] {
-    compute::KernelContext kernel_context(exec_context, call.kernel);
+  auto finish_bind = [&](const Kernel* kernel,
+                         const std::vector<TypeHolder>& types) -> Status {
+    call.kernel = kernel;
+    KernelContext kernel_context(exec_context, call.kernel);
     if (call.kernel->init) {
       const FunctionOptions* options =
           call.options ? call.options.get() : call.function->default_options();
@@ -562,50 +615,8 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
     return Status::OK();
   };
 
-  // First try and bind exactly
-  Result<const Kernel*> maybe_exact_match = call.function->DispatchExact(types);
-  if (maybe_exact_match.ok()) {
-    call.kernel = *maybe_exact_match;
-    if (FinishBind().ok()) {
-      return Expression(std::move(call));
-    }
-  }
-
-  if (!insert_implicit_casts) {
-    return maybe_exact_match.status();
-  }
-
-  // If exact binding fails, and we are allowed to cast, then prefer casting literals
-  // first.  Since DispatchBest generally prefers up-casting the best way to do this is
-  // first down-cast the literals as much as possible
-  types = GetTypesWithSmallestLiteralRepresentation(call.arguments);
-  ARROW_ASSIGN_OR_RAISE(call.kernel, call.function->DispatchBest(&types));
-
-  for (size_t i = 0; i < types.size(); ++i) {
-    if (types[i] == call.arguments[i].type()) continue;
-
-    if (const Datum* lit = call.arguments[i].literal()) {
-      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
-      call.arguments[i] = literal(std::move(new_lit));
-      continue;
-    }
-
-    // construct an implicit cast Expression with which to replace this argument
-    Expression::Call implicit_cast;
-    implicit_cast.function_name = "cast";
-    implicit_cast.arguments = {std::move(call.arguments[i])};
-
-    // TODO(wesm): Use TypeHolder in options
-    implicit_cast.options = std::make_shared<compute::CastOptions>(
-        compute::CastOptions::Safe(types[i].GetSharedPtr()));
-
-    ARROW_ASSIGN_OR_RAISE(
-        call.arguments[i],
-        BindNonRecursive(std::move(implicit_cast),
-                         /*insert_implicit_casts=*/false, exec_context));
-  }
-
-  RETURN_NOT_OK(FinishBind());
+  RETURN_NOT_OK(DispatchForBind(call.function.get(), call.arguments,
+                                insert_implicit_casts, exec_context, finish_bind));
   return Expression(std::move(call));
 }
 
@@ -630,15 +641,75 @@ Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
     return Expression{std::move(param)};
   }
 
+  if (expr.special()) {
+    auto special = *expr.special();
+    for (auto& argument : special.arguments) {
+      ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
+    }
+    ARROW_ASSIGN_OR_RAISE(special.special_executor,
+                          special.special_form->Bind(special.arguments, exec_context));
+    special.type = special.special_executor->out_type();
+    return Expression(std::move(special));
+  }
+
   auto call = *CallNotNull(expr);
   for (auto& argument : call.arguments) {
     ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
   }
-  return BindNonRecursive(std::move(call),
-                          /*insert_implicit_casts=*/true, exec_context);
+  return BindNonRecursive(call, /*insert_implicit_casts=*/true, exec_context);
 }
 
 }  // namespace
+
+Status DispatchForBind(
+    const Function* function, std::vector<Expression> arguments,
+    bool insert_implicit_casts, ExecContext* exec_context,
+    std::function<Status(const Kernel*, const std::vector<TypeHolder>&)> finish_bind) {
+  std::vector<TypeHolder> types = GetTypes(arguments);
+
+  // First try and bind exactly
+  Result<const Kernel*> maybe_exact_match = function->DispatchExact(types);
+  if (maybe_exact_match.ok()) {
+    if (finish_bind(*maybe_exact_match, types).ok()) {
+      return Status::OK();
+    }
+  }
+
+  if (!insert_implicit_casts) {
+    return maybe_exact_match.status();
+  }
+
+  // If exact binding fails, and we are allowed to cast, then prefer casting literals
+  // first. Since DispatchBest generally prefers up-casting the best way to do this is
+  // first down-cast the literals as much as possible
+  types = GetTypesWithSmallestLiteralRepresentation(arguments);
+  ARROW_ASSIGN_OR_RAISE(auto kernel, function->DispatchBest(&types));
+
+  for (size_t i = 0; i < types.size(); ++i) {
+    if (types[i] == arguments[i].type()) continue;
+
+    if (const Datum* lit = arguments[i].literal()) {
+      ARROW_ASSIGN_OR_RAISE(Datum new_lit, compute::Cast(*lit, types[i].GetSharedPtr()));
+      arguments[i] = literal(std::move(new_lit));
+      continue;
+    }
+
+    // construct an implicit cast Expression with which to replace this argument
+    Expression::Call implicit_cast;
+    implicit_cast.function_name = "cast";
+    implicit_cast.arguments = {std::move(arguments[i])};
+
+    // TODO(wesm): Use TypeHolder in options
+    implicit_cast.options = std::make_shared<compute::CastOptions>(
+        compute::CastOptions::Safe(types[i].GetSharedPtr()));
+
+    ARROW_ASSIGN_OR_RAISE(
+        arguments[i], BindNonRecursive(std::move(implicit_cast),
+                                       /*insert_implicit_casts=*/false, exec_context));
+  }
+
+  return finish_bind(kernel, types);
+}
 
 Result<Expression> Expression::Bind(const TypeHolder& in,
                                     compute::ExecContext* exec_context) const {
@@ -764,6 +835,10 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
     return field;
   }
 
+  if (auto special = expr.special()) {
+    return special->special_executor->Execute(input, exec_context);
+  }
+
   auto call = CallNotNull(expr);
 
   std::vector<Datum> arguments(call->arguments.size());
@@ -795,7 +870,8 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
   RETURN_NOT_OK(executor->Init(&kernel_context, {kernel, types, options}));
 
   compute::detail::DatumAccumulator listener;
-  RETURN_NOT_OK(executor->Execute(ExecBatch(arguments, input_length), &listener));
+  RETURN_NOT_OK(executor->Execute(
+      ExecBatch(arguments, input_length, input.selection_vector), &listener));
   const auto out = executor->WrapResults(arguments, listener.values());
 #ifndef NDEBUG
   DCHECK_OK(executor->CheckResultType(out, call->function_name.c_str()));
@@ -823,18 +899,34 @@ std::vector<FieldRef> FieldsInExpression(const Expression& expr) {
     return {*ref};
   }
 
-  std::vector<FieldRef> fields;
-  for (const Expression& arg : CallNotNull(expr)->arguments) {
-    auto argument_fields = FieldsInExpression(arg);
-    std::move(argument_fields.begin(), argument_fields.end(), std::back_inserter(fields));
+  const auto& fields = [](const auto& expr) {
+    std::vector<FieldRef> fields;
+    for (const Expression& arg : expr->arguments) {
+      auto argument_fields = FieldsInExpression(arg);
+      std::move(argument_fields.begin(), argument_fields.end(),
+                std::back_inserter(fields));
+    }
+    return fields;
+  };
+
+  if (auto sp = expr.special()) {
+    return fields(sp);
   }
-  return fields;
+
+  return fields(CallNotNull(expr));
 }
 
 bool ExpressionHasFieldRefs(const Expression& expr) {
   if (expr.literal()) return false;
 
   if (expr.field_ref()) return true;
+
+  if (auto sp = expr.special()) {
+    for (const Expression& arg : sp->arguments) {
+      if (ExpressionHasFieldRefs(arg)) return true;
+    }
+    return false;
+  }
 
   for (const Expression& arg : CallNotNull(expr)->arguments) {
     if (ExpressionHasFieldRefs(arg)) return true;
