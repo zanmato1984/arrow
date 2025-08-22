@@ -23,6 +23,7 @@
 #include <memory>
 
 #include "arrow/acero/test_util_internal.h"
+#include "arrow/array/builder_decimal.h"
 #include "arrow/compute/api_aggregate.h"
 #include "arrow/compute/test_util_internal.h"
 #include "arrow/result.h"

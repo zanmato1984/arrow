@@ -2332,6 +2332,14 @@ TEST_F(TestBinaryArithmeticDecimal, Divide) {
     CheckScalarBinary("divide", left, right, expected);
   }
 
+  // decimal(p1, s1) decimal(p2, s2) where s1 < s2
+  {
+    auto left = ScalarFromJSON(decimal128(6, 5), R"("2.71828")");
+    auto right = ScalarFromJSON(decimal128(7, 6), R"("3.141592")");
+    auto expected = ScalarFromJSON(decimal128(14, 7), R"("0.8652555")");
+    CheckScalarBinary("divide", left, right, expected);
+  }
+
   // decimal128 decimal256
   {
     auto left = ScalarFromJSON(decimal256(6, 5), R"("2.71828")");

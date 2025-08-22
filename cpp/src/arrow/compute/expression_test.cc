@@ -717,6 +717,50 @@ TEST(Expression, BindWithImplicitCasts) {
                 call("is_in", {cast(field_ref("dict_str"), utf8())}, in_a));
 }
 
+TEST(Expression, BindWithImplicitCastsForDecimalDivision) {
+  auto expect_decimal_division_type = [](std::string name,
+                                         std::shared_ptr<DataType> dividend,
+                                         std::shared_ptr<DataType> divisor,
+                                         std::shared_ptr<DataType> expected) {
+    auto schema = arrow::schema({field("dividend", dividend), field("divisor", divisor)});
+    auto expr = call(name, {field_ref("dividend"), field_ref("divisor")});
+    ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schema));
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(expected));
+  };
+
+  for (std::string name : {"divide", "divide_checked"}) {
+    SCOPED_TRACE(name);
+
+    expect_decimal_division_type(name, int64(), arrow::decimal128(1, 0),
+                                 decimal128(23, 4));
+    expect_decimal_division_type(name, arrow::decimal128(1, 0), int64(),
+                                 decimal128(21, 20));
+
+    expect_decimal_division_type(name, arrow::decimal128(2, 1), decimal128(2, 1),
+                                 decimal128(6, 4));
+    expect_decimal_division_type(name, arrow::decimal256(2, 1), decimal256(2, 1),
+                                 decimal256(6, 4));
+    expect_decimal_division_type(name, arrow::decimal128(2, 1), decimal256(2, 1),
+                                 decimal256(6, 4));
+    expect_decimal_division_type(name, arrow::decimal256(2, 1), decimal128(2, 1),
+                                 decimal256(6, 4));
+
+    expect_decimal_division_type(name, arrow::decimal128(2, 0), decimal128(2, 1),
+                                 decimal128(7, 4));
+    expect_decimal_division_type(name, arrow::decimal128(2, 1), decimal128(2, 0),
+                                 decimal128(5, 4));
+
+    // GH-39875: Expression call to decimal(3 ,2) / decimal(15, 2) wrong result type.
+    expect_decimal_division_type(name, decimal128(3, 2), arrow::decimal128(15, 2),
+                                 decimal128(19, 16));
+
+    // GH-40911: Expression call to decimal(7 ,2) / decimal(6, 1) wrong result type.
+    expect_decimal_division_type(name, decimal128(7, 2), arrow::decimal128(6, 1),
+                                 decimal128(14, 8));
+  }
+}
+
 TEST(Expression, BindNestedCall) {
   auto expr = add(field_ref("a"),
                   call("subtract", {call("multiply", {field_ref("b"), field_ref("c")}),
