@@ -89,9 +89,10 @@ void BenchmarkSetArgsWithSizes(benchmark::internal::Benchmark* bench,
   bench->Unit(benchmark::kMicrosecond);
 
   for (const auto size : sizes) {
-    for (const auto inverse_null_proportion : kInverseNullProportions) {
-      bench->Args({static_cast<ArgsType>(size), inverse_null_proportion});
-    }
+    // for (const auto inverse_null_proportion : kInverseNullProportions) {
+    bench->Args({static_cast<ArgsType>(size), true});
+    bench->Args({static_cast<ArgsType>(size), false});
+    // }
   }
 }
 
@@ -113,10 +114,15 @@ struct RegressionArgs {
   // proportion of nulls in generated arrays
   double null_proportion;
 
+  bool fast;
+
   // If size_is_bytes is true, then it's a number of bytes, otherwise it's the
   // number of items processed (for reporting)
   explicit RegressionArgs(benchmark::State& state, bool size_is_bytes = true)
-      : size(state.range(0)), state_(state), size_is_bytes_(size_is_bytes) {
+      : size(state.range(0)),
+        fast(state.range(1)),
+        state_(state),
+        size_is_bytes_(size_is_bytes) {
     if (state.range(1) == 0) {
       this->null_proportion = 0.0;
     } else {
