@@ -21,17 +21,21 @@ namespace arrow::compute {
 
 class ARROW_EXPORT SpecialExecutor {
  public:
-  explicit SpecialExecutor(TypeHolder out_type) : out_type_(std::move(out_type)) {}
+  explicit SpecialExecutor(TypeHolder out_type,
+                           std::shared_ptr<FunctionOptions> options = NULLPTR)
+      : out_type_(std::move(out_type)), options_(std::move(options)) {}
 
   virtual ~SpecialExecutor() = default;
 
   const TypeHolder& out_type() const { return out_type_; }
+  const std::shared_ptr<FunctionOptions> options() const { return options_; }
 
   virtual Result<Datum> Execute(const ExecBatch& input,
                                 ExecContext* exec_context) const = 0;
 
  private:
   const TypeHolder out_type_;
+  const std::shared_ptr<FunctionOptions> options_;
 };
 
 class ARROW_EXPORT SpecialForm {
@@ -43,7 +47,8 @@ class ARROW_EXPORT SpecialForm {
   const std::string& name() const { return name_; }
 
   virtual Result<std::unique_ptr<SpecialExecutor>> Bind(
-      std::vector<Expression>& arguments, ExecContext* exec_context) = 0;
+      std::vector<Expression>& arguments, std::shared_ptr<FunctionOptions> options,
+      ExecContext* exec_context) = 0;
 
  private:
   std::string name_;

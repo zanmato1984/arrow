@@ -256,7 +256,8 @@ class IfElseSpecialFormTest : public ::testing::Test {
           selective_exec = AssertSelectionVectorExistExec;
         }
         ScalarKernel kernel({InputType::Any()}, internal::FirstType, std::move(exec),
-                            /*init=*/nullptr, std::move(selective_exec));
+                            std::move(selective_exec),
+                            /*init=*/nullptr);
         kernel.can_write_into_slices = false;
         kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
         kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
