@@ -571,7 +571,7 @@ TypeHolder SmallestTypeFor(const arrow::Datum& value) {
   }
 }
 
-std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
+inline std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
     const std::vector<Expression>& exprs) {
   std::vector<TypeHolder> types(exprs.size());
   for (size_t i = 0; i < exprs.size(); ++i) {
