@@ -63,6 +63,7 @@ class ARROW_EXPORT Expression {
   struct Special {
     std::shared_ptr<SpecialForm> special_form;
     std::vector<Expression> arguments;
+    std::shared_ptr<FunctionOptions> options;
     // Cached hash value
     size_t hash;
 
