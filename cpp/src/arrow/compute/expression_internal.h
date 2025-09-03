@@ -290,10 +290,9 @@ inline Result<std::shared_ptr<compute::Function>> GetFunction(
   return GetCastFunction(*to_type);
 }
 
-Status DispatchForBind(
-    const Function* function, std::vector<Expression> arguments,
-    bool insert_implicit_casts, ExecContext* exec_context,
-    std::function<Status(const Kernel*, const std::vector<TypeHolder>&)> finish_bind);
+// Produce a bound Expression from unbound Call and bound arguments.
+Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
+                                    ExecContext* exec_context);
 
 }  // namespace compute
 }  // namespace arrow
