@@ -948,6 +948,106 @@ TEST(Expression, BindNestedCall) {
   EXPECT_TRUE(expr.IsBound());
 }
 
+TEST(Expression, BindIfElseSpecialForm) {
+  {
+    auto expr = if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i8"));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*int8()));
+  }
+
+  // Implicit casts.
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
+                  if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
+                                  field_ref("i32")),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i8")),
+                  if_else_special(field_ref("bool"), field_ref("i32"),
+                                  cast(field_ref("i8"), int32())),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Nested call.
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i8")),
+                                  add(field_ref("i8"), literal(42)),
+                                  add(field_ref("i32"), literal(42))),
+                  if_else_special(equal(field_ref("i8"), field_ref("i8")),
+                                  cast(add(field_ref("i8"), literal(42)), int32()),
+                                  add(field_ref("i32"), literal(42))),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i32")),
+                                  add(field_ref("i32"), field_ref("i8")),
+                                  add(field_ref("i32"), literal(42))),
+                  if_else_special(equal(cast(field_ref("i8"), int32()), field_ref("i32")),
+                                  add(field_ref("i32"), cast(field_ref("i8"), int32())),
+                                  add(field_ref("i32"), literal(42))),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Nesting call.
+  {
+    Expression bound;
+    ExpectBindsTo(add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
+                      field_ref("i8")),
+                  add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
+                      cast(field_ref("i8"), int32())),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(
+        add(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
+            field_ref("i32")),
+        add(cast(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
+                 int32()),
+            field_ref("i32")),
+        &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Self-nested.
+  {
+    Expression bound;
+    ExpectBindsTo(
+        if_else_special(
+            if_else_special(literal(true), literal(true), literal(false)),
+            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
+            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i64"))),
+        if_else_special(
+            if_else_special(literal(true), literal(true), literal(false)),
+            cast(if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
+                                 field_ref("i32")),
+                 int64()),
+            if_else_special(field_ref("bool"), cast(field_ref("i8"), int64()),
+                            field_ref("i64"))),
+        &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int64()));
+  }
+}
+
 TEST(Expression, ExecuteFieldRef) {
   auto ExpectRefIs = [](FieldRef ref, Datum in, Datum expected) {
     auto expr = field_ref(ref);

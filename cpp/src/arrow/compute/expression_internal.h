@@ -44,6 +44,12 @@ inline const Expression::Call* CallNotNull(const Expression& expr) {
   return call;
 }
 
+inline const Expression::Special* SpecialNotNull(const Expression& expr) {
+  auto special = expr.special();
+  ARROW_DCHECK_NE(special, nullptr);
+  return special;
+}
+
 inline std::vector<TypeHolder> GetTypes(const std::vector<Expression>& exprs) {
   std::vector<TypeHolder> types(exprs.size());
   for (size_t i = 0; i < exprs.size(); ++i) {

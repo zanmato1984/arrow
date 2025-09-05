@@ -603,15 +603,17 @@ class FunctionBackedSpecialForm : public SpecialForm {
                                                 ExecContext* exec_context) override {
     DCHECK(std::all_of(arguments.begin(), arguments.end(),
                        [](const Expression& argument) { return argument.IsBound(); }));
-
     Expression::Call call;
     call.function_name = name();
     call.arguments = std::move(arguments);
     call.options = std::move(options);
     ARROW_ASSIGN_OR_RAISE(
         auto bound, BindNonRecursive(call, /*insert_implicit_casts=*/true, exec_context));
-
-    return static_cast<const Impl*>(this)->BindWithBoundCall(CallNotNull(bound),
+    auto bound_call = CallNotNull(bound);
+    auto bound_call_copy = *bound_call;
+    arguments = std::move(bound_call->arguments);
+    options = std::move(bound_call->options);
+    return static_cast<const Impl*>(this)->BindWithBoundCall(std::move(bound_call_copy),
                                                              exec_context);
   }
 };
@@ -628,11 +630,11 @@ class ConditionalSpecialForm
 
  protected:
   Result<std::unique_ptr<SpecialExecutor>> BindWithBoundCall(
-      const Expression::Call* call, ExecContext* exec_context) const {
+      Expression::Call call, ExecContext* exec_context) const {
     auto branches =
-        static_cast<const Impl*>(this)->GetBranches(std::move(call->arguments));
+        static_cast<const Impl*>(this)->GetBranches(std::move(call.arguments));
     return std::make_unique<ConditionalSpecialExecutor>(
-        std::move(branches), std::move(call->type), std::move(call->options));
+        std::move(branches), std::move(call.type), std::move(call.options));
   }
 
   friend class FunctionBackedSpecialForm<ConditionalSpecialForm<Impl>>;
