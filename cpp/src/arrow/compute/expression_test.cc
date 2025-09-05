@@ -375,6 +375,15 @@ TEST(Expression, Equality) {
   EXPECT_NE(cast(field_ref("a"), int32()), cast(field_ref("a"), int64()));
   EXPECT_NE(cast(field_ref("a"), int32()),
             call("cast", {field_ref("a")}, compute::CastOptions::Unsafe(int32())));
+
+  EXPECT_EQ(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("a"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(false), field_ref("a"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("b"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("a"), field_ref("a")));
 }
 
 Expression null_literal(const std::shared_ptr<DataType>& type) {
@@ -402,7 +411,17 @@ TEST(Expression, Hash) {
   // NB: unbound expressions don't check for availability in any registry
   EXPECT_TRUE(set.emplace(call("widgetify", {})).second);
 
-  EXPECT_EQ(set.size(), 8);
+  EXPECT_TRUE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
+          .second);
+  EXPECT_FALSE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
+          .second);
+  EXPECT_TRUE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("b"), field_ref("a")))
+          .second);
+
+  EXPECT_EQ(set.size(), 10);
 }
 
 TEST(Expression, IsScalarExpression) {
@@ -422,6 +441,9 @@ TEST(Expression, IsScalarExpression) {
 
   // non scalar function
   EXPECT_FALSE(call("take", {field_ref("a"), literal(arr)}).IsScalarExpression());
+
+  EXPECT_TRUE(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b"))
+                  .IsScalarExpression());
 }
 
 TEST(Expression, IsSatisfiable) {
@@ -491,6 +513,9 @@ TEST(Expression, IsSatisfiable) {
     // fill_na)
     EXPECT_TRUE(Bind(call("is_null", {never_true})).IsSatisfiable());
   }
+
+  EXPECT_TRUE(Bind(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i32")))
+                  .IsSatisfiable());
 }
 
 TEST(Expression, FieldsInExpression) {
@@ -518,6 +543,20 @@ TEST(Expression, FieldsInExpression) {
                            equal(field_ref("b"), literal(2))),
                       not_(less(field_ref("c"), literal(3)))),
                   {"a", "b", "c"});
+
+  ExpectFieldsAre(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+                  {"a", "b"});
+  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("b")),
+                  {"a", "b", "b"});
+  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("c")),
+                  {"a", "b", "c"});
+  ExpectFieldsAre(
+      if_else_special(call("not", {field_ref("a")}), call("not", {field_ref("b")}),
+                      call("not", {field_ref("c")})),
+      {"a", "b", "c"});
+  ExpectFieldsAre(
+      call("not", {if_else_special(field_ref("a"), field_ref("b"), field_ref("c"))}),
+      {"a", "b", "c"});
 }
 
 TEST(Expression, ExpressionHasFieldRefs) {
@@ -540,6 +579,15 @@ TEST(Expression, ExpressionHasFieldRefs) {
   EXPECT_TRUE(ExpressionHasFieldRefs(or_(
       and_(not_(equal(field_ref("a"), literal(1))), equal(field_ref("b"), literal(2))),
       not_(less(field_ref("c"), literal(3))))));
+
+  EXPECT_FALSE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), literal(1), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(field_ref("a"), literal(1), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), field_ref("a"), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), literal(0), field_ref("a"))));
 }
 
 TEST(Expression, BindLiteral) {
