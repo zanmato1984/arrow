@@ -44,6 +44,12 @@ inline const Expression::Call* CallNotNull(const Expression& expr) {
   return call;
 }
 
+inline const Expression::Special* SpecialNotNull(const Expression& expr) {
+  auto special = expr.special();
+  ARROW_DCHECK_NE(special, nullptr);
+  return special;
+}
+
 inline std::vector<TypeHolder> GetTypes(const std::vector<Expression>& exprs) {
   std::vector<TypeHolder> types(exprs.size());
   for (size_t i = 0; i < exprs.size(); ++i) {
@@ -289,6 +295,10 @@ inline Result<std::shared_ptr<compute::Function>> GetFunction(
       ::arrow::internal::checked_cast<const compute::CastOptions&>(*call.options).to_type;
   return GetCastFunction(*to_type);
 }
+
+// Produce a bound Expression from unbound Call and bound arguments.
+Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
+                                    ExecContext* exec_context);
 
 }  // namespace compute
 }  // namespace arrow
