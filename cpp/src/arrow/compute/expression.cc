@@ -276,10 +276,28 @@ bool Expression::Equals(const Expression& other) const {
     return ref->Equals(*other.field_ref());
   }
 
-  // TODO
-  // if (auto special = this->special()) {
-  if (this->special()) {
-    return true;
+  auto args_and_options_eq = [](const auto* special_or_call, const auto* other) -> bool {
+    for (size_t i = 0; i < special_or_call->arguments.size(); ++i) {
+      if (!special_or_call->arguments[i].Equals(other->arguments[i])) {
+        return false;
+      }
+    }
+
+    if (special_or_call->options == other->options) return true;
+    if (special_or_call->options && other->options) {
+      return special_or_call->options->Equals(*other->options);
+    }
+    return false;
+  };
+
+  if (auto special = this->special(); special) {
+    auto other_special = SpecialNotNull(other);
+
+    if (special->special_form->name() != other_special->special_form->name()) {
+      return false;
+    }
+
+    return args_and_options_eq(special, other_special);
   }
 
   auto call = CallNotNull(*this);
@@ -290,17 +308,7 @@ bool Expression::Equals(const Expression& other) const {
     return false;
   }
 
-  for (size_t i = 0; i < call->arguments.size(); ++i) {
-    if (!call->arguments[i].Equals(other_call->arguments[i])) {
-      return false;
-    }
-  }
-
-  if (call->options == other_call->options) return true;
-  if (call->options && other_call->options) {
-    return call->options->Equals(*other_call->options);
-  }
-  return false;
+  return args_and_options_eq(call, other_call);
 }
 
 bool Expression::Identical(const Expression& l, const Expression& r) {
@@ -616,6 +624,7 @@ Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
     ARROW_ASSIGN_OR_RAISE(
         special.special_executor,
         special.special_form->Bind(special.arguments, special.options, exec_context));
+    DCHECK_NE(special.special_executor, nullptr);
     special.type = special.special_executor->out_type();
     return Expression(std::move(special));
   }
