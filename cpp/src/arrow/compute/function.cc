@@ -413,7 +413,7 @@ Status ScalarFunction::AddKernel(std::vector<InputType> in_types, OutputType out
                                  ArrayKernelExec exec, KernelInit init,
                                  std::shared_ptr<MatchConstraint> constraint) {
   return AddKernel(std::move(in_types), std::move(out_type), std::move(exec),
-                   /*selective_exec=*/nullptr, std::move(init));
+                   /*selective_exec=*/nullptr, std::move(init), std::move(constraint));
 }
 
 Status ScalarFunction::AddKernel(std::vector<InputType> in_types, OutputType out_type,
