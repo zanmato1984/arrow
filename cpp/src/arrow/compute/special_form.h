@@ -33,7 +33,7 @@ class ARROW_EXPORT SpecialExecutor {
   virtual Result<Datum> Execute(const ExecBatch& input,
                                 ExecContext* exec_context) const = 0;
 
- private:
+ protected:
   const TypeHolder out_type_;
   const std::shared_ptr<FunctionOptions> options_;
 };
@@ -48,7 +48,7 @@ class ARROW_EXPORT SpecialForm {
 
   virtual Result<std::unique_ptr<SpecialExecutor>> Bind(
       std::vector<Expression>& arguments, std::shared_ptr<FunctionOptions> options,
-      ExecContext* exec_context) = 0;
+      ExecContext* exec_context) const = 0;
 
  private:
   std::string name_;
