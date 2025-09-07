@@ -576,14 +576,13 @@ struct ConditionalExec {
 
 class ConditionalSpecialExecutor : public SpecialExecutor {
  public:
-  explicit ConditionalSpecialExecutor(std::vector<Branch> branches, TypeHolder out_type,
-                                      std::shared_ptr<FunctionOptions> options)
-      : SpecialExecutor(std::move(out_type), std::move(options)),
+  ConditionalSpecialExecutor(std::vector<Branch> branches, TypeHolder out_type)
+      : SpecialExecutor(std::move(out_type), /*options=*/nullptr),
         branches(std::move(branches)) {}
 
   Result<Datum> Execute(const ExecBatch& input,
                         ExecContext* exec_context) const override {
-    return ConditionalExec(branches, out_type()).Execute(input, exec_context);
+    return ConditionalExec(branches, out_type_).Execute(input, exec_context);
   }
 
  private:
@@ -598,9 +597,9 @@ class FunctionBackedSpecialForm : public SpecialForm {
   ARROW_DISALLOW_COPY_AND_ASSIGN(FunctionBackedSpecialForm);
   ARROW_DEFAULT_MOVE_AND_ASSIGN(FunctionBackedSpecialForm);
 
-  Result<std::unique_ptr<SpecialExecutor>> Bind(std::vector<Expression>& arguments,
-                                                std::shared_ptr<FunctionOptions> options,
-                                                ExecContext* exec_context) override {
+  Result<std::unique_ptr<SpecialExecutor>> Bind(
+      std::vector<Expression>& arguments, std::shared_ptr<FunctionOptions> options,
+      ExecContext* exec_context) const override {
     DCHECK(std::all_of(arguments.begin(), arguments.end(),
                        [](const Expression& argument) { return argument.IsBound(); }));
     Expression::Call call;
@@ -631,10 +630,13 @@ class ConditionalSpecialForm
  protected:
   Result<std::unique_ptr<SpecialExecutor>> BindWithBoundCall(
       Expression::Call call, ExecContext* exec_context) const {
+    // Shouldn't have options. This is guaranteed by the call binding.
+    DCHECK_EQ(call.options, nullptr);
+
     auto branches =
         static_cast<const Impl*>(this)->GetBranches(std::move(call.arguments));
-    return std::make_unique<ConditionalSpecialExecutor>(
-        std::move(branches), std::move(call.type), std::move(call.options));
+    return std::make_unique<ConditionalSpecialExecutor>(std::move(branches),
+                                                        std::move(call.type));
   }
 
   friend class FunctionBackedSpecialForm<ConditionalSpecialForm<Impl>>;
@@ -649,7 +651,9 @@ class IfElseSpecialForm : public ConditionalSpecialForm<IfElseSpecialForm> {
 
  protected:
   std::vector<Branch> GetBranches(std::vector<Expression> arguments) const {
+    // The arity should be correct. This is guaranteed by the call binding.
     DCHECK_EQ(arguments.size(), 3);
+
     auto cond = std::move(arguments[0]);
     auto if_true = std::move(arguments[1]);
     auto if_false = std::move(arguments[2]);

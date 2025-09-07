@@ -31,8 +31,10 @@
 #include "arrow/compute/expression_internal.h"
 #include "arrow/compute/function_internal.h"
 #include "arrow/compute/registry.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/matchers.h"
+#include "arrow/util/logging_internal.h"
 
 using testing::Eq;
 using testing::HasSubstr;
@@ -46,6 +48,8 @@ using internal::checked_cast;
 using internal::checked_pointer_cast;
 
 namespace compute {
+
+namespace {
 
 const std::shared_ptr<Schema> kBoringSchema = schema({
     field("bool", boolean()),
@@ -91,6 +95,42 @@ std::string make_range_json(int start, int end) {
 }
 
 const auto no_change = std::nullopt;
+
+class EchoSpecialExecutor : public SpecialExecutor {
+ public:
+  EchoSpecialExecutor(Expression argument)
+      : SpecialExecutor(argument.type()), argument_(std::move(argument)) {}
+
+  Result<Datum> Execute(const ExecBatch& input,
+                        ExecContext* exec_context) const override {
+    return ExecuteScalarExpression(argument_, input, exec_context);
+  }
+
+ private:
+  Expression argument_;
+};
+
+class EchoSpecialForm : public SpecialForm {
+ public:
+  EchoSpecialForm() : SpecialForm("echo") {}
+
+ protected:
+  Result<std::unique_ptr<SpecialExecutor>> Bind(
+      std::vector<Expression>& arguments, std::shared_ptr<FunctionOptions> options,
+      ExecContext* exec_context) const override {
+    DCHECK_EQ(arguments.size(), 1);
+    return std::make_unique<EchoSpecialExecutor>(arguments[0]);
+  }
+};
+
+Expression echo_special(Expression input) {
+  Expression::Special special;
+  special.special_form = std::make_shared<EchoSpecialForm>();
+  special.arguments.push_back(std::move(input));
+  return Expression(std::move(special));
+}
+
+}  // namespace
 
 TEST(ExpressionUtils, Comparison) {
   auto cmp_name = [](Datum l, Datum r) {
@@ -323,6 +363,12 @@ TEST(Expression, ToString) {
             "round(3.14, {ndigits=0, round_mode=HALF_TO_EVEN})");
   EXPECT_EQ(call("random", {}, compute::RandomOptions()).ToString(),
             "random({initializer=SystemRandom, seed=0})");
+
+  EXPECT_EQ(echo_special(field_ref("a")).ToString(), "echo_special(a)");
+  EXPECT_EQ(
+      if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false"))
+          .ToString(),
+      "if_else_special(cond, if_true, if_false)");
 }
 
 TEST(Expression, Equality) {
@@ -1190,15 +1236,32 @@ Result<Datum> NaiveExecuteScalarExpression(const Expression& expr, const Datum& 
     return ref->GetOneOrNone(*input.record_batch());
   }
 
-  auto call = CallNotNull(expr);
-
-  std::vector<Datum> arguments(call->arguments.size());
-  for (size_t i = 0; i < arguments.size(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(arguments[i],
-                          NaiveExecuteScalarExpression(call->arguments[i], input));
-  }
+  auto execute_args = [](const std::vector<Expression>& args,
+                         const Datum& input) -> Result<std::vector<Datum>> {
+    std::vector<Datum> results(args.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(results[i], NaiveExecuteScalarExpression(args[i], input));
+    }
+    return results;
+  };
 
   compute::ExecContext exec_context;
+
+  if (auto special = expr.special()) {
+    auto arguments_cpy = special->arguments;
+    ARROW_ASSIGN_OR_RAISE(
+        auto executor,
+        special->special_form->Bind(arguments_cpy, special->options, &exec_context));
+    ARROW_ASSIGN_OR_RAISE(auto arguments, execute_args(special->arguments, input));
+    ExecBatch batch{std::move(arguments), input.length()};
+    return executor->Execute(batch, &exec_context);
+  }
+
+  auto call = CallNotNull(expr);
+
+  ARROW_ASSIGN_OR_RAISE(std::vector<Datum> arguments,
+                        execute_args(call->arguments, input));
+
   ARROW_ASSIGN_OR_RAISE(auto function, GetFunction(*call, &exec_context));
 
   std::vector<TypeHolder> types = GetTypes(call->arguments);
@@ -1361,6 +1424,68 @@ TEST(Expression, ExecuteDictionaryTransparent) {
     {"i32": 1, "dict_str": "eh"},
     {"i32": 2, "dict_str": "eh"}
   ])"));
+}
+
+TEST(Expression, NaiveExecuteSpecialForm) {
+  ExpectExecute(echo_special(field_ref("i32")),
+                ArrayFromJSON(struct_({field("i32", int32())}), R"([
+    {"i32": 0},
+    {"i32": 1},
+    {"i32": 2}
+  ])"));
+
+  ExpectExecute(
+      if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false")),
+      ArrayFromJSON(struct_({field("cond", boolean()), field("if_true", int32()),
+                             field("if_false", int32())}),
+                    R"([
+    {"cond": null, "if_true": 0, "if_false": 1},
+    {"cond": false, "if_true": 2, "if_false": 3},
+    {"cond": true, "if_true": 4, "if_false": 5}
+  ])"));
+}
+
+TEST(Expression, ExecuteSpecialFormNested) {
+  const int64_t length = 3;
+
+  auto array = ArrayFromJSON(int32(), R"([null, 42, 42])");
+  auto scalar = ScalarFromJSON(int32(), R"(42)");
+  auto chunked_array = ChunkedArrayFromJSON(int32(), {R"([null, 42])", R"([42])"});
+  std::vector<ExecBatch> inputs = {ExecBatch{{array, array}, length},
+                                   ExecBatch{{array, scalar}, length},
+                                   ExecBatch{{array, chunked_array}, length},
+                                   ExecBatch{{scalar, array}, length},
+                                   ExecBatch{{scalar, scalar}, 1},
+                                   ExecBatch{{scalar, chunked_array}, length},
+                                   ExecBatch{{chunked_array, array}, length},
+                                   ExecBatch{{chunked_array, scalar}, length},
+                                   ExecBatch{{chunked_array, chunked_array}, length}};
+
+  auto schm = schema({field("a", int32()), field("b", int32())});
+  auto a = field_ref("a");
+  auto b = field_ref("b");
+  std::vector<Expression> exprs = {add(echo_special(a), b),
+                                   add(a, echo_special(b)),
+                                   add(echo_special(a), echo_special(b)),
+                                   echo_special(add(a, b)),
+                                   echo_special(add(echo_special(a), b)),
+                                   echo_special(add(a, echo_special(b))),
+                                   echo_special(add(echo_special(a), echo_special(b)))};
+
+  for (const auto& input : inputs) {
+    ARROW_SCOPED_TRACE("Input: " + input.ToString());
+
+    ASSERT_OK_AND_ASSIGN(auto bound, add(a, b).Bind(*schm));
+    ASSERT_OK_AND_ASSIGN(auto expected, ExecuteScalarExpression(bound, input));
+
+    for (const auto& expr : exprs) {
+      ARROW_SCOPED_TRACE("Expr: " + expr.ToString());
+
+      ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schm));
+      ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+      AssertDatumsEqual(result, expected, /*verbose=*/true);
+    }
+  }
 }
 
 void ExpectIdenticalIfUnchanged(Expression modified, Expression original) {
