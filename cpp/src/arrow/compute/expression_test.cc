@@ -28,11 +28,10 @@
 #include <gtest/gtest.h>
 
 #include "arrow/array/builder_primitive.h"
-#include "arrow/compute/expression_internal.h"
+#include "arrow/compute/expression_test_internal.h"
 #include "arrow/compute/function_internal.h"
 #include "arrow/compute/registry.h"
 #include "arrow/compute/special_form.h"
-#include "arrow/testing/gtest_util.h"
 #include "arrow/testing/matchers.h"
 #include "arrow/util/logging_internal.h"
 
@@ -49,52 +48,13 @@ using internal::checked_pointer_cast;
 
 namespace compute {
 
-namespace {
-
-const std::shared_ptr<Schema> kBoringSchema = schema({
-    field("bool", boolean()),
-    field("i8", int8()),
-    field("i32", int32()),
-    field("i32_req", int32(), /*nullable=*/false),
-    field("u32", uint32()),
-    field("i64", int64()),
-    field("f32", float32()),
-    field("f32_req", float32(), /*nullable=*/false),
-    field("f64", float64()),
-    field("date64", date64()),
-    field("str", utf8()),
-    field("dict_str", dictionary(int32(), utf8())),
-    field("dict_i32", dictionary(int32(), int32())),
-    field("ts_ns", timestamp(TimeUnit::NANO)),
-    field("ts_s", timestamp(TimeUnit::SECOND)),
-    field("binary", binary()),
-    field("ts_s_utc", timestamp(TimeUnit::SECOND, "UTC")),
-});
-
-Expression cast(Expression argument, std::shared_ptr<DataType> to_type) {
-  return call("cast", {std::move(argument)},
-              compute::CastOptions::Safe(std::move(to_type)));
-}
-
-Expression true_unless_null(Expression argument) {
-  return call("true_unless_null", {std::move(argument)});
-}
-
-Expression add(Expression l, Expression r) {
-  return call("add", {std::move(l), std::move(r)});
-}
-
-std::string make_range_json(int start, int end) {
-  std::string result = "[";
-  for (int i = start; i <= end; ++i) {
-    if (i > start) result += ",";
-    result += std::to_string(i);
-  }
-  result += "]";
-  return result;
-}
-
-const auto no_change = std::nullopt;
+using internal::add;
+using internal::cast;
+using internal::ExpectBindsTo;
+using internal::kBoringSchema;
+using internal::make_range_json;
+using internal::no_change;
+using internal::true_unless_null;
 
 class EchoSpecialExecutor : public SpecialExecutor {
  public:
@@ -129,8 +89,6 @@ Expression echo_special(Expression input) {
   special.arguments.push_back(std::move(input));
   return Expression(std::move(special));
 }
-
-}  // namespace
 
 TEST(ExpressionUtils, Comparison) {
   auto cmp_name = [](Datum l, Datum r) {
@@ -365,10 +323,6 @@ TEST(Expression, ToString) {
             "random({initializer=SystemRandom, seed=0})");
 
   EXPECT_EQ(echo_special(field_ref("a")).ToString(), "echo_special(a)");
-  EXPECT_EQ(
-      if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false"))
-          .ToString(),
-      "if_else_special(cond, if_true, if_false)");
 }
 
 TEST(Expression, Equality) {
@@ -434,17 +388,6 @@ TEST(Expression, Equality) {
             add(literal(42), field_ref("a")));
   EXPECT_NE(echo_special(add(literal(42), field_ref("a"))),
             echo_special(add(field_ref("a"), literal(42))));
-
-  EXPECT_EQ(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-            if_else_special(literal(true), field_ref("a"), field_ref("b")));
-  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-            if_else_special(literal(false), field_ref("a"), field_ref("b")));
-  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-            if_else_special(literal(true), field_ref("b"), field_ref("b")));
-  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-            if_else_special(literal(true), field_ref("a"), field_ref("a")));
-  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-            call("if_else", {literal(true), field_ref("a"), field_ref("b")}));
 }
 
 Expression null_literal(const std::shared_ptr<DataType>& type) {
@@ -476,17 +419,7 @@ TEST(Expression, Hash) {
   EXPECT_FALSE(set.emplace(echo_special(field_ref("a"))).second) << "already inserted";
   EXPECT_TRUE(set.emplace(echo_special(field_ref("b"))).second);
 
-  EXPECT_TRUE(
-      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
-          .second);
-  EXPECT_FALSE(
-      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
-          .second);
-  EXPECT_TRUE(
-      set.emplace(if_else_special(field_ref("cond"), field_ref("b"), field_ref("a")))
-          .second);
-
-  EXPECT_EQ(set.size(), 12);
+  EXPECT_EQ(set.size(), 10);
 }
 
 TEST(Expression, IsScalarExpression) {
@@ -508,9 +441,6 @@ TEST(Expression, IsScalarExpression) {
   EXPECT_FALSE(call("take", {field_ref("a"), literal(arr)}).IsScalarExpression());
 
   EXPECT_TRUE(echo_special(field_ref("a")).IsScalarExpression());
-
-  EXPECT_TRUE(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b"))
-                  .IsScalarExpression());
 }
 
 TEST(Expression, IsSatisfiable) {
@@ -582,9 +512,6 @@ TEST(Expression, IsSatisfiable) {
   }
 
   EXPECT_TRUE(Bind(echo_special(field_ref("i32"))).IsSatisfiable());
-
-  EXPECT_TRUE(Bind(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i32")))
-                  .IsSatisfiable());
 }
 
 TEST(Expression, FieldsInExpression) {
@@ -615,21 +542,6 @@ TEST(Expression, FieldsInExpression) {
 
   ExpectFieldsAre(echo_special(literal(42)), {});
   ExpectFieldsAre(echo_special(field_ref("a")), {"a"});
-
-  ExpectFieldsAre(if_else_special(literal(true), literal(1), literal(0)), {});
-  ExpectFieldsAre(if_else_special(literal(true), field_ref("a"), field_ref("b")),
-                  {"a", "b"});
-  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("b")),
-                  {"a", "b", "b"});
-  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("c")),
-                  {"a", "b", "c"});
-  ExpectFieldsAre(
-      if_else_special(call("not", {field_ref("a")}), call("not", {field_ref("b")}),
-                      call("not", {field_ref("c")})),
-      {"a", "b", "c"});
-  ExpectFieldsAre(
-      call("not", {if_else_special(field_ref("a"), field_ref("b"), field_ref("c"))}),
-      {"a", "b", "c"});
 }
 
 TEST(Expression, ExpressionHasFieldRefs) {
@@ -655,15 +567,6 @@ TEST(Expression, ExpressionHasFieldRefs) {
 
   EXPECT_FALSE(ExpressionHasFieldRefs(echo_special(literal(42))));
   EXPECT_TRUE(ExpressionHasFieldRefs(echo_special(field_ref("a"))));
-
-  EXPECT_FALSE(
-      ExpressionHasFieldRefs(if_else_special(literal(true), literal(1), literal(0))));
-  EXPECT_TRUE(
-      ExpressionHasFieldRefs(if_else_special(field_ref("a"), literal(1), literal(0))));
-  EXPECT_TRUE(
-      ExpressionHasFieldRefs(if_else_special(literal(true), field_ref("a"), literal(0))));
-  EXPECT_TRUE(
-      ExpressionHasFieldRefs(if_else_special(literal(true), literal(0), field_ref("a"))));
 }
 
 TEST(Expression, BindLiteral) {
@@ -676,24 +579,6 @@ TEST(Expression, BindLiteral) {
     Expression expr = literal(dat);
     EXPECT_TRUE(dat.type()->Equals(*expr.type()));
     EXPECT_TRUE(expr.IsBound());
-  }
-}
-
-void ExpectBindsTo(Expression expr, std::optional<Expression> expected,
-                   Expression* bound_out = nullptr,
-                   const Schema& schema = *kBoringSchema) {
-  if (!expected) {
-    expected = expr;
-  }
-
-  ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(schema));
-  EXPECT_TRUE(bound.IsBound());
-
-  ASSERT_OK_AND_ASSIGN(expected, expected->Bind(schema));
-  EXPECT_EQ(bound, *expected) << " unbound: " << expr.ToString();
-
-  if (bound_out) {
-    *bound_out = bound;
   }
 }
 
@@ -1104,104 +989,6 @@ TEST(Expression, BindSpecialForm) {
     EXPECT_TRUE(expr.IsBound());
     EXPECT_TRUE(expr.type()->Equals(*int64()));
   }
-
-  {
-    auto expr = if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i8"));
-    EXPECT_FALSE(expr.IsBound());
-    ExpectBindsTo(expr, no_change, &expr);
-    EXPECT_TRUE(expr.IsBound());
-    EXPECT_TRUE(expr.type()->Equals(*int8()));
-  }
-
-  // Implicit casts.
-  {
-    Expression bound;
-    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
-                  if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
-                                  field_ref("i32")),
-                  &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-  {
-    Expression bound;
-    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i8")),
-                  if_else_special(field_ref("bool"), field_ref("i32"),
-                                  cast(field_ref("i8"), int32())),
-                  &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-
-  // Nested call.
-  {
-    Expression bound;
-    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i8")),
-                                  add(field_ref("i8"), literal(42)),
-                                  add(field_ref("i32"), literal(42))),
-                  if_else_special(equal(field_ref("i8"), field_ref("i8")),
-                                  cast(add(field_ref("i8"), literal(42)), int32()),
-                                  add(field_ref("i32"), literal(42))),
-                  &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-  {
-    Expression bound;
-    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i32")),
-                                  add(field_ref("i32"), field_ref("i8")),
-                                  add(field_ref("i32"), literal(42))),
-                  if_else_special(equal(cast(field_ref("i8"), int32()), field_ref("i32")),
-                                  add(field_ref("i32"), cast(field_ref("i8"), int32())),
-                                  add(field_ref("i32"), literal(42))),
-                  &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-
-  // Nesting call.
-  {
-    Expression bound;
-    ExpectBindsTo(add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
-                      field_ref("i8")),
-                  add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
-                      cast(field_ref("i8"), int32())),
-                  &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-  {
-    Expression bound;
-    ExpectBindsTo(
-        add(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
-            field_ref("i32")),
-        add(cast(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
-                 int32()),
-            field_ref("i32")),
-        &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int32()));
-  }
-
-  // Self-nested.
-  {
-    Expression bound;
-    ExpectBindsTo(
-        if_else_special(
-            if_else_special(literal(true), literal(true), literal(false)),
-            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
-            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i64"))),
-        if_else_special(
-            if_else_special(literal(true), literal(true), literal(false)),
-            cast(if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
-                                 field_ref("i32")),
-                 int64()),
-            if_else_special(field_ref("bool"), cast(field_ref("i8"), int64()),
-                            field_ref("i64"))),
-        &bound);
-    EXPECT_TRUE(bound.IsBound());
-    EXPECT_TRUE(bound.type()->Equals(*int64()));
-  }
 }
 
 TEST(Expression, ExecuteFieldRef) {
@@ -1494,16 +1281,6 @@ TEST(Expression, NaiveExecuteSpecialForm) {
     {"i32": 0},
     {"i32": 1},
     {"i32": 2}
-  ])"));
-
-  ExpectExecute(
-      if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false")),
-      ArrayFromJSON(struct_({field("cond", boolean()), field("if_true", int32()),
-                             field("if_false", int32())}),
-                    R"([
-    {"cond": null, "if_true": 0, "if_false": 1},
-    {"cond": false, "if_true": 2, "if_false": 3},
-    {"cond": true, "if_true": 4, "if_false": 5}
   ])"));
 }
 

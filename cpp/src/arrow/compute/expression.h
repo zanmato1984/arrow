@@ -186,8 +186,6 @@ Expression call(std::string function, std::vector<Expression> arguments,
               std::make_shared<Options>(std::move(options)));
 }
 
-Expression if_else_special(Expression cond, Expression if_true, Expression if_false);
-
 /// Assemble a list of all fields referenced by an Expression at any depth.
 ARROW_EXPORT
 std::vector<FieldRef> FieldsInExpression(const Expression&);

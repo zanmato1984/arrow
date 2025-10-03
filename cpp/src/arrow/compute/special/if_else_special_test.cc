@@ -15,21 +15,204 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/compute/special_form.h"
-
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <unordered_set>
 
-#include "arrow/compute/exec.h"
-#include "arrow/compute/expression.h"
-#include "arrow/compute/function.h"
-#include "arrow/compute/kernels/codegen_internal.h"
-#include "arrow/compute/registry.h"
-#include "arrow/testing/gtest_util.h"
+#include "arrow/compute/api_special.h"
+#include "arrow/compute/expression_test_internal.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/util/logging_internal.h"
 
 namespace arrow::compute {
 
 namespace {
+
+using internal::add;
+using internal::cast;
+using internal::ExpectBindsTo;
+using internal::kBoringSchema;
+using internal::no_change;
+
+TEST(Expression, ToString) {
+  EXPECT_EQ(
+      if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false"))
+          .ToString(),
+      "if_else_special(cond, if_true, if_false)");
+}
+
+TEST(Expression, Equality) {
+  EXPECT_EQ(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("a"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(false), field_ref("a"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("b"), field_ref("b")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            if_else_special(literal(true), field_ref("a"), field_ref("a")));
+  EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+            call("if_else", {literal(true), field_ref("a"), field_ref("b")}));
+}
+
+TEST(Expression, Hash) {
+  std::unordered_set<Expression, Expression::Hash> set;
+
+  EXPECT_TRUE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
+          .second);
+  EXPECT_FALSE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b")))
+          .second);
+  EXPECT_TRUE(
+      set.emplace(if_else_special(field_ref("cond"), field_ref("b"), field_ref("a")))
+          .second);
+
+  EXPECT_EQ(set.size(), 2);
+}
+
+TEST(Expression, IsScalarExpression) {
+  EXPECT_TRUE(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b"))
+                  .IsScalarExpression());
+}
+
+TEST(Expression, IsSatisfiable) {
+  auto Bind = [](Expression expr) { return expr.Bind(*kBoringSchema).ValueOrDie(); };
+
+  EXPECT_TRUE(Bind(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i32")))
+                  .IsSatisfiable());
+}
+
+TEST(Expression, FieldsInExpression) {
+  auto ExpectFieldsAre = [](Expression expr, std::vector<FieldRef> expected) {
+    EXPECT_THAT(FieldsInExpression(expr), testing::ContainerEq(expected));
+  };
+
+  ExpectFieldsAre(if_else_special(literal(true), literal(1), literal(0)), {});
+  ExpectFieldsAre(if_else_special(literal(true), field_ref("a"), field_ref("b")),
+                  {"a", "b"});
+  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("b")),
+                  {"a", "b", "b"});
+  ExpectFieldsAre(if_else_special(field_ref("a"), field_ref("b"), field_ref("c")),
+                  {"a", "b", "c"});
+  ExpectFieldsAre(
+      if_else_special(call("not", {field_ref("a")}), call("not", {field_ref("b")}),
+                      call("not", {field_ref("c")})),
+      {"a", "b", "c"});
+  ExpectFieldsAre(
+      call("not", {if_else_special(field_ref("a"), field_ref("b"), field_ref("c"))}),
+      {"a", "b", "c"});
+}
+
+TEST(Expression, ExpressionHasFieldRefs) {
+  EXPECT_FALSE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), literal(1), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(field_ref("a"), literal(1), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), field_ref("a"), literal(0))));
+  EXPECT_TRUE(
+      ExpressionHasFieldRefs(if_else_special(literal(true), literal(0), field_ref("a"))));
+}
+
+TEST(Expression, BindSpecialForm) {
+  {
+    auto expr = if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i8"));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*int8()));
+  }
+
+  // Implicit casts.
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
+                  if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
+                                  field_ref("i32")),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i8")),
+                  if_else_special(field_ref("bool"), field_ref("i32"),
+                                  cast(field_ref("i8"), int32())),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Nested call.
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i8")),
+                                  add(field_ref("i8"), literal(42)),
+                                  add(field_ref("i32"), literal(42))),
+                  if_else_special(equal(field_ref("i8"), field_ref("i8")),
+                                  cast(add(field_ref("i8"), literal(42)), int32()),
+                                  add(field_ref("i32"), literal(42))),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(if_else_special(equal(field_ref("i8"), field_ref("i32")),
+                                  add(field_ref("i32"), field_ref("i8")),
+                                  add(field_ref("i32"), literal(42))),
+                  if_else_special(equal(cast(field_ref("i8"), int32()), field_ref("i32")),
+                                  add(field_ref("i32"), cast(field_ref("i8"), int32())),
+                                  add(field_ref("i32"), literal(42))),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Nesting call.
+  {
+    Expression bound;
+    ExpectBindsTo(add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
+                      field_ref("i8")),
+                  add(if_else_special(field_ref("bool"), field_ref("i32"), literal(42)),
+                      cast(field_ref("i8"), int32())),
+                  &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+  {
+    Expression bound;
+    ExpectBindsTo(
+        add(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
+            field_ref("i32")),
+        add(cast(if_else_special(field_ref("bool"), field_ref("i8"), literal(42)),
+                 int32()),
+            field_ref("i32")),
+        &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int32()));
+  }
+
+  // Self-nested.
+  {
+    Expression bound;
+    ExpectBindsTo(
+        if_else_special(
+            if_else_special(literal(true), literal(true), literal(false)),
+            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i32")),
+            if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i64"))),
+        if_else_special(
+            if_else_special(literal(true), literal(true), literal(false)),
+            cast(if_else_special(field_ref("bool"), cast(field_ref("i8"), int32()),
+                                 field_ref("i32")),
+                 int64()),
+            if_else_special(field_ref("bool"), cast(field_ref("i8"), int64()),
+                            field_ref("i64"))),
+        &bound);
+    EXPECT_TRUE(bound.IsBound());
+    EXPECT_TRUE(bound.type()->Equals(*int64()));
+  }
+}
 
 void AssertEqualIgnoreShape(const Datum& expected, const Datum& result) {
   if (expected.kind() == result.kind()) {
