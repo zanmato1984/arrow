@@ -96,13 +96,6 @@ Expression call(std::string function, std::vector<Expression> arguments,
   return Expression(std::move(call));
 }
 
-Expression if_else_special(Expression cond, Expression if_true, Expression if_false) {
-  Expression::Special special;
-  special.special_form = GetIfElseSpecialForm();
-  special.arguments = {std::move(cond), std::move(if_true), std::move(if_false)};
-  return Expression(std::move(special));
-}
-
 const Datum* Expression::literal() const {
   if (impl_ == nullptr) return nullptr;
 

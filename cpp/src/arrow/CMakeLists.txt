@@ -728,7 +728,6 @@ set(ARROW_COMPUTE_SRCS
     compute/kernel.cc
     compute/ordering.cc
     compute/registry.cc
-    compute/special_form.cc
     compute/kernels/chunked_internal.cc
     compute/kernels/codegen_internal.cc
     compute/kernels/scalar_cast_boolean.cc
@@ -803,6 +802,7 @@ if(ARROW_COMPUTE)
        compute/row/grouper.cc
        compute/row/row_encoder_internal.cc
        compute/row/row_internal.cc
+       compute/special/if_else_special.cc
        compute/util.cc
        compute/util_internal.cc)
 

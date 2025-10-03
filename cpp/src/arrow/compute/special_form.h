@@ -54,6 +54,4 @@ class ARROW_EXPORT SpecialForm {
   std::string name_;
 };
 
-std::shared_ptr<SpecialForm> GetIfElseSpecialForm();
-
 }  // namespace arrow::compute
