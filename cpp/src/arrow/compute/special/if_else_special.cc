@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/compute/special_form.h"
-
 #include "arrow/array/builder_primitive.h"
 #include "arrow/chunk_resolver.h"
 #include "arrow/compute/api_vector.h"
@@ -24,6 +22,7 @@
 #include "arrow/compute/expression.h"
 #include "arrow/compute/expression_internal.h"
 #include "arrow/compute/registry.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/util/logging_internal.h"
 
 namespace arrow::compute {
@@ -665,11 +664,18 @@ class IfElseSpecialForm : public ConditionalSpecialForm<IfElseSpecialForm> {
   friend class ConditionalSpecialForm<IfElseSpecialForm>;
 };
 
-}  // namespace
-
 std::shared_ptr<SpecialForm> GetIfElseSpecialForm() {
   static auto instance = std::make_shared<IfElseSpecialForm>();
   return instance;
+}
+
+}  // namespace
+
+Expression if_else_special(Expression cond, Expression if_true, Expression if_false) {
+  Expression::Special special;
+  special.special_form = GetIfElseSpecialForm();
+  special.arguments = {std::move(cond), std::move(if_true), std::move(if_false)};
+  return Expression(std::move(special));
 }
 
 }  // namespace arrow::compute

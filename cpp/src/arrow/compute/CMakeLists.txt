@@ -180,16 +180,10 @@ add_arrow_compute_test(row_test
                        EXTRA_LINK_LIBS
                        arrow_compute_testing)
 
-add_arrow_compute_test(special_form_test
-                       SOURCES
-                       special_form_test.cc
-                       EXTRA_LINK_LIBS
-                       arrow_compute_testing)
-
 add_arrow_compute_benchmark(function_benchmark)
-
-add_arrow_compute_benchmark(special_form_benchmark PREFIX "arrow-compute")
 
 add_subdirectory(kernels)
 
 add_subdirectory(row)
+
+add_subdirectory(special)
