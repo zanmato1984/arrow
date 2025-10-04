@@ -34,14 +34,14 @@ using internal::ExpectBindsTo;
 using internal::kBoringSchema;
 using internal::no_change;
 
-TEST(Expression, ToString) {
+TEST(IfElseSpecial, ToString) {
   EXPECT_EQ(
       if_else_special(field_ref("cond"), field_ref("if_true"), field_ref("if_false"))
           .ToString(),
       "if_else_special(cond, if_true, if_false)");
 }
 
-TEST(Expression, Equality) {
+TEST(IfElseSpecial, Equality) {
   EXPECT_EQ(if_else_special(literal(true), field_ref("a"), field_ref("b")),
             if_else_special(literal(true), field_ref("a"), field_ref("b")));
   EXPECT_NE(if_else_special(literal(true), field_ref("a"), field_ref("b")),
@@ -54,7 +54,7 @@ TEST(Expression, Equality) {
             call("if_else", {literal(true), field_ref("a"), field_ref("b")}));
 }
 
-TEST(Expression, Hash) {
+TEST(IfElseSpecial, Hash) {
   std::unordered_set<Expression, Expression::Hash> set;
 
   EXPECT_TRUE(
@@ -70,19 +70,19 @@ TEST(Expression, Hash) {
   EXPECT_EQ(set.size(), 2);
 }
 
-TEST(Expression, IsScalarExpression) {
+TEST(IfElseSpecial, IsScalarExpression) {
   EXPECT_TRUE(if_else_special(field_ref("cond"), field_ref("a"), field_ref("b"))
                   .IsScalarExpression());
 }
 
-TEST(Expression, IsSatisfiable) {
+TEST(IfElseSpecial, IsSatisfiable) {
   auto Bind = [](Expression expr) { return expr.Bind(*kBoringSchema).ValueOrDie(); };
 
   EXPECT_TRUE(Bind(if_else_special(field_ref("bool"), field_ref("i32"), field_ref("i32")))
                   .IsSatisfiable());
 }
 
-TEST(Expression, FieldsInExpression) {
+TEST(IfElseSpecial, FieldsInExpression) {
   auto ExpectFieldsAre = [](Expression expr, std::vector<FieldRef> expected) {
     EXPECT_THAT(FieldsInExpression(expr), testing::ContainerEq(expected));
   };
@@ -103,7 +103,7 @@ TEST(Expression, FieldsInExpression) {
       {"a", "b", "c"});
 }
 
-TEST(Expression, ExpressionHasFieldRefs) {
+TEST(IfElseSpecial, ExpressionHasFieldRefs) {
   EXPECT_FALSE(
       ExpressionHasFieldRefs(if_else_special(literal(true), literal(1), literal(0))));
   EXPECT_TRUE(
@@ -114,7 +114,7 @@ TEST(Expression, ExpressionHasFieldRefs) {
       ExpressionHasFieldRefs(if_else_special(literal(true), literal(0), field_ref("a"))));
 }
 
-TEST(Expression, BindSpecialForm) {
+TEST(IfElseSpecial, BindSpecialForm) {
   {
     auto expr = if_else_special(field_ref("bool"), field_ref("i8"), field_ref("i8"));
     EXPECT_FALSE(expr.IsBound());

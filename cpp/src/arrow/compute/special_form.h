@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#pragma once
+
 #include "arrow/compute/expression.h"
 
 namespace arrow::compute {

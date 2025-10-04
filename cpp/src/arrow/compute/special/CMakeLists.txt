@@ -23,4 +23,10 @@ add_arrow_compute_test(if_else_special_test
                        EXTRA_LINK_LIBS
                        arrow_compute_testing)
 
+add_arrow_compute_test(special_internal_test
+                       SOURCES
+                       conditional_test.cc
+                       EXTRA_LINK_LIBS
+                       arrow_compute_testing)
+
 add_arrow_compute_benchmark(if_else_special_benchmark)
