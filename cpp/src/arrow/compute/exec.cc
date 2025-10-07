@@ -72,6 +72,18 @@ ExecContext* threaded_exec_context() {
   return &threaded_ctx;
 }
 
+ExecBatch::ExecBatch(std::vector<Datum> values, int64_t length,
+                     std::shared_ptr<SelectionVector> selection_vector)
+    : values(std::move(values)),
+      length(length),
+      selection_vector(std::move(selection_vector)) {
+#ifndef NDEBUG
+  if (this->selection_vector) {
+    DCHECK_OK(this->selection_vector->Validate(this->length));
+  }
+#endif
+}
+
 ExecBatch::ExecBatch(const RecordBatch& batch)
     : values(batch.num_columns()), length(batch.num_rows()) {
   auto columns = batch.column_data();
@@ -1449,14 +1461,46 @@ const CpuInfo* ExecContext::cpu_info() const { return CpuInfo::GetInstance(); }
 
 SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
     : data_(std::move(data)) {
-  DCHECK_EQ(Type::INT32, data_->type->id());
-  DCHECK_EQ(0, data_->GetNullCount());
+  DCHECK_NE(data_, nullptr);
+  DCHECK_EQ(data_->type->id(), Type::INT32);
   indices_ = data_->GetValues<int32_t>(1);
 }
 
 SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
 
 int64_t SelectionVector::length() const { return data_->length; }
+
+Status SelectionVector::Validate(int64_t max_index) const {
+  if (data_ == nullptr) {
+    return Status::Invalid("SelectionVector not initialized");
+  }
+  ARROW_CHECK_NE(indices_, nullptr);
+  if (data_->type->id() != Type::INT32) {
+    return Status::Invalid("SelectionVector must be of type int32");
+  }
+  if (data_->GetNullCount() != 0) {
+    return Status::Invalid("SelectionVector cannot contain nulls");
+  }
+  for (int64_t i = 1; i < length(); ++i) {
+    if (indices_[i - 1] > indices_[i]) {
+      return Status::Invalid("SelectionVector indices must be sorted");
+    }
+  }
+  for (int64_t i = 0; i < length(); ++i) {
+    if (indices_[i] < 0) {
+      return Status::Invalid("SelectionVector indices must be non-negative");
+    }
+  }
+  if (max_index >= 0) {
+    for (int64_t i = 0; i < length(); ++i) {
+      if (indices_[i] > max_index) {
+        return Status::Invalid("SelectionVector index ", indices_[i], " exceeds maximum ",
+                               max_index);
+      }
+    }
+  }
+  return Status::OK();
+}
 
 void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length,
                                    int32_t index_back_shift) {
