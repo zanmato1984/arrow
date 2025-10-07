@@ -19,27 +19,112 @@
 
 #include "arrow/compute/special/conditional_internal.h"
 #include "arrow/compute/test_util_internal.h"
+#include "arrow/testing/generator.h"
+#include "arrow/testing/gtest_util.h"
+#include "arrow/util/checked_cast.h"
 
 namespace arrow::compute::internal {
 
 TEST(AllPassBranchMask, Emptiness) {
   for (auto length : {0, 42}) {
-    auto all_pass = std::make_shared<AllPassBranchMask>(length);
-    EXPECT_FALSE(all_pass->empty());
+    auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+    EXPECT_FALSE(branch_mask->empty());
+  }
+}
+
+TEST(AllPassBranchMask, ApplyCond) {
+  for (auto length : {0, 42}) {
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(auto body_mask,
+                           branch_mask->ApplyCond(literal(true), ExecBatch({}, length),
+                                                  default_exec_context()));
+      auto casted = checked_cast<const AllPassBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(Expression expr,
+                           field_ref(0).Bind(Schema({field("", boolean())})));
+      ASSERT_OK_AND_ASSIGN(
+          auto body_mask,
+          branch_mask->ApplyCond(expr, ExecBatch({BooleanScalar(true)}, length),
+                                 default_exec_context()));
+      auto casted = checked_cast<const AllPassBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(auto body_mask,
+                           branch_mask->ApplyCond(literal(false), ExecBatch({}, length),
+                                                  default_exec_context()));
+      auto casted = checked_cast<const AllFailBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(Expression expr,
+                           field_ref(0).Bind(Schema({field("", boolean())})));
+      ASSERT_OK_AND_ASSIGN(
+          auto body_mask,
+          branch_mask->ApplyCond(expr, ExecBatch({BooleanScalar(false)}, length),
+                                 default_exec_context()));
+      auto casted = checked_cast<const AllFailBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(
+          auto body_mask,
+          branch_mask->ApplyCond(literal(BooleanScalar()), ExecBatch({}, length),
+                                 default_exec_context()));
+      auto casted = checked_cast<const AllNullBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(Expression expr,
+                           field_ref(0).Bind(Schema({field("", boolean())})));
+      ASSERT_OK_AND_ASSIGN(auto body_mask, branch_mask->ApplyCond(
+                                               expr, ExecBatch({BooleanScalar()}, length),
+                                               default_exec_context()));
+      auto casted = checked_cast<const AllNullBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
+
+    for (auto boolean_scalar :
+         {MakeScalar(true), MakeScalar(false), MakeNullScalar(boolean())}) {
+      auto branch_mask = std::make_shared<AllPassBranchMask>(length);
+      ASSERT_OK_AND_ASSIGN(Expression expr,
+                           field_ref(0).Bind(Schema({field("", boolean())})));
+      ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                           gen::Constant(boolean_scalar)->Generate(length));
+      ASSERT_OK_AND_ASSIGN(
+          auto body_mask,
+          branch_mask->ApplyCond(expr, ExecBatch({std::move(boolean_array)}, length),
+                                 default_exec_context()));
+      auto casted = checked_cast<const ConditionalBodyMask*>(body_mask.get());
+      EXPECT_NE(casted, nullptr);
+    }
   }
 }
 
 TEST(AllFailBranchMask, Emptiness) {
-  auto all_fail = std::make_shared<AllFailBranchMask>();
-  EXPECT_TRUE(all_fail->empty());
+  auto branch_mask = std::make_shared<AllFailBranchMask>();
+  EXPECT_TRUE(branch_mask->empty());
 }
 
 TEST(ConditionalBranchMask, Emptiness) {
   for (const auto& selection :
        {SelectionVectorFromJSON("[]"), SelectionVectorFromJSON("[0]"),
         SelectionVectorFromJSON("[0, 41]")}) {
-    auto conditional = std::make_shared<ConditionalBranchMask>(selection, /*length=*/42);
-    EXPECT_EQ(conditional->empty(), selection->length() == 0);
+    auto branch_mask = std::make_shared<ConditionalBranchMask>(selection, /*length=*/42);
+    EXPECT_EQ(branch_mask->empty(), selection->length() == 0);
   }
 }
 
