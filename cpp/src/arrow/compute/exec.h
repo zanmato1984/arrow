@@ -198,7 +198,10 @@ constexpr int64_t kUnsequencedIndex = -1;
 struct ARROW_EXPORT ExecBatch {
   ExecBatch() = default;
   ExecBatch(std::vector<Datum> values, int64_t length,
-            std::shared_ptr<SelectionVector> selection_vector = NULLPTR);
+            std::shared_ptr<SelectionVector> selection_vector = NULLPTR)
+      : values(std::move(values)),
+        length(length),
+        selection_vector(std::move(selection_vector)) {}
 
   explicit ExecBatch(const RecordBatch& batch);
 

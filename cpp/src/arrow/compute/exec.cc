@@ -72,18 +72,6 @@ ExecContext* threaded_exec_context() {
   return &threaded_ctx;
 }
 
-ExecBatch::ExecBatch(std::vector<Datum> values, int64_t length,
-                     std::shared_ptr<SelectionVector> selection_vector)
-    : values(std::move(values)),
-      length(length),
-      selection_vector(std::move(selection_vector)) {
-#ifndef NDEBUG
-  if (this->selection_vector) {
-    DCHECK_OK(this->selection_vector->Validate(this->length));
-  }
-#endif
-}
-
 ExecBatch::ExecBatch(const RecordBatch& batch)
     : values(batch.num_columns()), length(batch.num_rows()) {
   auto columns = batch.column_data();
