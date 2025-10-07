@@ -144,7 +144,7 @@ class ARROW_EXPORT SelectionVector {
   const int32_t* indices() const { return indices_; }
   int64_t length() const;
 
-  Status Validate(int64_t max_index = -1) const;
+  Status Validate(int64_t values_length = -1) const;
 
  private:
   std::shared_ptr<ArrayData> data_;
