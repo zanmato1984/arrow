@@ -1470,7 +1470,7 @@ SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data())
 
 int64_t SelectionVector::length() const { return data_->length; }
 
-Status SelectionVector::Validate(int64_t max_index) const {
+Status SelectionVector::Validate(int64_t values_length) const {
   if (data_ == nullptr) {
     return Status::Invalid("SelectionVector not initialized");
   }
@@ -1491,11 +1491,11 @@ Status SelectionVector::Validate(int64_t max_index) const {
       return Status::Invalid("SelectionVector indices must be non-negative");
     }
   }
-  if (max_index >= 0) {
+  if (values_length >= 0) {
     for (int64_t i = 0; i < length(); ++i) {
-      if (indices_[i] > max_index) {
-        return Status::Invalid("SelectionVector index ", indices_[i], " exceeds maximum ",
-                               max_index);
+      if (indices_[i] >= values_length) {
+        return Status::Invalid("SelectionVector index ", indices_[i],
+                               " >= values length ", values_length);
       }
     }
   }
