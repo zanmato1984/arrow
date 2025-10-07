@@ -122,6 +122,7 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
 Result<Datum> ConditionalBranchMask::DoApplyCond(const Expression& expr,
                                                  const ExecBatch& input,
                                                  ExecContext* exec_context) const {
+  DCHECK_EQ(input.length, length_);
   auto sparse_input = input;
   sparse_input.selection_vector = selection_vector_;
   return ExecuteScalarExpression(expr, sparse_input, exec_context);
