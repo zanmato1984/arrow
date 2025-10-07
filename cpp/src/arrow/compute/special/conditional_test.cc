@@ -18,13 +18,28 @@
 #include <gtest/gtest.h>
 
 #include "arrow/compute/special/conditional_internal.h"
+#include "arrow/compute/test_util_internal.h"
 
 namespace arrow::compute::internal {
 
 TEST(AllPassBranchMask, Emptiness) {
   for (auto length : {0, 42}) {
-    auto branch_mask = std::make_shared<AllPassBranchMask>(length);
-    EXPECT_FALSE(branch_mask->empty());
+    auto all_pass = std::make_shared<AllPassBranchMask>(length);
+    EXPECT_FALSE(all_pass->empty());
+  }
+}
+
+TEST(AllFailBranchMask, Emptiness) {
+  auto all_fail = std::make_shared<AllFailBranchMask>();
+  EXPECT_TRUE(all_fail->empty());
+}
+
+TEST(ConditionalBranchMask, Emptiness) {
+  for (const auto& selection :
+       {SelectionVectorFromJSON("[]"), SelectionVectorFromJSON("[0]"),
+        SelectionVectorFromJSON("[0, 41]")}) {
+    auto conditional = std::make_shared<ConditionalBranchMask>(selection, /*length=*/42);
+    EXPECT_EQ(conditional->empty(), selection->length() == 0);
   }
 }
 
