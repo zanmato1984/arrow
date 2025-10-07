@@ -118,7 +118,11 @@ struct ARROW_COMPUTE_EXPORT AllFailBranchMask : public BranchMask {
 
 struct ARROW_COMPUTE_EXPORT ConditionalBranchMask : public BranchMask {
   ConditionalBranchMask(std::shared_ptr<SelectionVector> selection_vector, int64_t length)
-      : selection_vector_(std::move(selection_vector)), length_(length) {}
+      : selection_vector_(std::move(selection_vector)), length_(length) {
+#ifndef NDEBUG
+    DCHECK_OK(selection_vector_->Validate(length_));
+#endif
+  }
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
@@ -243,7 +247,12 @@ struct ARROW_COMPUTE_EXPORT Branch {
 struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   ConditionalBodyMask(std::shared_ptr<SelectionVector> body,
                       std::shared_ptr<SelectionVector> rest, int64_t length)
-      : body_(std::move(body)), rest_(std::move(rest)), length_(length) {}
+      : body_(std::move(body)), rest_(std::move(rest)), length_(length) {
+#ifndef NDEBUG
+    DCHECK_OK(body_->Validate(length_));
+    DCHECK_OK(rest_->Validate(length_));
+#endif
+  }
 
   bool empty() const override { return body_->length() == 0; }
 
@@ -255,7 +264,7 @@ struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
-    if (!rest_) {
+    if (rest_->length() == 0) {
       return std::make_shared<AllFailBranchMask>();
     }
     return std::make_shared<ConditionalBranchMask>(rest_, length_);
