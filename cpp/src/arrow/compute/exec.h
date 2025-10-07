@@ -144,6 +144,8 @@ class ARROW_EXPORT SelectionVector {
   const int32_t* indices() const { return indices_; }
   int64_t length() const;
 
+  Status Validate(int64_t max_index = -1) const;
+
  private:
   std::shared_ptr<ArrayData> data_;
   const int32_t* indices_;
@@ -196,10 +198,7 @@ constexpr int64_t kUnsequencedIndex = -1;
 struct ARROW_EXPORT ExecBatch {
   ExecBatch() = default;
   ExecBatch(std::vector<Datum> values, int64_t length,
-            std::shared_ptr<SelectionVector> selection_vector = NULLPTR)
-      : values(std::move(values)),
-        length(length),
-        selection_vector(std::move(selection_vector)) {}
+            std::shared_ptr<SelectionVector> selection_vector = NULLPTR);
 
   explicit ExecBatch(const RecordBatch& batch);
 

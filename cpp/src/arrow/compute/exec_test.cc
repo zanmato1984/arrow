@@ -36,11 +36,11 @@
 #include "arrow/compute/kernel.h"
 #include "arrow/compute/ordering.h"
 #include "arrow/compute/registry.h"
+#include "arrow/compute/test_util_internal.h"
 #include "arrow/memory_pool.h"
 #include "arrow/record_batch.h"
 #include "arrow/scalar.h"
 #include "arrow/status.h"
-#include "arrow/testing/generator.h"
 #include "arrow/type.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap_ops.h"
@@ -148,11 +148,38 @@ TEST(ExecContext, BasicWorkings) {
 }
 
 TEST(SelectionVector, Basics) {
-  auto indices = ArrayFromJSON(int32(), "[0, 3]");
-  auto sel_vector = std::make_shared<SelectionVector>(*indices);
+  auto sel_vector = SelectionVectorFromJSON("[0, 42]");
 
-  ASSERT_EQ(indices->length(), sel_vector->length());
-  ASSERT_EQ(3, sel_vector->indices()[1]);
+  ASSERT_EQ(sel_vector->length(), 2);
+  ASSERT_EQ(sel_vector->indices()[0], 0);
+  ASSERT_EQ(sel_vector->indices()[1], 42);
+}
+
+TEST(SelectionVector, Validate) {
+  {
+    auto sel_vector = SelectionVectorFromJSON("[]");
+    ASSERT_OK(sel_vector->Validate());
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[0, null, 42]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate());
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[42, 0]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate());
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[-42, 0]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate());
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[0, 1]");
+    ASSERT_OK(sel_vector->Validate(/*max_index=*/1));
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[0, 42]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate(/*max_index=*/1));
+  }
 }
 
 TEST(SelectionVectorSpan, Basics) {
@@ -921,22 +948,11 @@ TEST_F(TestExecSpanIterator, ZeroLengthInputs) {
   CheckArgs(input);
 }
 
-std::shared_ptr<SelectionVector> MakeSelectionVector(const std::string& json) {
-  return std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), json));
-}
-
-std::shared_ptr<SelectionVector> MakeSelectionVectorUntil(int64_t length) {
-  auto res = gen::Step<int32_t>()->Generate(length);
-  DCHECK_OK(res.status());
-  auto arr = res.ValueUnsafe();
-  return std::make_shared<SelectionVector>(*arr);
-}
-
 TEST_F(TestExecSpanIterator, SelectionSpanBasic) {
   ExecBatch batch(
       {Datum(GetInt32Array(30)), Datum(GetInt32Array(30)),
        Datum(std::make_shared<Int32Scalar>(5)), Datum(MakeNullScalar(boolean()))},
-      30, MakeSelectionVector("[1, 2, 7, 29]"));
+      30, SelectionVectorFromJSON("[1, 2, 7, 29]"));
 
   CheckIteration(batch, /*chunksize=*/7, {7, 7, 7, 7, 2}, {2, 1, 0, 0, 1});
   CheckIteration(batch, /*chunksize=*/10, {10, 10, 10}, {3, 0, 1});
@@ -948,7 +964,7 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
   ExecBatch batch({Datum(GetInt32Chunked({0, 20, 10})), Datum(GetInt32Chunked({15, 15})),
                    Datum(GetInt32Array(30)), Datum(std::make_shared<Int32Scalar>(5)),
                    Datum(MakeNullScalar(boolean()))},
-                  30, MakeSelectionVector("[1, 2, 7, 29]"));
+                  30, SelectionVectorFromJSON("[1, 2, 7, 29]"));
 
   CheckIteration(batch, /*chunksize=*/7, {7, 7, 1, 5, 7, 3}, {2, 1, 0, 0, 0, 1});
   CheckIteration(batch, /*chunksize=*/10, {10, 5, 5, 10}, {3, 0, 0, 1});
@@ -959,17 +975,17 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
 // ----------------------------------------------------------------------
 // Scalar function execution
 
-template <typename OnSelectionFn, typename OnNonSelectionFn>
-void VisitSelectionVector(const SelectionVectorSpan& selection, int64_t length,
-                          OnSelectionFn&& on_selection,
-                          OnNonSelectionFn&& on_non_selection) {
+template <typename OnSelectedFn, typename OnNonSelectedFn>
+void VisitIndicesWithSelection(int64_t length, const SelectionVectorSpan& selection,
+                               OnSelectedFn&& on_selected,
+                               OnNonSelectedFn&& on_non_selected) {
   int64_t selected = 0;
   for (int64_t i = 0; i < length; ++i) {
     if (selected < selection.length() && i == selection[selected]) {
-      on_selection(i);
+      on_selected(i);
       ++selected;
     } else {
-      on_non_selection(i);
+      on_non_selected(i);
     }
   }
 }
@@ -990,8 +1006,8 @@ void AssertArraysEqualSparseWithSelection(const Array& src,
   int64_t src_offset = src.data()->offset;
   int64_t dst_offset = dst.data()->offset;
 
-  VisitSelectionVector(
-      selection, src.length(),
+  VisitIndicesWithSelection(
+      src.length(), selection,
       [&](int64_t i) {
         // Selected values should match
         ASSERT_EQ(bit_util::GetBit(src_validity, src_offset + i),
@@ -1025,8 +1041,8 @@ void AssertArraysEqualDenseWithSelection(const Array& src,
   int64_t src_offset = src.data()->offset;
   int64_t dst_offset = dst.data()->offset;
 
-  VisitSelectionVector(
-      selection, src.length(),
+  VisitIndicesWithSelection(
+      src.length(), selection,
       [&](int64_t i) {
         // Selected values should match
         ASSERT_EQ(bit_util::GetBit(src_validity, src_offset + i),
@@ -1107,8 +1123,8 @@ Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
   int64_t dst_validity_offset = out_arr->offset;
   uint8_t* dst = out_arr->buffers[1]->mutable_data() + out_arr->offset * value_size;
   const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
-  VisitSelectionVector(
-      selection, batch.length,
+  VisitIndicesWithSelection(
+      batch.length, selection,
       [&](int64_t i) {
         // Copy the selected value
         std::memcpy(dst + i * value_size, src + i * value_size, value_size);
@@ -1143,8 +1159,8 @@ Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
   int64_t dst_validity_offset = out_arr->offset;
   uint8_t* dst = out_arr->buffers[1].data + out_arr->offset * value_size;
   const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
-  VisitSelectionVector(
-      selection, batch.length,
+  VisitIndicesWithSelection(
+      batch.length, selection,
       [&](int64_t i) {
         // Copy the selected value
         std::memcpy(dst + i * value_size, src + i * value_size, value_size);
@@ -1312,8 +1328,8 @@ Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
   uint8_t* dst_validity = out_arr->buffers[0].data;
   int64_t dst_validity_offset = out_arr->offset;
   int32_t* dst = out_arr->GetValues<int32_t>(1);
-  VisitSelectionVector(
-      selection, batch.length,
+  VisitIndicesWithSelection(
+      batch.length, selection,
       [&](int64_t i) {
         // Copy the selected value
         dst[i] = arg0_data[i] * multiplier;
@@ -1345,8 +1361,8 @@ Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
   uint8_t* dst_validity = out_arr->buffers[0].data;
   int64_t dst_validity_offset = out_arr->offset;
   int32_t* out_data = out_arr->GetValues<int32_t>(1);
-  VisitSelectionVector(
-      selection, batch.length,
+  VisitIndicesWithSelection(
+      batch.length, selection,
       [&](int64_t i) {
         // Copy the selected value
         out_data[i] = left_data[i] + right_data[i];
@@ -1707,16 +1723,16 @@ class TestCallScalarFunctionPreallocationCases : public TestCallScalarFunction {
   std::shared_ptr<Array> GetTestArray() { return GetUInt8Array(100, 0.2); }
 
   std::vector<std::shared_ptr<SelectionVector>> GetTestSelectionVectors() {
-    return {MakeSelectionVector("[]"),
-            MakeSelectionVector("[0]"),
-            MakeSelectionVector("[42]"),
-            MakeSelectionVector("[99]"),
-            MakeSelectionVector("[0, 1, 2, 3, 4]"),
-            MakeSelectionVector("[0, 42, 99]"),
-            MakeSelectionVectorUntil(40),
-            MakeSelectionVectorUntil(41),
-            MakeSelectionVectorUntil(99),
-            MakeSelectionVectorUntil(100)};
+    return {SelectionVectorFromJSON("[]"),
+            SelectionVectorFromJSON("[0]"),
+            SelectionVectorFromJSON("[42]"),
+            SelectionVectorFromJSON("[99]"),
+            SelectionVectorFromJSON("[0, 1, 2, 3, 4]"),
+            SelectionVectorFromJSON("[0, 42, 99]"),
+            MakeSelectionVectorTo(40),
+            MakeSelectionVectorTo(41),
+            MakeSelectionVectorTo(99),
+            MakeSelectionVectorTo(100)};
   }
 
   template <typename CheckFunc>
@@ -1981,9 +1997,9 @@ class TestCallScalarFunctionBasicNonStandardCases : public TestCallScalarFunctio
   std::shared_ptr<Array> GetTestArray() { return GetUInt8Array(1000, 0.2); }
 
   std::vector<std::shared_ptr<SelectionVector>> GetTestSelectionVectors() {
-    return {MakeSelectionVector("[]"),     MakeSelectionVector("[0]"),
-            MakeSelectionVector("[999]"),  MakeSelectionVectorUntil(400),
-            MakeSelectionVectorUntil(401), MakeSelectionVectorUntil(1000)};
+    return {SelectionVectorFromJSON("[]"),    SelectionVectorFromJSON("[0]"),
+            SelectionVectorFromJSON("[999]"), MakeSelectionVectorTo(400),
+            MakeSelectionVectorTo(401),       MakeSelectionVectorTo(1000)};
   }
 
   template <typename CheckFunc>
@@ -2146,9 +2162,9 @@ class TestCallScalarFunctionStatefulKernel : public TestCallScalarFunction {
   }
 
   std::vector<std::shared_ptr<SelectionVector>> GetTestSelectionVectors() {
-    return {MakeSelectionVector("[]"), MakeSelectionVector("[0]"),
-            MakeSelectionVector("[4]"), MakeSelectionVectorUntil(2),
-            MakeSelectionVectorUntil(5)};
+    return {SelectionVectorFromJSON("[]"), SelectionVectorFromJSON("[0]"),
+            SelectionVectorFromJSON("[4]"), MakeSelectionVectorTo(2),
+            MakeSelectionVectorTo(5)};
   }
 
   template <typename CheckFunc>
@@ -2226,7 +2242,7 @@ class TestCallScalarFunctionScalarFunction : public TestCallScalarFunction {
   static constexpr int32_t kExpectedResult = 12;
 
   std::vector<std::shared_ptr<SelectionVector>> GetTestSelectionVectors() {
-    return {MakeSelectionVector("[]"), MakeSelectionVector("[0]")};
+    return {SelectionVectorFromJSON("[]"), SelectionVectorFromJSON("[0]")};
   }
 
   void DoTestBasic(const FunctionCaller* caller, const std::vector<Datum>& args,
