@@ -29,7 +29,7 @@ Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMaskFromDatum(
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
     if (!scalar.is_valid) {
-      return std::make_shared<AllNullBodyMask>(shared_from_this());
+      return std::make_shared<AllNullBodyMask>();
     } else if (scalar.value) {
       return std::make_shared<AllPassBodyMask>(shared_from_this());
     } else {
@@ -43,9 +43,28 @@ Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMaskFromDatum(
   return MakeBodyMaskFromBitmap(datum.chunked_array(), exec_context);
 }
 
-Result<Datum> AllPassBranchMask::DoApplyCond(const Expression& expr,
-                                             const ExecBatch& input,
-                                             ExecContext* exec_context) const {
+Result<std::shared_ptr<const BranchMask>> BranchMask::FromSelectionVector(
+    std::shared_ptr<SelectionVector> selection, int64_t length) {
+  DCHECK_NE(selection, nullptr);
+
+#ifndef NDEBUG
+  RETURN_NOT_OK(selection->Validate(length));
+#endif
+
+  if (selection->length() == 0) {
+    return std::make_shared<AllFailBranchMask>();
+  }
+
+  if (selection->length() == length) {
+    return std::make_shared<AllPassBranchMask>(length);
+  }
+
+  return std::make_shared<ConditionalBranchMask>(std::move(selection), length);
+}
+
+Result<Datum> AllPassBranchMask::EvaluateExpr(const Expression& expr,
+                                              const ExecBatch& input,
+                                              ExecContext* exec_context) const {
   DCHECK_EQ(input.length, length_);
   auto input_with_sel_vec = input;
   input_with_sel_vec.selection_vector = nullptr;
@@ -119,9 +138,9 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
   return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
 }
 
-Result<Datum> ConditionalBranchMask::DoApplyCond(const Expression& expr,
-                                                 const ExecBatch& input,
-                                                 ExecContext* exec_context) const {
+Result<Datum> ConditionalBranchMask::EvaluateExpr(const Expression& expr,
+                                                  const ExecBatch& input,
+                                                  ExecContext* exec_context) const {
   DCHECK_EQ(input.length, length_);
   auto sparse_input = input;
   sparse_input.selection_vector = selection_vector_;
@@ -192,9 +211,9 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
   return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
 }
 
-Result<Datum> ConditionalBodyMask::ApplyCond(const Expression& expr,
-                                             const ExecBatch& input,
-                                             ExecContext* exec_context) const {
+Result<Datum> ConditionalBodyMask::EvaluateBody(const Expression& expr,
+                                                const ExecBatch& input,
+                                                ExecContext* exec_context) const {
   auto sparse_input = input;
   sparse_input.selection_vector = body_;
   return ExecuteScalarExpression(expr, sparse_input, exec_context);
@@ -212,13 +231,13 @@ Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
       break;
     }
     ARROW_ASSIGN_OR_RAISE(auto body_mask,
-                          ApplyCond(branch_mask, branch.cond, input, exec_context));
+                          EvaluateCond(branch_mask, branch.cond, input, exec_context));
     if (body_mask->empty()) {
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
       continue;
     }
     ARROW_ASSIGN_OR_RAISE(auto body_result,
-                          ApplyBody(body_mask, branch.body, input, exec_context));
+                          EvaluateBody(body_mask, branch.body, input, exec_context));
     DCHECK(body_result.type()->Equals(*result_type));
     ARROW_ASSIGN_OR_RAISE(auto selection_vector, body_mask->GetSelectionVector());
     results.Emplace(std::move(body_result), std::move(selection_vector));
