@@ -26,50 +26,49 @@
 
 namespace arrow::compute::internal {
 
+/// Structures to manage masks for branching expressions.
+/// Mostly for efficient short circuiting of if-else chains.
+/// The whole abstraction is as follows:
+/// - A branch represents an compound expression of condition and body;
+/// - A branch mask represents the set of rows (in an ExecBatch) to be evaluated for the
+///   branch condition;
+/// - When a branch mask is applied to an condition expression, it produces a body mask;
+/// - A body mask represents the set of rows (in an ExecBatch) to be evaluated for the
+///   branch body.
+/// - A body mask also produces the next branch mask, representing the set of rows
+///   remaining to be evaluated for the next branch in the chain.
+
 struct ARROW_COMPUTE_EXPORT BodyMask;
 
 struct ARROW_COMPUTE_EXPORT BranchMask : public std::enable_shared_from_this<BranchMask> {
   virtual ~BranchMask() = default;
 
-  Result<std::shared_ptr<const BodyMask>> ApplyCond(const Expression& expr,
-                                                    const ExecBatch& input,
-                                                    ExecContext* exec_context) const {
-    ARROW_ASSIGN_OR_RAISE(auto datum, DoApplyCond(expr, input, exec_context));
-    return MakeBodyMaskFromDatum(datum, exec_context);
-  }
-
   virtual bool empty() const = 0;
-
- protected:
-  virtual Result<Datum> DoApplyCond(const Expression& expr, const ExecBatch& input,
-                                    ExecContext* exec_context) const = 0;
 
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const = 0;
 
+  Result<std::shared_ptr<const BodyMask>> MakeBodyMask(const Datum& datum,
+                                                       ExecContext* exec_context) const;
+
+  static Result<std::shared_ptr<const BranchMask>> FromSelectionVector(
+      std::shared_ptr<SelectionVector> selection, int64_t length);
+
+ protected:
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap, ExecContext* exec_context) const = 0;
 
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const = 0;
-
- private:
-  Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromDatum(
-      const Datum& datum, ExecContext* exec_context) const;
-
-  friend struct DelegateBodyMask;
 };
 
 struct ARROW_COMPUTE_EXPORT AllPassBranchMask : public BranchMask {
   explicit AllPassBranchMask(int64_t length) : length_(length) {}
 
-  bool empty() const override { return false; }
-
- protected:
-  Result<Datum> DoApplyCond(const Expression& expr, const ExecBatch& input,
-                            ExecContext* exec_context) const override;
+  bool empty() const override { return length_ == 0; }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override;
 
+ protected:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override;
@@ -87,18 +86,12 @@ struct ARROW_COMPUTE_EXPORT AllFailBranchMask : public BranchMask {
 
   bool empty() const override { return true; }
 
- protected:
-  Result<Datum> DoApplyCond(const Expression& expr, const ExecBatch& input,
-                            ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid("AllFailBranchMask::DoApplyCond should not be called");
-  }
-
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     DCHECK(false);
     return Status::Invalid("AllFailBranchMask::GetSelectionVector should not be called");
   }
 
+ protected:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override {
@@ -126,14 +119,11 @@ struct ARROW_COMPUTE_EXPORT ConditionalBranchMask : public BranchMask {
 
   bool empty() const override { return selection_vector_->length() == 0; }
 
- protected:
-  Result<Datum> DoApplyCond(const Expression& expr, const ExecBatch& input,
-                            ExecContext* exec_context) const override;
-
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     return selection_vector_;
   }
 
+ protected:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override;
@@ -152,42 +142,15 @@ struct ARROW_COMPUTE_EXPORT BodyMask : public std::enable_shared_from_this<BodyM
 
   virtual bool empty() const = 0;
 
-  virtual Result<Datum> ApplyCond(const Expression& expr, const ExecBatch& input,
-                                  ExecContext* exec_context) const = 0;
-
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const = 0;
 
   virtual Result<std::shared_ptr<const BranchMask>> NextBranchMask() const = 0;
 };
 
-struct ARROW_COMPUTE_EXPORT DelegateBodyMask : public BodyMask {
-  explicit DelegateBodyMask(std::shared_ptr<const BranchMask> branch_mask)
-      : branch_mask_(std::move(branch_mask)) {}
-
- protected:
-  Result<Datum> DelegateApplyCond(const Expression& expr, const ExecBatch& input,
-                                  ExecContext* exec_context) const {
-    return branch_mask_->DoApplyCond(expr, input, exec_context);
-  }
-
-  Result<std::shared_ptr<SelectionVector>> DelegateGetSelectionVector() const {
-    return branch_mask_->GetSelectionVector();
-  }
-
- protected:
-  std::shared_ptr<const BranchMask> branch_mask_;
-};
-
-struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public DelegateBodyMask {
-  using DelegateBodyMask::DelegateBodyMask;
+struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public BodyMask {
+  AllNullBodyMask() = default;
 
   bool empty() const override { return true; }
-
-  Result<Datum> ApplyCond(const Expression& expr, const ExecBatch& input,
-                          ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid("AllNullBodyMask::ApplyCond should not be called");
-  }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     DCHECK(false);
@@ -199,18 +162,21 @@ struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public DelegateBodyMask {
   }
 };
 
+struct ARROW_COMPUTE_EXPORT DelegateBodyMask : public BodyMask {
+  explicit DelegateBodyMask(std::shared_ptr<const BranchMask> branch_mask)
+      : branch_mask_(std::move(branch_mask)) {}
+
+ protected:
+  std::shared_ptr<const BranchMask> branch_mask_;
+};
+
 struct ARROW_COMPUTE_EXPORT AllPassBodyMask : public DelegateBodyMask {
   using DelegateBodyMask::DelegateBodyMask;
 
-  bool empty() const override { return false; }
-
-  Result<Datum> ApplyCond(const Expression& expr, const ExecBatch& input,
-                          ExecContext* exec_context) const override {
-    return DelegateApplyCond(expr, input, exec_context);
-  }
+  bool empty() const override { return branch_mask_->empty(); }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
-    return DelegateGetSelectionVector();
+    return branch_mask_->GetSelectionVector();
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
@@ -222,12 +188,6 @@ struct ARROW_COMPUTE_EXPORT AllFailBodyMask : public DelegateBodyMask {
   using DelegateBodyMask::DelegateBodyMask;
 
   bool empty() const override { return true; }
-
-  Result<Datum> ApplyCond(const Expression& expr, const ExecBatch& input,
-                          ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid("AllFailBodyMask::ApplyCond should not be called");
-  }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     DCHECK(false);
@@ -246,33 +206,27 @@ struct ARROW_COMPUTE_EXPORT Branch {
 
 struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   ConditionalBodyMask(std::shared_ptr<SelectionVector> body,
-                      std::shared_ptr<SelectionVector> rest, int64_t length)
-      : body_(std::move(body)), rest_(std::move(rest)), length_(length) {
+                      std::shared_ptr<SelectionVector> remainder, int64_t length)
+      : body_(std::move(body)), remainder_(std::move(remainder)), length_(length) {
 #ifndef NDEBUG
     DCHECK_OK(body_->Validate(length_));
-    DCHECK_OK(rest_->Validate(length_));
+    DCHECK_OK(remainder_->Validate(length_));
 #endif
   }
 
   bool empty() const override { return body_->length() == 0; }
-
-  Result<Datum> ApplyCond(const Expression& expr, const ExecBatch& input,
-                          ExecContext* exec_context) const override;
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
     return body_;
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
-    if (rest_->length() == 0) {
-      return std::make_shared<AllFailBranchMask>();
-    }
-    return std::make_shared<ConditionalBranchMask>(rest_, length_);
+    return BranchMask::FromSelectionVector(remainder_, length_);
   }
 
  private:
   std::shared_ptr<SelectionVector> body_;
-  std::shared_ptr<SelectionVector> rest_;
+  std::shared_ptr<SelectionVector> remainder_;
   int64_t length_;
 };
 
@@ -312,22 +266,29 @@ struct ARROW_COMPUTE_EXPORT ConditionalExec {
   Result<std::shared_ptr<const BranchMask>> InitBranchMask(
       const ExecBatch& input, ExecContext* exec_context) const {
     if (input.selection_vector) {
-      return std::make_shared<ConditionalBranchMask>(input.selection_vector,
-                                                     input.length);
+      return BranchMask::FromSelectionVector(input.selection_vector, input.length);
     }
     return std::make_shared<AllPassBranchMask>(input.length);
   }
 
-  Result<std::shared_ptr<const BodyMask>> ApplyCond(
+  Result<std::shared_ptr<const BodyMask>> EvaluateCond(
       const std::shared_ptr<const BranchMask>& branch_mask, const Expression& cond,
       const ExecBatch& input, ExecContext* exec_context) const {
-    return branch_mask->ApplyCond(cond, input, exec_context);
+    auto input_with_selection = input;
+    ARROW_ASSIGN_OR_RAISE(input_with_selection.selection_vector,
+                          branch_mask->GetSelectionVector());
+    ARROW_ASSIGN_OR_RAISE(
+        auto datum, ExecuteScalarExpression(cond, input_with_selection, exec_context));
+    return branch_mask->MakeBodyMask(datum, exec_context);
   }
 
-  Result<Datum> ApplyBody(const std::shared_ptr<const BodyMask>& body_mask,
-                          const Expression& body, const ExecBatch& input,
-                          ExecContext* exec_context) const {
-    return body_mask->ApplyCond(body, input, exec_context);
+  Result<Datum> EvaluateBody(const std::shared_ptr<const BodyMask>& body_mask,
+                             const Expression& body, const ExecBatch& input,
+                             ExecContext* exec_context) const {
+    auto input_with_selection = input;
+    ARROW_ASSIGN_OR_RAISE(input_with_selection.selection_vector,
+                          body_mask->GetSelectionVector());
+    return ExecuteScalarExpression(body, input_with_selection, exec_context);
   }
 
   Result<Datum> MultiplexResults(const ExecBatch& input, const BranchResults& results,

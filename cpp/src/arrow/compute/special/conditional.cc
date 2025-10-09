@@ -23,13 +23,13 @@
 
 namespace arrow::compute::internal {
 
-Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMaskFromDatum(
+Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMask(
     const Datum& datum, ExecContext* exec_context) const {
   DCHECK(datum.type()->id() == Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
     if (!scalar.is_valid) {
-      return std::make_shared<AllNullBodyMask>(shared_from_this());
+      return std::make_shared<AllNullBodyMask>();
     } else if (scalar.value) {
       return std::make_shared<AllPassBodyMask>(shared_from_this());
     } else {
@@ -43,13 +43,23 @@ Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMaskFromDatum(
   return MakeBodyMaskFromBitmap(datum.chunked_array(), exec_context);
 }
 
-Result<Datum> AllPassBranchMask::DoApplyCond(const Expression& expr,
-                                             const ExecBatch& input,
-                                             ExecContext* exec_context) const {
-  DCHECK_EQ(input.length, length_);
-  auto input_with_sel_vec = input;
-  input_with_sel_vec.selection_vector = nullptr;
-  return ExecuteScalarExpression(expr, input_with_sel_vec, exec_context);
+Result<std::shared_ptr<const BranchMask>> BranchMask::FromSelectionVector(
+    std::shared_ptr<SelectionVector> selection, int64_t length) {
+  DCHECK_NE(selection, nullptr);
+
+#ifndef NDEBUG
+  RETURN_NOT_OK(selection->Validate(length));
+#endif
+
+  if (selection->length() == 0) {
+    return std::make_shared<AllFailBranchMask>();
+  }
+
+  if (selection->length() == length) {
+    return std::make_shared<AllPassBranchMask>(length);
+  }
+
+  return std::make_shared<ConditionalBranchMask>(std::move(selection), length);
 }
 
 Result<std::shared_ptr<SelectionVector>> AllPassBranchMask::GetSelectionVector() const {
@@ -61,9 +71,9 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
   DCHECK_EQ(bitmap->length(), length_);
 
   Int32Builder body_builder(exec_context->memory_pool());
-  Int32Builder rest_builder(exec_context->memory_pool());
+  Int32Builder remainder_builder(exec_context->memory_pool());
   RETURN_NOT_OK(body_builder.Reserve(length_));
-  RETURN_NOT_OK(rest_builder.Reserve(length_));
+  RETURN_NOT_OK(remainder_builder.Reserve(length_));
 
   ArraySpan span(*bitmap->data());
   int32_t i = 0;
@@ -73,17 +83,18 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
         if (mask) {
           body_builder.UnsafeAppend(i);
         } else {
-          rest_builder.UnsafeAppend(i);
+          remainder_builder.UnsafeAppend(i);
         }
         ++i;
       },
       [&]() { ++i; });
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
-  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
+                                               length_);
 }
 
 Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitmap(
@@ -91,9 +102,9 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
   DCHECK_EQ(bitmap->length(), length_);
 
   Int32Builder body_builder(exec_context->memory_pool());
-  Int32Builder rest_builder(exec_context->memory_pool());
+  Int32Builder remainder_builder(exec_context->memory_pool());
   RETURN_NOT_OK(body_builder.Reserve(length_));
-  RETURN_NOT_OK(rest_builder.Reserve(length_));
+  RETURN_NOT_OK(remainder_builder.Reserve(length_));
 
   int32_t i = 0;
   for (const auto& chunk : bitmap->chunks()) {
@@ -105,7 +116,7 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
           if (mask) {
             body_builder.UnsafeAppend(i);
           } else {
-            rest_builder.UnsafeAppend(i);
+            remainder_builder.UnsafeAppend(i);
           }
           ++i;
         },
@@ -113,19 +124,11 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
   }
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
-  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
-}
-
-Result<Datum> ConditionalBranchMask::DoApplyCond(const Expression& expr,
-                                                 const ExecBatch& input,
-                                                 ExecContext* exec_context) const {
-  DCHECK_EQ(input.length, length_);
-  auto sparse_input = input;
-  sparse_input.selection_vector = selection_vector_;
-  return ExecuteScalarExpression(expr, sparse_input, exec_context);
+  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
+                                               length_);
 }
 
 Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromBitmap(
@@ -133,9 +136,9 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
   DCHECK_EQ(bitmap->length(), length_);
 
   Int32Builder body_builder(exec_context->memory_pool());
-  Int32Builder rest_builder(exec_context->memory_pool());
+  Int32Builder remainder_builder(exec_context->memory_pool());
   RETURN_NOT_OK(body_builder.Reserve(length_));
-  RETURN_NOT_OK(rest_builder.Reserve(length_));
+  RETURN_NOT_OK(remainder_builder.Reserve(length_));
 
   for (int64_t i = 0; i < selection_vector_->length(); ++i) {
     auto index = selection_vector_->indices()[i];
@@ -143,16 +146,17 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
       if (bitmap->Value(index)) {
         body_builder.UnsafeAppend(index);
       } else {
-        rest_builder.UnsafeAppend(index);
+        remainder_builder.UnsafeAppend(index);
       }
     }
   }
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
-  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
+  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
+                                               length_);
 }
 
 Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromBitmap(
@@ -167,9 +171,9 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
                  });
 
   Int32Builder body_builder(exec_context->memory_pool());
-  Int32Builder rest_builder(exec_context->memory_pool());
+  Int32Builder remainder_builder(exec_context->memory_pool());
   RETURN_NOT_OK(body_builder.Reserve(length_));
-  RETURN_NOT_OK(rest_builder.Reserve(length_));
+  RETURN_NOT_OK(remainder_builder.Reserve(length_));
 
   ChunkResolver resolver(bitmap->chunks());
   ChunkLocation location;
@@ -180,24 +184,17 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
       if (boolean_arrays[location.chunk_index]->Value(location.index_in_chunk)) {
         body_builder.UnsafeAppend(index);
       } else {
-        rest_builder.UnsafeAppend(index);
+        remainder_builder.UnsafeAppend(index);
       }
     }
   }
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
-  ARROW_ASSIGN_OR_RAISE(auto rest_arr, rest_builder.Finish());
+  ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
   auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto rest = std::make_shared<SelectionVector>(rest_arr->data());
-  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(rest), length_);
-}
-
-Result<Datum> ConditionalBodyMask::ApplyCond(const Expression& expr,
-                                             const ExecBatch& input,
-                                             ExecContext* exec_context) const {
-  auto sparse_input = input;
-  sparse_input.selection_vector = body_;
-  return ExecuteScalarExpression(expr, sparse_input, exec_context);
+  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
+                                               length_);
 }
 
 Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
@@ -212,13 +209,13 @@ Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
       break;
     }
     ARROW_ASSIGN_OR_RAISE(auto body_mask,
-                          ApplyCond(branch_mask, branch.cond, input, exec_context));
+                          EvaluateCond(branch_mask, branch.cond, input, exec_context));
     if (body_mask->empty()) {
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
       continue;
     }
     ARROW_ASSIGN_OR_RAISE(auto body_result,
-                          ApplyBody(body_mask, branch.body, input, exec_context));
+                          EvaluateBody(body_mask, branch.body, input, exec_context));
     DCHECK(body_result.type()->Equals(*result_type));
     ARROW_ASSIGN_OR_RAISE(auto selection_vector, body_mask->GetSelectionVector());
     results.Emplace(std::move(body_result), std::move(selection_vector));
