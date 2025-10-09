@@ -426,4 +426,157 @@ TEST(ConditionalBodyMask, NextBranchMask) {
   }
 }
 
+TEST(ConditionalExec, Basic) {
+  auto schm = schema({field("", boolean()), field("", boolean()), field("", utf8()),
+                      field("", utf8()), field("", utf8())});
+
+  ASSERT_OK_AND_ASSIGN(auto b0, field_ref(0).Bind(*schm));
+  ASSERT_OK_AND_ASSIGN(auto b1, field_ref(1).Bind(*schm));
+  ASSERT_OK_AND_ASSIGN(auto sa, field_ref(2).Bind(*schm));
+  ASSERT_OK_AND_ASSIGN(auto sb, field_ref(3).Bind(*schm));
+  ASSERT_OK_AND_ASSIGN(auto sc, field_ref(4).Bind(*schm));
+
+  auto batch = ExecBatchFromJSON({boolean(), boolean(), utf8(), utf8(), utf8()},
+                                 R"([[true, true, "a0", "b0", "c0"],
+                                     [false, false, "a1", "b1", "c1"],
+                                     [null, true, "a2", "b2", "c2"],
+                                     [true, true, "a3", "b3", "c3"]])");
+
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto result, ConditionalExec({Branch{kFalseLiteral, sa}, Branch{kTrueLiteral, sb},
+                                      Branch{kTrueLiteral, sc}},
+                                     TypeHolder(utf8()))
+                         .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "b1", "b2", "b3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto result, ConditionalExec({Branch{kFalseLiteral, sa}, Branch{kNullLiteral, sb},
+                                      Branch{kTrueLiteral, sc}},
+                                     TypeHolder(utf8()))
+                         .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"([null, null, null, null])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{kFalseLiteral, sa}, Branch{b0, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "c1", null, "b3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{kFalseLiteral, sa}, Branch{b1, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "c1", "b2", "b3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto result, ConditionalExec({Branch{kTrueLiteral, sa}, Branch{kTrueLiteral, sb},
+                                      Branch{kTrueLiteral, sc}},
+                                     TypeHolder(utf8()))
+                         .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "a1", "a2", "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(
+        auto result, ConditionalExec({Branch{kNullLiteral, sa}, Branch{kTrueLiteral, sb},
+                                      Branch{kTrueLiteral, sc}},
+                                     TypeHolder(utf8()))
+                         .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"([null, null, null, null])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{b0, sa}, Branch{kTrueLiteral, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "b1", null, "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{b0, sa}, Branch{kNullLiteral, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", null, null, "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result, ConditionalExec({Branch{b0, sa}, Branch{b0, sb},
+                                                       Branch{kTrueLiteral, sc}},
+                                                      TypeHolder(utf8()))
+                                          .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", null, "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result, ConditionalExec({Branch{b0, sa}, Branch{b1, sb},
+                                                       Branch{kTrueLiteral, sc}},
+                                                      TypeHolder(utf8()))
+                                          .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", null, "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{b1, sa}, Branch{kTrueLiteral, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "b1", "a2", "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         ConditionalExec({Branch{b1, sa}, Branch{kNullLiteral, sb},
+                                          Branch{kTrueLiteral, sc}},
+                                         TypeHolder(utf8()))
+                             .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", null, "a2", "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result, ConditionalExec({Branch{b1, sa}, Branch{b0, sb},
+                                                       Branch{kTrueLiteral, sc}},
+                                                      TypeHolder(utf8()))
+                                          .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", "a2", "a3"])")),
+                      result);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto result, ConditionalExec({Branch{b1, sa}, Branch{b1, sb},
+                                                       Branch{kTrueLiteral, sc}},
+                                                      TypeHolder(utf8()))
+                                          .Execute(batch, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", "a2", "a3"])")),
+                      result);
+  }
+}
+
 }  // namespace arrow::compute::internal
