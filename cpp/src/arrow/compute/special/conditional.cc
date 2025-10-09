@@ -23,24 +23,93 @@
 
 namespace arrow::compute::internal {
 
+namespace {
+
+template <typename CheckAllNullFn, typename CheckAllTrueFn, typename CheckAllFalseFn>
+std::shared_ptr<const BodyMask> MakeTrivialBodyMask(
+    CheckAllNullFn&& check_all_null, CheckAllTrueFn&& check_all_true,
+    CheckAllFalseFn&& check_all_false, std::shared_ptr<const BranchMask> branch_mask) {
+  if (check_all_null()) {
+    return std::make_shared<AllNullBodyMask>();
+  } else if (check_all_true()) {
+    return std::make_shared<AllPassBodyMask>(std::move(branch_mask));
+  } else if (check_all_false()) {
+    return std::make_shared<AllFailBodyMask>(std::move(branch_mask));
+  }
+
+  return nullptr;
+}
+
+}  // namespace
+
 Result<std::shared_ptr<const BodyMask>> BranchMask::MakeBodyMask(
     const Datum& datum, ExecContext* exec_context) const {
   DCHECK(datum.type()->id() == Type::BOOL);
   if (datum.is_scalar()) {
     auto scalar = datum.scalar_as<BooleanScalar>();
-    if (!scalar.is_valid) {
-      return std::make_shared<AllNullBodyMask>();
-    } else if (scalar.value) {
-      return std::make_shared<AllPassBodyMask>(shared_from_this());
-    } else {
-      return std::make_shared<AllFailBodyMask>(shared_from_this());
-    }
+    auto body_mask = MakeTrivialBodyMask(
+        [&]() { return !scalar.is_valid; }, [&]() { return scalar.value; },
+        [&]() { return !scalar.value; }, shared_from_this());
+    DCHECK_NE(body_mask, nullptr);
+    return body_mask;
   }
+
   if (datum.is_array()) {
-    return MakeBodyMaskFromBitmap(datum.array_as<BooleanArray>(), exec_context);
+    auto boolean_array = datum.array_as<BooleanArray>();
+    if (auto body_mask = MakeTrivialBodyMask(
+            [&]() { return boolean_array->null_count() == boolean_array->length(); },
+            [&]() {
+              return boolean_array->null_count() == 0 &&
+                     boolean_array->true_count() == boolean_array->length();
+            },
+            [&]() {
+              return boolean_array->null_count() == 0 &&
+                     boolean_array->false_count() == boolean_array->length();
+            },
+            shared_from_this());
+        body_mask) {
+      return body_mask;
+    }
+    return MakeBodyMaskFromBitmap(std::move(boolean_array), exec_context);
   }
+
   DCHECK(datum.is_chunked_array());
-  return MakeBodyMaskFromBitmap(datum.chunked_array(), exec_context);
+  auto chunked_array = datum.chunked_array();
+  DCHECK(std::all_of(chunked_array->chunks().begin(), chunked_array->chunks().end(),
+                     [](const std::shared_ptr<Array>& chunk) {
+                       return chunk->type()->id() == Type::BOOL;
+                     }));
+  if (auto body_mask = MakeTrivialBodyMask(
+          [&]() {
+            return std::all_of(chunked_array->chunks().begin(),
+                               chunked_array->chunks().end(),
+                               [&](const std::shared_ptr<Array>& chunk) {
+                                 return chunk->null_count() == chunk->length();
+                               });
+          },
+          [&]() {
+            return std::all_of(
+                chunked_array->chunks().begin(), chunked_array->chunks().end(),
+                [&](const std::shared_ptr<Array>& chunk) {
+                  auto boolean_array = checked_cast<BooleanArray*>(chunk.get());
+                  return boolean_array->null_count() == 0 &&
+                         boolean_array->true_count() == boolean_array->length();
+                });
+          },
+          [&]() {
+            return std::all_of(
+                chunked_array->chunks().begin(), chunked_array->chunks().end(),
+                [&](const std::shared_ptr<Array>& chunk) {
+                  auto boolean_array = checked_cast<BooleanArray*>(chunk.get());
+                  return boolean_array->null_count() == 0 &&
+                         boolean_array->false_count() == boolean_array->length();
+                });
+          },
+          shared_from_this());
+      body_mask) {
+    return body_mask;
+  }
+  return MakeBodyMaskFromBitmap(std::move(chunked_array), exec_context);
 }
 
 Result<std::shared_ptr<const BranchMask>> BranchMask::FromSelectionVector(
@@ -91,8 +160,8 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
   ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
-  auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  auto body = std::make_shared<SelectionVector>(*body_arr);
+  auto remainder = std::make_shared<SelectionVector>(*remainder_arr);
   return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
                                                length_);
 }
@@ -125,8 +194,8 @@ Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitma
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
   ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
-  auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  auto body = std::make_shared<SelectionVector>(*body_arr);
+  auto remainder = std::make_shared<SelectionVector>(*remainder_arr);
   return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
                                                length_);
 }
@@ -153,8 +222,8 @@ Result<std::shared_ptr<const BodyMask>> ConditionalBranchMask::MakeBodyMaskFromB
 
   ARROW_ASSIGN_OR_RAISE(auto body_arr, body_builder.Finish());
   ARROW_ASSIGN_OR_RAISE(auto remainder_arr, remainder_builder.Finish());
-  auto body = std::make_shared<SelectionVector>(body_arr->data());
-  auto remainder = std::make_shared<SelectionVector>(remainder_arr->data());
+  auto body = std::make_shared<SelectionVector>(*body_arr);
+  auto remainder = std::make_shared<SelectionVector>(*remainder_arr);
   return std::make_shared<ConditionalBodyMask>(std::move(body), std::move(remainder),
                                                length_);
 }

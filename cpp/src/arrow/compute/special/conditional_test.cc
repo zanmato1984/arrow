@@ -89,13 +89,13 @@ void CheckNextBranchMaskAndSelection(
   AssertSelectionVectorsEqual(expected_branch_selection, branch_selection);
 }
 
+const auto kNullScalar = MakeNullScalar(boolean());
 const auto kTrueScalar = MakeScalar(true);
 const auto kFalseScalar = MakeScalar(false);
-const auto kNullScalar = MakeNullScalar(boolean());
 
+const auto kNullLiteral = literal(kNullScalar);
 const auto kTrueLiteral = literal(true);
 const auto kFalseLiteral = literal(false);
-const auto kNullLiteral = literal(kNullScalar);
 
 }  // namespace
 
@@ -145,44 +145,55 @@ TEST(AllPassBranchMask, GetSelectionVector) {
   }
 }
 
-TEST(AllPassBranchMask, MakeBodyMask) {
-  for (auto length : {0, 42}) {
-    CheckMakeBodyMask<AllPassBodyMask>(std::make_shared<AllPassBranchMask>(length),
-                                       Datum(kTrueScalar));
-    CheckMakeBodyMask<AllFailBodyMask>(std::make_shared<AllPassBranchMask>(length),
-                                       Datum(kFalseScalar));
+TEST(AllPassBranchMask, MakeBodyMaskTrival) {
+  const int64_t length = 42;
+
+  CheckMakeBodyMask<AllNullBodyMask>(std::make_shared<AllPassBranchMask>(length),
+                                     Datum(kNullScalar));
+  CheckMakeBodyMask<AllPassBodyMask>(std::make_shared<AllPassBranchMask>(length),
+                                     Datum(kTrueScalar));
+  CheckMakeBodyMask<AllFailBodyMask>(std::make_shared<AllPassBranchMask>(length),
+                                     Datum(kFalseScalar));
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                         gen::Constant(kNullScalar)->Generate(length));
     CheckMakeBodyMask<AllNullBodyMask>(std::make_shared<AllPassBranchMask>(length),
-                                       Datum(kNullScalar));
+                                       Datum(boolean_array));
 
-    // TODO: Consider short-cutting for these masks.
-    {
-      ASSERT_OK_AND_ASSIGN(auto boolean_array,
-                           gen::Constant(kTrueScalar)->Generate(length));
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
-          std::make_shared<AllPassBranchMask>(length), Datum(boolean_array),
-          MakeSelectionVectorTo(length));
-
-      auto boolean_chunked_array =
-          std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
-          std::make_shared<AllPassBranchMask>(length * 2), Datum(boolean_chunked_array),
-          MakeSelectionVectorTo(length * 2));
-    }
-
-    for (const auto& scalar : {kFalseScalar, kNullScalar}) {
-      ASSERT_OK_AND_ASSIGN(auto boolean_array, gen::Constant(scalar)->Generate(length));
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
-          std::make_shared<AllPassBranchMask>(length), Datum(boolean_array),
-          SelectionVectorFromJSON("[]"));
-
-      auto boolean_chunked_array =
-          std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
-          std::make_shared<AllPassBranchMask>(length * 2), Datum(boolean_chunked_array),
-          SelectionVectorFromJSON("[]"));
-    }
+    auto boolean_chunked_array =
+        std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
+    CheckMakeBodyMask<AllNullBodyMask>(std::make_shared<AllPassBranchMask>(length * 2),
+                                       Datum(boolean_chunked_array));
   }
 
+  {
+    ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                         gen::Constant(kTrueScalar)->Generate(length));
+    CheckMakeBodyMaskAndSelection<AllPassBodyMask>(
+        std::make_shared<AllPassBranchMask>(length), Datum(boolean_array), nullptr);
+
+    auto boolean_chunked_array =
+        std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
+    CheckMakeBodyMaskAndSelection<AllPassBodyMask>(
+        std::make_shared<AllPassBranchMask>(length * 2), Datum(boolean_chunked_array),
+        nullptr);
+  }
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                         gen::Constant(kFalseScalar)->Generate(length));
+    CheckMakeBodyMask<AllFailBodyMask>(std::make_shared<AllPassBranchMask>(length),
+                                       Datum(boolean_array));
+
+    auto boolean_chunked_array =
+        std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
+    CheckMakeBodyMask<AllFailBodyMask>(std::make_shared<AllPassBranchMask>(length * 2),
+                                       Datum(boolean_chunked_array));
+  }
+}
+
+TEST(AllPassBranchMask, MakeBodyMask) {
   {
     auto boolean_array = ArrayFromJSON(boolean(), "[true, false, null, true]");
     CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
@@ -223,8 +234,9 @@ TEST(ConditionalBranchMask, GetSelectionVector) {
   }
 }
 
-TEST(ConditionalBranchMask, MakeBodyMask) {
+TEST(ConditionalBranchMask, MakeBodyMaskTrivial) {
   const int64_t length = 42;
+
   for (const auto& selection :
        {SelectionVectorFromJSON("[]"), SelectionVectorFromJSON("[0]"),
         SelectionVectorFromJSON("[0, 41]"), MakeSelectionVectorTo(length)}) {
@@ -237,32 +249,49 @@ TEST(ConditionalBranchMask, MakeBodyMask) {
 
     {
       ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                           gen::Constant(kNullScalar)->Generate(length));
+      CheckMakeBodyMask<AllNullBodyMask>(
+          std::make_shared<ConditionalBranchMask>(selection, length),
+          Datum(boolean_array));
+
+      auto boolean_chunked_array =
+          std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
+      CheckMakeBodyMask<AllNullBodyMask>(
+          std::make_shared<ConditionalBranchMask>(selection, length * 2),
+          Datum(boolean_chunked_array));
+    }
+
+    {
+      ASSERT_OK_AND_ASSIGN(auto boolean_array,
                            gen::Constant(kTrueScalar)->Generate(length));
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
+      CheckMakeBodyMaskAndSelection<AllPassBodyMask>(
           std::make_shared<ConditionalBranchMask>(selection, length),
           Datum(boolean_array), selection);
 
       auto boolean_chunked_array =
           std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
+      CheckMakeBodyMaskAndSelection<AllPassBodyMask>(
           std::make_shared<ConditionalBranchMask>(selection, length * 2),
           Datum(boolean_chunked_array), selection);
     }
 
-    for (const auto& scalar : {kFalseScalar, kNullScalar}) {
-      ASSERT_OK_AND_ASSIGN(auto boolean_array, gen::Constant(scalar)->Generate(length));
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
+    {
+      ASSERT_OK_AND_ASSIGN(auto boolean_array,
+                           gen::Constant(kFalseScalar)->Generate(length));
+      CheckMakeBodyMask<AllFailBodyMask>(
           std::make_shared<ConditionalBranchMask>(selection, length),
-          Datum(boolean_array), SelectionVectorFromJSON("[]"));
+          Datum(boolean_array));
 
       auto boolean_chunked_array =
           std::make_shared<ChunkedArray>(ArrayVector{boolean_array, boolean_array});
-      CheckMakeBodyMaskAndSelection<ConditionalBodyMask>(
+      CheckMakeBodyMask<AllFailBodyMask>(
           std::make_shared<ConditionalBranchMask>(selection, length * 2),
-          Datum(boolean_chunked_array), SelectionVectorFromJSON("[]"));
+          Datum(boolean_chunked_array));
     }
   }
+}
 
+TEST(ConditionalBranchMask, MakeBodyMask) {
   {
     auto selection = SelectionVectorFromJSON("[2, 3]");
     auto boolean_array = ArrayFromJSON(boolean(), "[true, false, null, true]");
@@ -437,10 +466,10 @@ TEST(ConditionalExec, Basic) {
   ASSERT_OK_AND_ASSIGN(auto sc, field_ref(4).Bind(*schm));
 
   auto batch = ExecBatchFromJSON({boolean(), boolean(), utf8(), utf8(), utf8()},
-                                 R"([[true, true, "a0", "b0", "c0"],
+                                 R"([[true,  true,  "a0", "b0", "c0"],
                                      [false, false, "a1", "b1", "c1"],
-                                     [null, true, "a2", "b2", "c2"],
-                                     [true, true, "a3", "b3", "c3"]])");
+                                     [null,  true,  "a2", "b2", "c2"],
+                                     [true,  true,  "a3", "b3", "c3"]])");
 
   {
     ASSERT_OK_AND_ASSIGN(
