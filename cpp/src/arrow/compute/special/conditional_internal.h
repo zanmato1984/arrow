@@ -199,11 +199,6 @@ struct ARROW_COMPUTE_EXPORT AllFailBodyMask : public DelegateBodyMask {
   }
 };
 
-struct ARROW_COMPUTE_EXPORT Branch {
-  Expression cond;
-  Expression body;
-};
-
 struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   ConditionalBodyMask(std::shared_ptr<SelectionVector> body,
                       std::shared_ptr<SelectionVector> remainder, int64_t length)
@@ -228,6 +223,11 @@ struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   std::shared_ptr<SelectionVector> body_;
   std::shared_ptr<SelectionVector> remainder_;
   int64_t length_;
+};
+
+struct ARROW_COMPUTE_EXPORT Branch {
+  Expression cond;
+  Expression body;
 };
 
 struct ARROW_COMPUTE_EXPORT ConditionalExec {
