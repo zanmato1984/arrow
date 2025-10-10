@@ -302,11 +302,16 @@ Result<Datum> ConditionalExec::MultiplexResults(const ExecBatch& input,
   }
 
   if (results.size() == 1) {
-    if (const auto& result = results.body_results()[0];
-        results.selection_vectors()[0] == nullptr ||
-        results.selection_vectors()[0]->length() ==
-            (input.selection_vector ? input.selection_vector->length() : input.length)) {
+    const auto& result = results.body_results()[0];
+    if (results.selection_vectors()[0] == nullptr) {
       return result;
+    }
+    if (input.selection_vector == nullptr) {
+      DCHECK_NE(results.selection_vectors()[0]->length(), input.length);
+    } else {
+      if (results.selection_vectors()[0]->length() == input.selection_vector->length()) {
+        return result;
+      }
     }
   }
 
