@@ -47,7 +47,7 @@ void AssertSelectionVectorsEqual(const std::shared_ptr<SelectionVector>& expecte
                                  const std::shared_ptr<SelectionVector>& actual);
 
 Expression unreachable_special(Expression argument);
-Expression assert_empty_selection_special(Expression argument);
+Expression assert_selection_empty_special(Expression argument);
 Expression assert_selection_eq_special(Expression argument,
                                        std::shared_ptr<SelectionVector> expected);
 
