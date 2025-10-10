@@ -211,7 +211,7 @@ class AssertEmptySelectionSpecialExecutor : public TrivialSpecialExecutor {
 
 class AssertEmptySelectionSpecialForm : public SpecialForm {
  public:
-  AssertEmptySelectionSpecialForm() : SpecialForm("assert_empty_selection") {}
+  AssertEmptySelectionSpecialForm() : SpecialForm("assert_selection_empty") {}
 
  protected:
   Result<std::unique_ptr<SpecialExecutor>> Bind(
@@ -280,7 +280,7 @@ Expression unreachable_special(Expression argument) {
   return Expression(std::move(special));
 }
 
-Expression assert_empty_selection_special(Expression argument) {
+Expression assert_selection_empty_special(Expression argument) {
   Expression::Special special;
   special.special_form = std::make_shared<AssertEmptySelectionSpecialForm>();
   special.arguments.push_back(std::move(argument));
