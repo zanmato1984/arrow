@@ -43,4 +43,12 @@ std::shared_ptr<SelectionVector> SelectionVectorFromJSON(const std::string& json
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorTo(int64_t length);
 
+void AssertSelectionVectorsEqual(const std::shared_ptr<SelectionVector>& expected,
+                                 const std::shared_ptr<SelectionVector>& actual);
+
+Expression unreachable_special(Expression argument);
+Expression assert_empty_selection_special(Expression argument);
+Expression assert_selection_eq_special(Expression argument,
+                                       std::shared_ptr<SelectionVector> expected);
+
 }  // namespace arrow::compute

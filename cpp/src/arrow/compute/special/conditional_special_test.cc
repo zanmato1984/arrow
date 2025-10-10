@@ -51,22 +51,6 @@ void CheckNextBranchMask(const std::shared_ptr<BodyMask>& body_mask) {
   CheckBranchMask<BranchMaskType>(branch_mask);
 }
 
-void AssertSelectionVectorsEqual(const std::shared_ptr<SelectionVector>& expected,
-                                 const std::shared_ptr<SelectionVector>& actual) {
-  if (expected == nullptr) {
-    EXPECT_EQ(actual, nullptr);
-    return;
-  }
-
-  if (actual == nullptr) {
-    EXPECT_EQ(expected, nullptr);
-    return;
-  }
-
-  ASSERT_EQ(expected->length(), actual->length());
-  AssertArraysEqual(*MakeArray(expected->data()), *MakeArray(actual->data()));
-}
-
 template <typename BodyMaskType>
 void CheckMakeBodyMaskAndSelection(
     const std::shared_ptr<const BranchMask>& branch_mask, const Datum& datum,
@@ -475,6 +459,23 @@ TEST(ConditionalSpecialExecutor, Execute) {
   ASSERT_OK_AND_ASSIGN(auto sa, field_ref(2).Bind(*schm));
   ASSERT_OK_AND_ASSIGN(auto sb, field_ref(3).Bind(*schm));
   ASSERT_OK_AND_ASSIGN(auto sc, field_ref(4).Bind(*schm));
+  auto unreachable = [&](Expression argument) -> Expression {
+    EXPECT_OK_AND_ASSIGN(auto bound,
+                         unreachable_special(std::move(argument)).Bind(*schm));
+    return bound;
+  };
+  auto assert_empty_selection = [&](Expression argument) -> Expression {
+    EXPECT_OK_AND_ASSIGN(auto bound,
+                         assert_empty_selection_special(std::move(argument)).Bind(*schm));
+    return bound;
+  };
+  auto assert_selection_eq =
+      [&](Expression argument, std::shared_ptr<SelectionVector> selection) -> Expression {
+    EXPECT_OK_AND_ASSIGN(
+        auto bound, assert_selection_eq_special(std::move(argument), std::move(selection))
+                        .Bind(*schm));
+    return bound;
+  };
 
   auto batch = ExecBatchFromJSON({boolean(), boolean(), utf8(), utf8(), utf8()},
                                  R"([[true,  true,  "a0", "b0", "c0"],
@@ -484,7 +485,9 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kFalseLiteral, sa}, Branch{kTrueLiteral, sb}, Branch{kTrueLiteral, sc}},
+        {Branch{assert_empty_selection(kFalseLiteral), unreachable(sa)},
+         Branch{assert_empty_selection(kTrueLiteral), assert_empty_selection(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
         utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "b1", "b2", "b3"])")),
@@ -493,7 +496,9 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kFalseLiteral, sa}, Branch{kNullLiteral, sb}, Branch{kTrueLiteral, sc}},
+        {Branch{assert_empty_selection(kFalseLiteral), unreachable(sa)},
+         Branch{assert_empty_selection(kNullLiteral), unreachable(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
         utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"([null, null, null, null])")),
@@ -502,7 +507,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kFalseLiteral, sa}, Branch{b0, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(kFalseLiteral), unreachable(sa)},
+         Branch{assert_empty_selection(b0),
+                assert_selection_eq(sb, SelectionVectorFromJSON("[0, 3]"))},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "c1", null, "b3"])")),
                       result);
@@ -510,7 +520,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kFalseLiteral, sa}, Branch{b1, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(kFalseLiteral), unreachable(sa)},
+         Branch{assert_empty_selection(b1),
+                assert_selection_eq(sb, SelectionVectorFromJSON("[0, 2, 3]"))},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["b0", "c1", "b2", "b3"])")),
                       result);
@@ -518,7 +533,9 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kTrueLiteral, sa}, Branch{kTrueLiteral, sb}, Branch{kTrueLiteral, sc}},
+        {Branch{assert_empty_selection(kTrueLiteral), assert_empty_selection(sa)},
+         Branch{unreachable(kTrueLiteral), unreachable(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
         utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "a1", "a2", "a3"])")),
@@ -527,7 +544,9 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{kNullLiteral, sa}, Branch{kTrueLiteral, sb}, Branch{kTrueLiteral, sc}},
+        {Branch{assert_empty_selection(kNullLiteral), unreachable(sa)},
+         Branch{unreachable(kTrueLiteral), unreachable(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
         utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"([null, null, null, null])")),
@@ -536,7 +555,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b0, sa}, Branch{kTrueLiteral, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b0),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 3]"))},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sb, SelectionVectorFromJSON("[1]"))},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "b1", null, "a3"])")),
                       result);
@@ -544,7 +568,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b0, sa}, Branch{kNullLiteral, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b0),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 3]"))},
+         Branch{assert_selection_eq(kNullLiteral, SelectionVectorFromJSON("[1]")),
+                unreachable(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", null, null, "a3"])")),
                       result);
@@ -552,7 +581,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b0, sa}, Branch{b0, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b0),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 3]"))},
+         Branch{assert_selection_eq(b0, SelectionVectorFromJSON("[1]")), unreachable(sb)},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", null, "a3"])")),
                       result);
@@ -560,7 +594,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b0, sa}, Branch{b1, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b0),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 3]"))},
+         Branch{assert_selection_eq(b1, SelectionVectorFromJSON("[1]")), unreachable(sb)},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", null, "a3"])")),
                       result);
@@ -568,7 +607,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b1, sa}, Branch{kTrueLiteral, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b1),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 2, 3]"))},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sb, SelectionVectorFromJSON("[1]"))},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "b1", "a2", "a3"])")),
                       result);
@@ -576,7 +620,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b1, sa}, Branch{kNullLiteral, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b1),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 2, 3]"))},
+         Branch{assert_selection_eq(kNullLiteral, SelectionVectorFromJSON("[1]")),
+                unreachable(sb)},
+         Branch{unreachable(kTrueLiteral), unreachable(sc)}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", null, "a2", "a3"])")),
                       result);
@@ -584,7 +633,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b1, sa}, Branch{b0, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b1),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 2, 3]"))},
+         Branch{assert_selection_eq(b0, SelectionVectorFromJSON("[1]")), unreachable(sb)},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", "a2", "a3"])")),
                       result);
@@ -592,7 +646,12 @@ TEST(ConditionalSpecialExecutor, Execute) {
 
   {
     ConditionalSpecialExecutor executor(
-        {Branch{b1, sa}, Branch{b1, sb}, Branch{kTrueLiteral, sc}}, utf8());
+        {Branch{assert_empty_selection(b1),
+                assert_selection_eq(sa, SelectionVectorFromJSON("[0, 2, 3]"))},
+         Branch{assert_selection_eq(b1, SelectionVectorFromJSON("[1]")), unreachable(sb)},
+         Branch{assert_selection_eq(kTrueLiteral, SelectionVectorFromJSON("[1]")),
+                assert_selection_eq(sc, SelectionVectorFromJSON("[1]"))}},
+        utf8());
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", "a2", "a3"])")),
                       result);
