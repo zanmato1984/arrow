@@ -26,8 +26,6 @@
 
 namespace arrow::compute {
 
-namespace {
-
 using internal::add;
 using internal::cast;
 using internal::ExpectBindsTo;
@@ -280,8 +278,6 @@ Expression assert_sv_exist(Expression arg) {
 Expression assert_sv_empty(Expression arg) {
   return call("assert_sv_empty", {std::move(arg)});
 }
-
-}  // namespace
 
 TEST(IfElseSpecialForm, Basic) {
   {
