@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "arrow/compute/special/conditional_internal.h"
+#include "arrow/compute/special/conditional_special_internal.h"
 
 #include <gtest/gtest.h>
 

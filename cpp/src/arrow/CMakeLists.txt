@@ -798,7 +798,7 @@ if(ARROW_COMPUTE)
        compute/row/grouper.cc
        compute/row/row_encoder_internal.cc
        compute/row/row_internal.cc
-       compute/special/conditional.cc
+       compute/special/conditional_special.cc
        compute/special/if_else_special.cc
        compute/util.cc
        compute/util_internal.cc)
