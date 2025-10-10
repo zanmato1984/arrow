@@ -29,6 +29,7 @@
 #include "arrow/compute/kernel.h"
 #include "arrow/status.h"
 #include "arrow/util/visibility.h"
+#include "arrow/visit_data_inline.h"
 
 namespace arrow {
 namespace compute {
@@ -170,6 +171,25 @@ Status PropagateNulls(KernelContext* ctx, const ExecSpan& batch, ArrayData* out)
 
 ARROW_EXPORT
 void PropagateNullsSpans(const ExecSpan& batch, ArraySpan* out);
+
+template <typename OnSelectionFn>
+typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, Status>::type
+VisitSelectionVectorSpanInline(const SelectionVectorSpan& selection,
+                               OnSelectionFn&& on_selection) {
+  for (int64_t i = 0; i < selection.length(); ++i) {
+    RETURN_NOT_OK(on_selection(selection[i]));
+  }
+  return Status::OK();
+}
+
+template <typename OnSelectionFn>
+typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, void>::type
+VisitSelectionVectorSpanInline(const SelectionVectorSpan& selection,
+                               OnSelectionFn&& on_selection) {
+  for (int64_t i = 0; i < selection.length(); ++i) {
+    on_selection(selection[i]);
+  }
+}
 
 }  // namespace detail
 }  // namespace compute

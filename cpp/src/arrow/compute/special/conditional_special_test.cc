@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include "arrow/compute/exec_internal.h"
 #include "arrow/compute/test_util_internal.h"
 #include "arrow/testing/builder.h"
 #include "arrow/testing/generator.h"
@@ -96,6 +97,10 @@ const auto kFalseScalar = MakeScalar(false);
 const auto kNullLiteral = literal(kNullScalar);
 const auto kTrueLiteral = literal(true);
 const auto kFalseLiteral = literal(false);
+
+Expression nullify_selected(Expression expr) {
+  return call("nullify_selected", {std::move(expr)});
+}
 
 }  // namespace
 
@@ -591,6 +596,96 @@ TEST(ConditionalSpecialExecutor, Execute) {
     ASSERT_OK_AND_ASSIGN(auto result, executor.Execute(batch, default_exec_context()));
     AssertDatumsEqual(Datum(ArrayFromJSON(utf8(), R"(["a0", "c1", "a2", "a3"])")),
                       result);
+  }
+}
+
+class ConditionalSpecialExecutorTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() { ASSERT_OK(RegisterNullifySelectedFunction()); }
+
+ protected:
+  static Status NullifySelectedExec(KernelContext* ctx, const ExecSpan& span,
+                                    ExecResult* out) {
+    return Status::NotImplemented("Not implemented");
+  }
+
+  static Status NullifySelectedSelectiveExec(KernelContext* ctx, const ExecSpan& batch,
+                                             const SelectionVectorSpan& selection,
+                                             ExecResult* out) {
+    DCHECK_EQ(1, batch.num_values());
+    int value_size = batch[0].type()->byte_width();
+    const ArraySpan& arg0 = batch[0].array;
+    ArraySpan* out_arr = out->array_span_mutable();
+    uint8_t* dst_validity = out_arr->buffers[0].data;
+    int64_t dst_validity_offset = out_arr->offset;
+    uint8_t* dst = out_arr->buffers[1].data + out_arr->offset * value_size;
+    uint8_t* src_validity = arg0.buffers[0].data;
+    int64_t src_validity_offset = arg0.offset;
+    const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
+    bit_util::SetBitmap(dst_validity, dst_validity_offset, batch.length);
+    std::memcpy(dst, src, batch.length * value_size);
+    compute::detail::VisitSelectionVectorSpanInline(selection, [&](int64_t i) {
+      DCHECK(!src_validity || bit_util::GetBit(src_validity, src_validity_offset + i));
+      bit_util::ClearBit(dst_validity, dst_validity_offset + i);
+    });
+    return Status::OK();
+  }
+
+  static Status RegisterNullifySelectedFunction() {
+    auto registry = GetFunctionRegistry();
+
+    auto func = std::make_shared<ScalarFunction>(std::move("nullify_selected"),
+                                                 Arity::Unary(), FunctionDoc::Empty());
+    ScalarKernel kernel({InputType(int32())}, internal::FirstType, NullifySelectedExec,
+                        NullifySelectedSelectiveExec);
+    kernel.can_write_into_slices = false;
+    kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
+    kernel.mem_allocation = MemAllocation::PREALLOCATE;
+    RETURN_NOT_OK(func->AddKernel(kernel));
+    RETURN_NOT_OK(registry->AddFunction(std::move(func)));
+
+    return Status::OK();
+  }
+};
+
+TEST_F(ConditionalSpecialExecutorTest, ExecuteWithSelection) {
+  auto schm = schema({field("a", int32())});
+  ASSERT_OK_AND_ASSIGN(auto body, nullify_selected(field_ref("a")).Bind(*schm));
+  ConditionalSpecialExecutor executor({Branch{kTrueLiteral, body}}, int32());
+  auto batch = ExecBatchFromJSON({int32()}, R"([[10], [11], [12], [13]])");
+
+  {
+    auto batch_with_selection = batch;
+    batch_with_selection.selection_vector = SelectionVectorFromJSON("[]");
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         executor.Execute(batch_with_selection, default_exec_context()));
+    // Empty selection short-circuits to all-null output - the kernel is not invoked.
+    AssertDatumsEqual(Datum(ArrayFromJSON(int32(), R"([null, null, null, null])")),
+                      result);
+  }
+
+  {
+    auto batch_with_selection = batch;
+    batch_with_selection.selection_vector = SelectionVectorFromJSON("[0]");
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         executor.Execute(batch_with_selection, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(int32(), R"([null, 11, 12, 13])")), result);
+  }
+
+  {
+    auto batch_with_selection = batch;
+    batch_with_selection.selection_vector = SelectionVectorFromJSON("[0, 1, 2]");
+    ASSERT_OK_AND_ASSIGN(auto result,
+                         executor.Execute(batch_with_selection, default_exec_context()));
+    AssertDatumsEqual(Datum(ArrayFromJSON(int32(), R"([null, null, null, 13])")), result);
+  }
+
+  {
+    auto batch_with_selection = batch;
+    batch_with_selection.selection_vector = SelectionVectorFromJSON("[0, 1, 2, 3]");
+    // Full selection short-circuits to non-selective execution.
+    ASSERT_RAISES(NotImplemented,
+                  executor.Execute(batch_with_selection, default_exec_context()));
   }
 }
 
