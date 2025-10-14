@@ -591,7 +591,7 @@ struct ARROW_EXPORT ScalarKernel : public Kernel {
   /// through the KernelContext.
   ArrayKernelExec exec;
 
-  ArrayKernelSelectiveExec selective_exec;
+  ArrayKernelSelectiveExec selective_exec = NULLPTR;
 
   /// \brief Writing execution results into larger contiguous allocations
   /// requires that the kernel be able to write into sliced output ArrayData*,
