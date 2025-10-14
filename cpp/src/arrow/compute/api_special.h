@@ -15,48 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#pragma once
+#include "arrow/compute/expression.h"
 
-#include "arrow/util/visibility.h"
+namespace arrow::compute {
 
-namespace arrow {
+/// TODO: Doc.
+ARROW_EXPORT
+Expression if_else_special(Expression cond, Expression if_true, Expression if_false);
 
-struct Datum;
-struct TypeHolder;
-
-namespace compute {
-
-class Function;
-class ScalarAggregateFunction;
-class FunctionExecutor;
-class FunctionOptions;
-class FunctionRegistry;
-
-/// \brief Return the process-global function registry.
-// Defined in registry.cc
-ARROW_EXPORT FunctionRegistry* GetFunctionRegistry();
-
-class CastOptions;
-
-struct ExecBatch;
-class ExecContext;
-struct ExecValue;
-class KernelContext;
-
-struct Kernel;
-struct ScalarKernel;
-struct ScalarAggregateKernel;
-struct VectorKernel;
-
-struct KernelState;
-
-class Expression;
-
-class SpecialForm;
-class SpecialExecutor;
-
-ARROW_EXPORT ExecContext* default_exec_context();
-ARROW_EXPORT ExecContext* threaded_exec_context();
-
-}  // namespace compute
-}  // namespace arrow
+}  // namespace arrow::compute
