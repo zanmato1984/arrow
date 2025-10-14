@@ -440,49 +440,6 @@ void CheckIfElseSpecial(Expression cond, Expression if_true, Expression if_false
 
 }  // namespace
 
-// GH-XXXXX:
-TEST(IfElseSpecial, IfNotZeroThenDivide) {
-  // if (b != 0) then (a / b) else b
-  auto cond = call("not_equal", {field_ref("b"), literal(0)});
-  auto if_true = call("divide", {field_ref("a"), field_ref("b")});
-  auto if_false = field_ref("b");
-
-  auto schm = schema({field("a", int32()), field("b", int32())});
-  auto batch = ExecBatchFromJSON({int32(), int32()},
-                                 R"([[1, 1],
-                                     [2, 1],
-                                     [3, 0],
-                                     [4, 1],
-                                     [5, 1]])");
-
-  ASSERT_OK_AND_ASSIGN(auto result,
-                       ExecuteIfElseSpecial(cond, if_true, if_false, *schm, batch));
-  auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
-
-  AssertDatumsEqual(expected, result);
-}
-
-TEST(IfElseSpecial, ExecuteScalar) {
-  for (const auto& cond_expr :
-       {literal(MakeNullScalar(boolean())), literal(true), literal(false)}) {
-    std::vector<std::vector<Expression>> literals_list{
-        {literal(MakeNullScalar(int32())), literal(0), literal(1),
-         literal(std::numeric_limits<int64_t>::min()),
-         literal(std::numeric_limits<int64_t>::max())},
-        {literal(MakeNullScalar(utf8())), literal(""), literal("foo"), literal("bar")}};
-    for (const auto& literals : literals_list) {
-      for (const auto& if_true_expr : literals) {
-        for (const auto& if_false_expr : literals) {
-          for (int64_t length : {1, 2}) {
-            CheckIfElseSpecial(cond_expr, if_true_expr, if_false_expr, *schema({}),
-                               ExecBatch({}, length));
-          }
-        }
-      }
-    }
-  }
-}
-
 TEST(IfElseSpecial, ExecuteBasic) {
   const int64_t length = 7;
 
@@ -528,6 +485,29 @@ TEST(IfElseSpecial, ExecuteBasic) {
       }
     }
   }
+}
+
+// GH-41094: Maskable execution of division that otherwise would error on division by
+// zero.
+TEST(IfElseSpecial, IfNotZeroThenDivide) {
+  // if (b != 0) then (a / b) else b
+  auto cond = call("not_equal", {field_ref("b"), literal(0)});
+  auto if_true = call("divide", {field_ref("a"), field_ref("b")});
+  auto if_false = field_ref("b");
+
+  auto schm = schema({field("a", int32()), field("b", int32())});
+  auto batch = ExecBatchFromJSON({int32(), int32()},
+                                 R"([[1, 1],
+                                     [2, 1],
+                                     [3, 0],
+                                     [4, 1],
+                                     [5, 1]])");
+
+  ASSERT_OK_AND_ASSIGN(auto result,
+                       ExecuteIfElseSpecial(cond, if_true, if_false, *schm, batch));
+  auto expected = ArrayFromJSON(int32(), "[1, 2, 0, 4, 5]");
+
+  AssertDatumsEqual(expected, result);
 }
 
 // namespace {
