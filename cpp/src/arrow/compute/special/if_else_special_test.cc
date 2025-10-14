@@ -512,55 +512,12 @@ TEST(IfElseSpecial, ExecuteBasic) {
         ARROW_SCOPED_TRACE(
             "expression: " +
             if_else_special(cond_expr, if_true_expr, if_false_expr).ToString());
-
         for (const auto& cond_datum : {Datum(cond_arr), Datum(cond_chunked)}) {
           ARROW_SCOPED_TRACE("cond: " + cond_datum.ToString());
           for (const auto& if_true_datum : {Datum(if_true_arr), Datum(if_true_chunked)}) {
             ARROW_SCOPED_TRACE("if_true: " + if_true_datum.ToString());
             for (const auto& if_false_datum :
                  {Datum(if_false_arr), Datum(if_false_chunked)}) {
-              ARROW_SCOPED_TRACE("if_false: " + if_false_datum.ToString());
-              CheckIfElseSpecial(
-                  cond_expr, if_true_expr, if_false_expr, *schm,
-                  ExecBatch({cond_datum, if_true_datum, if_false_datum}, length));
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-TEST(IfElseSpecial, ExecuteBasicDebug) {
-  const int64_t length = 7;
-
-  auto schm = schema(
-      {field("cond", boolean()), field("if_true", int32()), field("if_false", int32())});
-
-  auto cond_arr =
-      ArrayFromJSON(boolean(), "[null, true, false, true, false, null, true]");
-  // auto cond_chunked = ChunkedArrayFromJSON(
-  //     boolean(), {"[null, true, false]", "[]", "[true, false, null, true]"});
-
-  // auto if_true_arr = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5, 6, 7]");
-  auto if_true_chunked = ChunkedArrayFromJSON(int32(), {"[1, 2]", "[3, 4, 5]", "[6, 7]"});
-
-  auto if_false_arr = ArrayFromJSON(int32(), "[10, 20, 30, 40, 50, 60, 70]");
-  // auto if_false_chunked =
-  //     ChunkedArrayFromJSON(int32(), {"[10, 20, 30]", "[]", "[40, 50, 60, 70]"});
-
-  for (const auto& cond_expr : {field_ref("cond")}) {
-    for (const auto& if_true_expr : {field_ref("if_true")}) {
-      for (const auto& if_false_expr : {literal(24)}) {
-        ARROW_SCOPED_TRACE(
-            "expression: " +
-            if_else_special(cond_expr, if_true_expr, if_false_expr).ToString());
-
-        for (const auto& cond_datum : {Datum(cond_arr)}) {
-          ARROW_SCOPED_TRACE("cond: " + cond_datum.ToString());
-          for (const auto& if_true_datum : {Datum(if_true_chunked)}) {
-            ARROW_SCOPED_TRACE("if_true: " + if_true_datum.ToString());
-            for (const auto& if_false_datum : {Datum(if_false_arr)}) {
               ARROW_SCOPED_TRACE("if_false: " + if_false_datum.ToString());
               CheckIfElseSpecial(
                   cond_expr, if_true_expr, if_false_expr, *schm,
