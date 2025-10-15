@@ -447,7 +447,7 @@ void CheckIfElseSpecial(Expression cond, Expression if_true, Expression if_false
 
 }  // namespace
 
-class TestIfElseSpecialExecute : public ::testing::Test {
+class TestExecuteIfElseSpecial : public ::testing::Test {
  protected:
   const int64_t length = 7;
 
@@ -522,24 +522,104 @@ class TestIfElseSpecialExecute : public ::testing::Test {
       }
     }
   }
+
+  void DoTestNestedCond(const std::vector<Expression>& cond_exprs,
+                        const std::vector<Expression>& if_true_exprs,
+                        const std::vector<Expression>& if_false_exprs,
+                        const std::vector<Datum>& boolean_datums,
+                        const std::vector<Datum>& int_datums) {
+    for (const auto& cond_expr : cond_exprs) {
+      for (const auto& if_true_expr : if_true_exprs) {
+        for (const auto& if_false_expr : if_false_exprs) {
+          ARROW_SCOPED_TRACE(
+              "if_else_special: " +
+              if_else_special(if_else_special(cond_expr, if_true_expr, if_false_expr),
+                              int1, int2)
+                  .ToString());
+          for (const auto& b1_datum : boolean_datums) {
+            for (const auto& b2_datum : boolean_datums) {
+              for (const auto& i1_datum : int_datums) {
+                for (const auto& i2_datum : int_datums) {
+                  ExecBatch batch({b1_datum, b2_datum, i1_datum, i2_datum}, length);
+                  ARROW_SCOPED_TRACE("batch: " + batch.ToString());
+                  CheckIfElseSpecial(
+                      [=](MakeIfElseFunc make_if_else) {
+                        return make_if_else(
+                            make_if_else(cond_expr, if_true_expr, if_false_expr), int1,
+                            int2);
+                      },
+                      *schm, batch);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  void DoTestNestedCond(const std::vector<Expression>& cond_exprs,
+                        const std::vector<Expression>& if_true_exprs,
+                        const std::vector<Expression>& if_false_exprs,
+                        const ExecBatch& batch) {
+    for (const auto& cond_expr : cond_exprs) {
+      for (const auto& if_true_expr : if_true_exprs) {
+        for (const auto& if_false_expr : if_false_exprs) {
+          ARROW_SCOPED_TRACE(
+              "if_else_special: " +
+              if_else_special(if_else_special(cond_expr, if_true_expr, if_false_expr),
+                              int1, int2)
+                  .ToString());
+          ARROW_SCOPED_TRACE("batch: " + batch.ToString());
+          CheckIfElseSpecial(
+              [=](MakeIfElseFunc make_if_else) {
+                return make_if_else(make_if_else(cond_expr, if_true_expr, if_false_expr),
+                                    int1, int2);
+              },
+              *schm, batch);
+        }
+      }
+    }
+  }
 };
 
-TEST_F(TestIfElseSpecialExecute, AllLiterals) {
+TEST_F(TestExecuteIfElseSpecial, AllLiterals) {
   DoTestBasic(boolean_literals, int_literals, int_literals, boolean_arrays, int_arrays);
 }
 
-TEST_F(TestIfElseSpecialExecute, AllScalars) {
+TEST_F(TestExecuteIfElseSpecial, AllScalars) {
   DoTestBasic(boolean_fields, int_fields, int_fields, boolean_scalars, int_scalars);
 }
 
-TEST_F(TestIfElseSpecialExecute, FieldWithArrays) {
+TEST_F(TestExecuteIfElseSpecial, FieldWithArrays) {
   DoTestBasic(boolean_fields, int_fields, int_fields, boolean_arrays, int_arrays);
 }
 
-TEST_F(TestIfElseSpecialExecute, ComplexExprsWithArrays) {
+TEST_F(TestExecuteIfElseSpecial, ComplexExprsWithArrays) {
   DoTestBasic(boolean_complex_exprs, int_complex_exprs, int_complex_exprs, boolean_arrays,
               int_arrays);
 }
+
+TEST_F(TestExecuteIfElseSpecial, NestedCondAllLiterals) {
+  DoTestNestedCond(boolean_literals, boolean_literals, boolean_literals, boolean_arrays,
+                   int_arrays);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedCondAllScalars) {
+  DoTestNestedCond(boolean_fields, boolean_fields, boolean_fields, boolean_scalars,
+                   int_scalars);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedCondFieldWithArrays) {
+  DoTestNestedCond(boolean_fields, boolean_fields, boolean_fields, boolean_arrays,
+                   int_arrays);
+}
+
+// TEST_F(TestExecuteIfElseSpecial, NarrowDown) {
+//   DoTestNestedCond(
+//       {boolean1}, {boolean2}, {boolean1},
+//       ExecBatch({boolean1_arr, boolean1_chunked, int1_arr, int2_chunked}, length));
+// }
 
 // TEST(IfElseSpecial, ExecuteNestedCond) {
 //   auto boolean_exprs = {boolean1, boolean2, and_(boolean1, boolean2),
