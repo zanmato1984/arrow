@@ -34,6 +34,7 @@ using internal::cast;
 using internal::ExpectBindsTo;
 using internal::kBoringSchema;
 using internal::no_change;
+using internal::sub;
 
 TEST(IfElseSpecial, ToString) {
   EXPECT_EQ(
@@ -387,21 +388,12 @@ Result<Datum> ExecuteExpr(Expression expr, const Schema& schema, const ExecBatch
   return ExecuteScalarExpression(bound, batch, exec_context);
 }
 
-Result<Datum> ExecuteIfElse(Expression cond, Expression if_true, Expression if_false,
-                            const Schema& schema, const ExecBatch& batch,
-                            ExecContext* exec_context = default_exec_context()) {
-  return ExecuteExpr(if_else(std::move(cond), std::move(if_true), std::move(if_false)),
-                     schema, batch, exec_context);
-}
-
-Result<Datum> ExecuteIfElseSpecial(Expression cond, Expression if_true,
-                                   Expression if_false, const Schema& schema,
-                                   const ExecBatch& batch,
-                                   ExecContext* exec_context = default_exec_context()) {
-  return ExecuteExpr(
-      if_else_special(std::move(cond), std::move(if_true), std::move(if_false)), schema,
-      batch, exec_context);
-}
+// Result<Datum> ExecuteIfElse(Expression cond, Expression if_true, Expression if_false,
+//                             const Schema& schema, const ExecBatch& batch,
+//                             ExecContext* exec_context = default_exec_context()) {
+//   return ExecuteExpr(if_else(std::move(cond), std::move(if_true), std::move(if_false)),
+//                      schema, batch, exec_context);
+// }
 
 void AssertDatumsEqualIgnoreShape(const Datum& expected, const Datum& result) {
   DCHECK(expected.is_scalar() || expected.is_array() || expected.is_chunked_array());
@@ -428,64 +420,362 @@ void AssertDatumsEqualIgnoreShape(const Datum& expected, const Datum& result) {
   ASSERT_OK_AND_ASSIGN(auto result_array, to_array(result));
 }
 
+using MakeIfElseFunc = std::function<Expression(Expression, Expression, Expression)>;
+
+using MakeExprContainingIfElseFunc =
+    std::function<Expression(MakeIfElseFunc make_if_else)>;
+
+void CheckIfElseSpecial(MakeExprContainingIfElseFunc make_expr_containing_if_else,
+                        const Schema& schema, const ExecBatch& batch,
+                        ExecContext* exec_context = default_exec_context()) {
+  auto if_else_expr = make_expr_containing_if_else(if_else);
+  ASSERT_OK_AND_ASSIGN(auto expected,
+                       ExecuteExpr(if_else_expr, schema, batch, exec_context));
+  auto if_else_sp_expr = make_expr_containing_if_else(if_else_special);
+  ASSERT_OK_AND_ASSIGN(auto result,
+                       ExecuteExpr(if_else_sp_expr, schema, batch, exec_context));
+  AssertDatumsEqualIgnoreShape(expected, result);
+}
+
 void CheckIfElseSpecial(Expression cond, Expression if_true, Expression if_false,
                         const Schema& schema, const ExecBatch& batch,
                         ExecContext* exec_context = default_exec_context()) {
-  ASSERT_OK_AND_ASSIGN(
-      auto expected, ExecuteIfElse(cond, if_true, if_false, schema, batch, exec_context));
-  ASSERT_OK_AND_ASSIGN(auto result, ExecuteIfElseSpecial(cond, if_true, if_false, schema,
-                                                         batch, exec_context));
-  AssertDatumsEqualIgnoreShape(expected, result);
+  CheckIfElseSpecial(
+      [=](MakeIfElseFunc make_if_else) { return if_else(cond, if_true, if_false); },
+      schema, batch, exec_context);
 }
 
 }  // namespace
 
-TEST(IfElseSpecial, ExecuteBasic) {
+class TestIfElseSpecialExecute : public ::testing::Test {
+ protected:
   const int64_t length = 7;
 
-  auto schm = schema(
-      {field("cond", boolean()), field("if_true", int32()), field("if_false", int32())});
+  std::shared_ptr<Schema> schm =
+      schema({field("boolean1", boolean()), field("boolean2", boolean()),
+              field("int1", int32()), field("int2", int32())});
+  Expression boolean1 = field_ref("boolean1");
+  Expression boolean2 = field_ref("boolean2");
+  Expression int1 = field_ref("int1");
+  Expression int2 = field_ref("int2");
 
-  auto cond_arr =
+  std::vector<Expression> boolean_literals = {literal(MakeNullScalar(boolean())),
+                                              literal(true), literal(false)};
+  std::vector<Expression> boolean_fields = {boolean1, boolean2};
+  std::vector<Expression> boolean_complex_exprs = {and_(boolean1, boolean2),
+                                                   or_(boolean1, boolean2)};
+
+  std::vector<Expression> int_literals = {literal(MakeNullScalar(int32())), literal(42)};
+  std::vector<Expression> int_fields = {int1, int2};
+  std::vector<Expression> int_complex_exprs = {add(int1, int2), sub(int1, int2)};
+
+  std::vector<Datum> boolean_scalars = {Datum(MakeNullScalar(boolean())),
+                                        Datum(MakeScalar(true)),
+                                        Datum(MakeScalar(false))};
+  std::shared_ptr<Array> boolean1_arr =
       ArrayFromJSON(boolean(), "[null, true, false, true, false, null, true]");
-  auto cond_chunked = ChunkedArrayFromJSON(
+  std::shared_ptr<ChunkedArray> boolean1_chunked = ChunkedArrayFromJSON(
       boolean(), {"[null, true, false]", "[]", "[true, false, null, true]"});
+  std::shared_ptr<Array> boolean2_arr =
+      ArrayFromJSON(boolean(), "[true, false, true, true, null, false, true]");
+  std::shared_ptr<ChunkedArray> boolean2_chunked = ChunkedArrayFromJSON(
+      boolean(), {"[true, false]", "[true]", "[true]", "[null, false, true]"});
+  std::vector<Datum> boolean_arrays = {Datum(boolean1_arr), Datum(boolean1_chunked),
+                                       Datum(boolean2_arr), Datum(boolean2_chunked)};
 
-  auto if_true_arr = ArrayFromJSON(int32(), "[1, 2, 3, 4, 5, 6, 7]");
-  auto if_true_chunked = ChunkedArrayFromJSON(int32(), {"[1, 2]", "[3, 4, 5]", "[6, 7]"});
+  std::vector<Datum> int_scalars = {Datum(MakeNullScalar(int32())),
+                                    Datum(MakeScalar(42))};
+  std::shared_ptr<Array> int1_arr = ArrayFromJSON(int32(), "[0, 1, 2, 3, 4, 5, 6]");
+  std::shared_ptr<ChunkedArray> int1_chunked =
+      ChunkedArrayFromJSON(int32(), {"[0, 1]", "[2, 3, 4]", "[5, 6]"});
+  std::shared_ptr<Array> int2_arr = ArrayFromJSON(int32(), "[0, 10, 20, 30, 40, 50, 60]");
+  std::shared_ptr<ChunkedArray> int2_chunked =
+      ChunkedArrayFromJSON(int32(), {"[0]", "[10, 20]", "[30, 40, 50]", "[]", "[60]"});
+  std::vector<Datum> int_arrays = {Datum(int1_arr), Datum(int1_chunked), Datum(int2_arr),
+                                   Datum(int2_chunked)};
 
-  auto if_false_arr = ArrayFromJSON(int32(), "[10, 20, 30, 40, 50, 60, 70]");
-  auto if_false_chunked =
-      ChunkedArrayFromJSON(int32(), {"[10, 20, 30]", "[]", "[40, 50, 60, 70]"});
-
-  for (const auto& cond_expr : {literal(MakeNullScalar(boolean())), literal(true),
-                                literal(false), field_ref("cond")}) {
-    for (const auto& if_true_expr :
-         {literal(MakeNullScalar(int32())), literal(42),
-          literal(std::numeric_limits<int64_t>::max()), field_ref("if_true")}) {
-      for (const auto& if_false_expr :
-           {literal(MakeNullScalar(int32())), literal(24),
-            literal(std::numeric_limits<int64_t>::min()), field_ref("if_false")}) {
-        ARROW_SCOPED_TRACE(
-            "expression: " +
-            if_else_special(cond_expr, if_true_expr, if_false_expr).ToString());
-        for (const auto& cond_datum : {Datum(cond_arr), Datum(cond_chunked)}) {
-          ARROW_SCOPED_TRACE("cond: " + cond_datum.ToString());
-          for (const auto& if_true_datum : {Datum(if_true_arr), Datum(if_true_chunked)}) {
-            ARROW_SCOPED_TRACE("if_true: " + if_true_datum.ToString());
-            for (const auto& if_false_datum :
-                 {Datum(if_false_arr), Datum(if_false_chunked)}) {
-              ARROW_SCOPED_TRACE("if_false: " + if_false_datum.ToString());
-              CheckIfElseSpecial(
-                  cond_expr, if_true_expr, if_false_expr, *schm,
-                  ExecBatch({cond_datum, if_true_datum, if_false_datum}, length));
+ protected:
+  void DoTestBasic(const std::vector<Expression>& cond_exprs,
+                   const std::vector<Expression>& if_true_exprs,
+                   const std::vector<Expression>& if_false_exprs,
+                   const std::vector<Datum>& boolean_datums,
+                   const std::vector<Datum>& int_datums) {
+    for (const auto& cond_expr : cond_exprs) {
+      for (const auto& if_true_expr : if_true_exprs) {
+        for (const auto& if_false_expr : if_false_exprs) {
+          ARROW_SCOPED_TRACE(
+              "if_else_special: " +
+              if_else_special(cond_expr, if_true_expr, if_false_expr).ToString());
+          for (const auto& b1_datum : boolean_datums) {
+            for (const auto& b2_datum : boolean_datums) {
+              for (const auto& i1_datum : int_datums) {
+                for (const auto& i2_datum : int_datums) {
+                  ExecBatch batch({b1_datum, b2_datum, i1_datum, i2_datum}, length);
+                  ARROW_SCOPED_TRACE("batch: " + batch.ToString());
+                  CheckIfElseSpecial(cond_expr, if_true_expr, if_false_expr, *schm,
+                                     batch);
+                }
+              }
             }
           }
         }
       }
     }
   }
+};
+
+TEST_F(TestIfElseSpecialExecute, AllLiterals) {
+  DoTestBasic(boolean_literals, int_literals, int_literals, boolean_arrays, int_arrays);
 }
+
+TEST_F(TestIfElseSpecialExecute, AllScalars) {
+  DoTestBasic(boolean_fields, int_fields, int_fields, boolean_scalars, int_scalars);
+}
+
+TEST_F(TestIfElseSpecialExecute, FieldWithArrays) {
+  DoTestBasic(boolean_fields, int_fields, int_fields, boolean_arrays, int_arrays);
+}
+
+TEST_F(TestIfElseSpecialExecute, ComplexExprsWithArrays) {
+  DoTestBasic(boolean_complex_exprs, int_complex_exprs, int_complex_exprs, boolean_arrays,
+              int_arrays);
+}
+
+// TEST(IfElseSpecial, ExecuteNestedCond) {
+//   auto boolean_exprs = {boolean1, boolean2, and_(boolean1, boolean2),
+//                         or_(boolean1, boolean2)};
+//   for (const auto& cond_inner_expr : boolean_exprs) {
+//     for (const auto& if_true_inner_expr : boolean_exprs) {
+//       for (const auto& if_false_inner_expr : boolean_exprs) {
+//         ARROW_SCOPED_TRACE(
+//             "expression: if (" +
+//             if_else_special(cond_inner_expr, if_true_inner_expr, if_false_inner_expr)
+//                 .ToString() +
+//             ") then int1 else int2");
+//         for (const auto& boolean1_datum :
+//              {Datum(boolean1_arr), Datum(boolean1_chunked)}) {
+//           ARROW_SCOPED_TRACE("boolean1: " + boolean1_datum.ToString());
+//           for (const auto& boolean2_datum :
+//                {Datum(boolean2_arr), Datum(boolean2_chunked)}) {
+//             ARROW_SCOPED_TRACE("boolean2: " + boolean2_datum.ToString());
+//             for (const auto& int1_datum : {Datum(int1_arr), Datum(int1_chunked)}) {
+//               ARROW_SCOPED_TRACE("int1: " + int1_datum.ToString());
+//               for (const auto& int2_datum : {Datum(int2_arr), Datum(int2_chunked)}) {
+//                 ARROW_SCOPED_TRACE("int2: " + int2_datum.ToString());
+//                 CheckIfElseSpecial(
+//                     [=](MakeIfElseFunc make_if_else) {
+//                       return make_if_else(
+//                           make_if_else(cond_inner_expr, if_true_inner_expr,
+//                                        if_false_inner_expr),
+//                           int1, int2);
+//                     },
+//                     *schm,
+//                     ExecBatch({Datum(boolean1_arr), Datum(boolean2_arr),
+//                     Datum(int1_arr),
+//                                Datum(int2_arr)},
+//                               length));
+//               }
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
+// TEST(IfElseSpecial, ExecuteNestedBody) {
+//   const int64_t length = 7;
+
+//   auto schm = schema({field("boolean1", boolean()), field("boolean2", boolean()),
+//                       field("int1", int32()), field("int2", int32())});
+//   auto boolean1 = field_ref("boolean1");
+//   auto boolean2 = field_ref("boolean2");
+//   auto int1 = field_ref("int1");
+//   auto int2 = field_ref("int2");
+
+//   auto boolean1_arr =
+//       ArrayFromJSON(boolean(), "[null, true, false, true, false, null, true]");
+//   auto boolean1_chunked = ChunkedArrayFromJSON(
+//       boolean(), {"[null, true, false]", "[]", "[true, false, null, true]"});
+
+//   auto boolean2_arr =
+//       ArrayFromJSON(boolean(), "[true, false, true, true, null, false, true]");
+//   auto boolean2_chunked = ChunkedArrayFromJSON(
+//       boolean(), {"[true, false]", "[true]", "[true]", "[null, false, true]"});
+
+//   auto int1_arr = ArrayFromJSON(int32(), "[0, 1, 2, 3, 4, 5, 6]");
+//   auto int1_chunked = ChunkedArrayFromJSON(int32(), {"[0, 1]", "[2, 3, 4]", "[5,
+//   6]"});
+
+//   auto int2_arr = ArrayFromJSON(int32(), "[0, 10, 20, 30, 40, 50, 60]");
+//   auto int2_chunked =
+//       ChunkedArrayFromJSON(int32(), {"[0]", "[10, 20]", "[30, 40, 50]", "[]",
+//       "[60]"});
+
+//   auto boolean_exprs = {boolean1, boolean2, and_(boolean1, boolean2),
+//                         or_(boolean1, boolean2)};
+//   auto int_exprs = {int1, int2, add(int1, int2)};
+//   for (const auto& cond_outer_expr : boolean_exprs) {
+//     for (const auto& cond_inner_expr : boolean_exprs) {
+//       for (const auto& if_true_inner_expr : int_exprs) {
+//         for (const auto& if_false_inner_expr : int_exprs) {
+//           for (const auto& if_false_outer_expr : int_exprs) {
+//             ARROW_SCOPED_TRACE(
+//                 "expression: if (" + cond_outer_expr.ToString() + ") then (" +
+//                 if_else_special(cond_inner_expr, if_true_inner_expr,
+//                 if_false_inner_expr)
+//                     .ToString() +
+//                 ") else (" + if_false_outer_expr.ToString() + ")");
+//             for (const auto& boolean1_datum :
+//                  {Datum(boolean1_arr), Datum(boolean1_chunked)}) {
+//               ARROW_SCOPED_TRACE("boolean1: " + boolean1_datum.ToString());
+//               for (const auto& boolean2_datum :
+//                    {Datum(boolean2_arr), Datum(boolean2_chunked)}) {
+//                 ARROW_SCOPED_TRACE("boolean2: " + boolean2_datum.ToString());
+//                 for (const auto& int1_datum : {Datum(int1_arr), Datum(int1_chunked)})
+//                 {
+//                   ARROW_SCOPED_TRACE("int1: " + int1_datum.ToString());
+//                   for (const auto& int2_datum : {Datum(int2_arr),
+//                   Datum(int2_chunked)})
+//                   {
+//                     ARROW_SCOPED_TRACE("int2: " + int2_datum.ToString());
+//                     CheckIfElseSpecial(
+//                         [=](MakeIfElseFunc make_if_else) {
+//                           return make_if_else(
+//                               cond_outer_expr,
+//                               make_if_else(cond_inner_expr, if_true_inner_expr,
+//                                            if_false_inner_expr),
+//                               if_false_outer_expr);
+//                         },
+//                         *schm,
+//                         ExecBatch({Datum(boolean1_arr), Datum(boolean2_arr),
+//                                    Datum(int1_arr), Datum(int2_arr)},
+//                                   length));
+//                   }
+//                 }
+//               }
+//             }
+//           }
+
+//           for (const auto& if_true_outer_expr : int_exprs) {
+//             ARROW_SCOPED_TRACE(
+//                 "expression: if (" + cond_outer_expr.ToString() + ") then (" +
+//                 if_true_outer_expr.ToString() + ") else (" +
+//                 if_else_special(cond_inner_expr, if_true_inner_expr,
+//                 if_false_inner_expr)
+//                     .ToString() +
+//                 ")");
+//             for (const auto& boolean1_datum :
+//                  {Datum(boolean1_arr), Datum(boolean1_chunked)}) {
+//               ARROW_SCOPED_TRACE("boolean1: " + boolean1_datum.ToString());
+//               for (const auto& boolean2_datum :
+//                    {Datum(boolean2_arr), Datum(boolean2_chunked)}) {
+//                 ARROW_SCOPED_TRACE("boolean2: " + boolean2_datum.ToString());
+//                 for (const auto& int1_datum : {Datum(int1_arr), Datum(int1_chunked)})
+//                 {
+//                   ARROW_SCOPED_TRACE("int1: " + int1_datum.ToString());
+//                   for (const auto& int2_datum : {Datum(int2_arr),
+//                   Datum(int2_chunked)})
+//                   {
+//                     ARROW_SCOPED_TRACE("int2: " + int2_datum.ToString());
+//                     CheckIfElseSpecial(
+//                         [=](MakeIfElseFunc make_if_else) {
+//                           return make_if_else(
+//                               cond_outer_expr, if_true_outer_expr,
+//                               make_if_else(cond_inner_expr, if_true_inner_expr,
+//                                            if_false_inner_expr));
+//                         },
+//                         *schm,
+//                         ExecBatch({Datum(boolean1_arr), Datum(boolean2_arr),
+//                                    Datum(int1_arr), Datum(int2_arr)},
+//                                   length));
+//                   }
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
+// TEST(IfElseSpecial, ExecuteNested) {
+//   // if (if (boolean1) then (boolean2) else (int1 == int2))) then if ()
+//   // if (if (boolean1) then (boolean2) else (int1 == int2)) then
+//   //   if (boolean1) then (int1) else (int1 + int2)
+//   // else
+//   //   if (boolean2) then (int2) else (int1 + int2)
+//   const int64_t length = 7;
+
+//   auto schm = schema({field("boolean1", boolean()), field("boolean2", boolean()),
+//                       field("int1", int32()), field("int2", int32())});
+//   auto boolean1 = field_ref("boolean1");
+//   auto boolean2 = field_ref("boolean2");
+//   auto int1 = field_ref("int1");
+//   auto int2 = field_ref("int2");
+
+//   auto boolean1_arr =
+//       ArrayFromJSON(boolean(), "[null, true, false, true, false, null, true]");
+//   auto boolean1_chunked = ChunkedArrayFromJSON(
+//       boolean(), {"[null, true, false]", "[]", "[true, false, null, true]"});
+
+//   auto boolean2_arr =
+//       ArrayFromJSON(boolean(), "[true, false, true, true, null, false, true]");
+//   auto boolean2_chunked = ChunkedArrayFromJSON(
+//       boolean(), {"[true, false]", "[true]", "[true]", "[null, false, true]"});
+
+//   auto int1_arr = ArrayFromJSON(int32(), "[0, 1, 2, 3, 4, 5, 6]");
+//   auto int1_chunked = ChunkedArrayFromJSON(int32(), {"[0, 1]", "[2, 3, 4]", "[5,
+//   6]"});
+
+//   auto int2_arr = ArrayFromJSON(int32(), "[0, 10, 20, 30, 40, 50, 60]");
+//   auto int2_chunked =
+//       ChunkedArrayFromJSON(int32(), {"[0]", "[10, 20]", "[30, 40, 50]", "[]",
+//       "[60]"});
+
+//   for (const auto& cond_inner_expr :
+//        {literal(MakeNullScalar(boolean())), literal(true), literal(false), boolean1,
+//         boolean2, equal(int1, int2)}) {
+//     for (const auto& if_true_inner_expr :
+//          {literal(MakeNullScalar(int32())), literal(42),
+//           literal(std::numeric_limits<int64_t>::max()), int1, int2, add(int1, int2)})
+//           {
+//       for (const auto& if_false_inner_expr :
+//            {literal(MakeNullScalar(int32())), literal(24),
+//             literal(std::numeric_limits<int64_t>::min()), int2, add(b, c)}) {
+//         ARROW_SCOPED_TRACE(
+//             "expression: " +
+//             if_else_special(cond_expr, if_true_expr, if_false_expr).ToString());
+//         for (const auto& cond_datum : {Datum(a_arr), Datum(a_chunked)}) {
+//           ARROW_SCOPED_TRACE("cond: " + cond_datum.ToString());
+//           for (const auto& if_true_datum : {Datum(b_arr), Datum(b_chunked)}) {
+//             ARROW_SCOPED_TRACE("if_true: " + if_true_datum.ToString());
+//             for (const auto& if_false_datum : {Datum(c_arr), Datum(c_chunked)}) {
+//               ARROW_SCOPED_TRACE("if_false: " + if_false_datum.ToString());
+//               CheckIfElseSpecial(
+//                   cond_expr, if_true_expr, if_false_expr, *schm,
+//                   ExecBatch({cond_datum, if_true_datum, if_false_datum}, length));
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+// }
+
+namespace {
+
+Result<Datum> ExecuteIfElseSpecial(Expression cond, Expression if_true,
+                                   Expression if_false, const Schema& schema,
+                                   const ExecBatch& batch,
+                                   ExecContext* exec_context = default_exec_context()) {
+  return ExecuteExpr(
+      if_else_special(std::move(cond), std::move(if_true), std::move(if_false)), schema,
+      batch, exec_context);
+}
+
+}  // namespace
 
 // GH-41094: Maskable execution of division that otherwise would error on division by
 // zero.
