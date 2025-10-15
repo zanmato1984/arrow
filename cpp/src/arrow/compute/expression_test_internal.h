@@ -57,6 +57,10 @@ inline Expression add(Expression l, Expression r) {
   return call("add", {std::move(l), std::move(r)});
 }
 
+inline Expression sub(Expression l, Expression r) {
+  return call("subtract", {std::move(l), std::move(r)});
+}
+
 inline std::string make_range_json(int start, int end) {
   std::string result = "[";
   for (int i = start; i <= end; ++i) {
