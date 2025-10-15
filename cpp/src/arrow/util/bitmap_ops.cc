@@ -373,7 +373,8 @@ void UnalignedBitmapOp(const uint8_t* left, int64_t left_offset, const uint8_t* 
 template <template <typename> class BitOp>
 void BitmapOp(const uint8_t* left, int64_t left_offset, const uint8_t* right,
               int64_t right_offset, int64_t length, int64_t out_offset, uint8_t* dest) {
-  if ((out_offset % 8 == left_offset % 8) && (out_offset % 8 == right_offset % 8)) {
+  // if (out_offset % 8 == 0 && left_offset % 8 == 0 && right_offset % 8 == 0) {
+  if (out_offset % 8 == left_offset % 8 && out_offset % 8 == right_offset % 8) {
     // Fast case: can use bytewise AND
     AlignedBitmapOp<BitOp>(left, left_offset, right, right_offset, dest, out_offset,
                            length);

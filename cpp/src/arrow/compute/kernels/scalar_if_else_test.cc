@@ -1095,6 +1095,16 @@ TYPED_TEST(TestIfElseDict, DifferentDictionaries) {
   CheckDictionary("if_else", {MakeNullScalar(boolean()), values1, values2});
 }
 
+// GH-47807: Null count in ArraySpan not updated correctly when executing chunked.
+TEST(TestIfElse, Reproduce) {
+  auto cond = ArrayFromJSON(boolean(), "[true, true]");
+  auto if_true = ChunkedArrayFromJSON(boolean(), {"[true]", "[true]"});
+  auto if_false = ArrayFromJSON(boolean(), "[true, true]");
+  ASSERT_OK_AND_ASSIGN(auto result, CallFunction("if_else", {cond, if_true, if_false}));
+  ASSERT_OK(result.chunked_array()->ValidateFull());
+  AssertDatumsEqual(ChunkedArrayFromJSON(boolean(), {"[true, true]"}), result);
+}
+
 Datum MakeStruct(const std::vector<Datum>& conds) {
   if (conds.size() == 0) {
     // The tests below want a struct scalar when no condition values passed,
