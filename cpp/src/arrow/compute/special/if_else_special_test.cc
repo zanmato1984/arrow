@@ -558,25 +558,79 @@ class TestExecuteIfElseSpecial : public ::testing::Test {
     }
   }
 
-  void DoTestNestedCond(const std::vector<Expression>& cond_exprs,
+  // void DoTestNestedCond(const std::vector<Expression>& cond_exprs,
+  //                       const std::vector<Expression>& if_true_exprs,
+  //                       const std::vector<Expression>& if_false_exprs,
+  //                       const ExecBatch& batch) {
+  //   for (const auto& cond_expr : cond_exprs) {
+  //     for (const auto& if_true_expr : if_true_exprs) {
+  //       for (const auto& if_false_expr : if_false_exprs) {
+  //         ARROW_SCOPED_TRACE(
+  //             "if_else_special: " +
+  //             if_else_special(if_else_special(cond_expr, if_true_expr, if_false_expr),
+  //                             int1, int2)
+  //                 .ToString());
+  //         ARROW_SCOPED_TRACE("batch: " + batch.ToString());
+  //         CheckIfElseSpecial(
+  //             [=](MakeIfElseFunc make_if_else) {
+  //               return make_if_else(make_if_else(cond_expr, if_true_expr,
+  //               if_false_expr),
+  //                                   int1, int2);
+  //             },
+  //             *schm, batch);
+  //       }
+  //     }
+  //   }
+  // }
+
+  void DoTestNestedBody(const std::vector<Expression>& cond_exprs,
                         const std::vector<Expression>& if_true_exprs,
                         const std::vector<Expression>& if_false_exprs,
-                        const ExecBatch& batch) {
+                        const std::vector<Datum>& boolean_datums,
+                        const std::vector<Datum>& int_datums) {
     for (const auto& cond_expr : cond_exprs) {
       for (const auto& if_true_expr : if_true_exprs) {
         for (const auto& if_false_expr : if_false_exprs) {
-          ARROW_SCOPED_TRACE(
-              "if_else_special: " +
-              if_else_special(if_else_special(cond_expr, if_true_expr, if_false_expr),
-                              int1, int2)
-                  .ToString());
-          ARROW_SCOPED_TRACE("batch: " + batch.ToString());
-          CheckIfElseSpecial(
-              [=](MakeIfElseFunc make_if_else) {
-                return make_if_else(make_if_else(cond_expr, if_true_expr, if_false_expr),
-                                    int1, int2);
-              },
-              *schm, batch);
+          for (const auto& b1_datum : boolean_datums) {
+            for (const auto& b2_datum : boolean_datums) {
+              for (const auto& i1_datum : int_datums) {
+                for (const auto& i2_datum : int_datums) {
+                  ExecBatch batch({b1_datum, b2_datum, i1_datum, i2_datum}, length);
+                  ARROW_SCOPED_TRACE("batch: " + batch.ToString());
+                  {
+                    ARROW_SCOPED_TRACE(
+                        "if_else_special: " +
+                        if_else_special(
+                            boolean1,
+                            if_else_special(cond_expr, if_true_expr, if_false_expr), int2)
+                            .ToString());
+                    CheckIfElseSpecial(
+                        [=](MakeIfElseFunc make_if_else) {
+                          return make_if_else(
+                              boolean1,
+                              make_if_else(cond_expr, if_true_expr, if_false_expr), int2);
+                        },
+                        *schm, batch);
+                  }
+                  {
+                    ARROW_SCOPED_TRACE(
+                        "if_else_special: " +
+                        if_else_special(
+                            boolean1, int1,
+                            if_else_special(cond_expr, if_true_expr, if_false_expr))
+                            .ToString());
+                    CheckIfElseSpecial(
+                        [=](MakeIfElseFunc make_if_else) {
+                          return make_if_else(
+                              boolean1, int1,
+                              make_if_else(cond_expr, if_true_expr, if_false_expr));
+                        },
+                        *schm, batch);
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -613,6 +667,29 @@ TEST_F(TestExecuteIfElseSpecial, NestedCondAllScalars) {
 TEST_F(TestExecuteIfElseSpecial, NestedCondFieldWithArrays) {
   DoTestNestedCond(boolean_fields, boolean_fields, boolean_fields, boolean_arrays,
                    int_arrays);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedCondComplexExprsWithArrays) {
+  DoTestNestedCond(boolean_complex_exprs, boolean_complex_exprs, boolean_complex_exprs,
+                   boolean_arrays, int_arrays);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedBodyAllLiterals) {
+  DoTestNestedBody(boolean_literals, int_literals, int_literals, boolean_arrays,
+                   int_arrays);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedBodyAllScalars) {
+  DoTestNestedBody(boolean_fields, int_fields, int_fields, boolean_scalars, int_scalars);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedBodyFieldWithArrays) {
+  DoTestNestedBody(boolean_fields, int_fields, int_fields, boolean_arrays, int_arrays);
+}
+
+TEST_F(TestExecuteIfElseSpecial, NestedBodyComplexExprsWithArrays) {
+  DoTestNestedBody(boolean_complex_exprs, int_complex_exprs, int_complex_exprs,
+                   boolean_arrays, int_arrays);
 }
 
 // TEST_F(TestExecuteIfElseSpecial, NarrowDown) {
