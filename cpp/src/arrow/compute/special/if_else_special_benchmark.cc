@@ -17,7 +17,8 @@
 
 #include "benchmark/benchmark.h"
 
-#include "arrow/compute/exec.h"
+#include "arrow/compute/api_special.h"
+#include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression.h"
 #include "arrow/compute/function.h"
 #include "arrow/compute/function_internal.h"
@@ -27,272 +28,264 @@
 #include "arrow/testing/random.h"
 #include "arrow/util/logging.h"
 
-namespace arrow {
-
-namespace compute {
+namespace arrow::compute {
 
 namespace {
 
-struct PayloadOptions : public FunctionOptions {
-  explicit PayloadOptions(int64_t load = 0);
-  static constexpr char const kTypeName[] = "PayloadOptions";
-  static PayloadOptions Defaults() { return PayloadOptions(); }
-  int64_t load = 0;
+// A trivial kernel that just keeps the CPU busy for a specified number of iterations per
+// input row. Has both regular and selective variants. Used to benchmark the overhead of
+// the execution framework.
+
+struct SpinOptions : public FunctionOptions {
+  explicit SpinOptions(int64_t count = 0);
+  static constexpr char kTypeName[] = "SpinOptions";
+  static SpinOptions Defaults() { return SpinOptions(); }
+  int64_t count = 0;
 };
 
-static auto kPayloadOptionsType = internal::GetFunctionOptionsType<PayloadOptions>(
-    arrow::internal::DataMember("load", &PayloadOptions::load));
+static auto kSpinOptionsType = internal::GetFunctionOptionsType<SpinOptions>(
+    arrow::internal::DataMember("count", &SpinOptions::count));
 
-PayloadOptions::PayloadOptions(int64_t load)
-    : FunctionOptions(kPayloadOptionsType), load(load) {}
+SpinOptions::SpinOptions(int64_t count)
+    : FunctionOptions(kSpinOptionsType), count(count) {}
 
-const PayloadOptions* GetDefaultPayloadOptions() {
-  static const auto kDefaultPayloadOptions = PayloadOptions::Defaults();
-  return &kDefaultPayloadOptions;
+const SpinOptions* GetDefaultSpinOptions() {
+  static const auto kDefaultSpinOptions = SpinOptions::Defaults();
+  return &kDefaultSpinOptions;
 }
 
-using PayloadState = internal::OptionsWrapper<PayloadOptions>;
+using SpinState = internal::OptionsWrapper<SpinOptions>;
 
-void DoLoad(int64_t load, int64_t length) {
-  for (int64_t i = 0; i < length; ++i) {
-    volatile int64_t j = load;
-    while (j-- > 0) {
-      // Do nothing, just burn CPU cycles
-    }
+inline void Spin(volatile int64_t count) {
+  while (count-- > 0) {
+    // Do nothing, just burn CPU cycles.
   }
 }
 
-Status PayloadExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
+Status SpinExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
   ARROW_CHECK_EQ(span.num_values(), 1);
   const auto& arg = span[0];
   ARROW_CHECK(arg.is_array());
 
-  int64_t load = PayloadState::Get(ctx).load;
-  DoLoad(load, arg.length());
+  int64_t count = SpinState::Get(ctx).count;
+  for (int64_t i = 0; i < arg.length(); ++i) {
+    Spin(count);
+  }
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }
 
-Status PayloadSelectiveExec(KernelContext* ctx, const ExecSpan& span,
-                            const SelectionVectorSpan selection_span, ExecResult* out) {
+Status SpinSelectiveExec(KernelContext* ctx, const ExecSpan& span,
+                         const SelectionVectorSpan& selection_span, ExecResult* out) {
   ARROW_CHECK_EQ(span.num_values(), 1);
   const auto& arg = span[0];
   ARROW_CHECK(arg.is_array());
 
-  int64_t load = PayloadState::Get(ctx).load;
-  DoLoad(load, span.length);
+  int64_t count = SpinState::Get(ctx).count;
+  detail::VisitSelectionVectorSpanInline(selection_span, [&](int64_t i) { Spin(count); });
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }
 
-Status RegisterAuxilaryFunctions() {
+Status RegisterSpinFunction() {
   auto registry = GetFunctionRegistry();
 
-  {
-    if (registry->CanAddFunctionOptionsType(kPayloadOptionsType).ok()) {
-      RETURN_NOT_OK(registry->AddFunctionOptionsType(kPayloadOptionsType));
+  if (registry->CanAddFunctionOptionsType(kSpinOptionsType).ok()) {
+    RETURN_NOT_OK(registry->AddFunctionOptionsType(kSpinOptionsType));
+  }
+
+  auto register_spin_function = [&](std::string name, ArrayKernelExec exec,
+                                    ArrayKernelSelectiveExec selective_exec) {
+    auto func = std::make_shared<ScalarFunction>(
+        std::move(name), Arity::Unary(), FunctionDoc::Empty(), GetDefaultSpinOptions());
+    ScalarKernel kernel({InputType::Any()}, internal::FirstType, exec, selective_exec,
+                        SpinState::Init);
+    kernel.can_write_into_slices = false;
+    kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    RETURN_NOT_OK(func->AddKernel(kernel));
+    if (registry->CanAddFunction(func, /*allow_overwrite=*/false).ok()) {
+      RETURN_NOT_OK(registry->AddFunction(std::move(func)));
     }
-  }
-  {
-    auto register_payload_func = [&](const std::string& name,
-                                     bool sv_awareness) -> Status {
-      auto func = std::make_shared<ScalarFunction>(
-          name, Arity::Unary(), FunctionDoc::Empty(), GetDefaultPayloadOptions());
+    return Status::OK();
+  };
 
-      ScalarKernel kernel({InputType::Any()}, internal::FirstType, PayloadExec,
-                          PayloadState::Init, PayloadSelectiveExec);
-      kernel.selection_vector_aware = sv_awareness;
-      kernel.can_write_into_slices = false;
-      kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-      kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
-      RETURN_NOT_OK(func->AddKernel(kernel));
-      if (registry->CanAddFunction(func, /*allow_overwrite=*/false).ok()) {
-        RETURN_NOT_OK(registry->AddFunction(std::move(func)));
-      }
-      return Status::OK();
-    };
-
-    RETURN_NOT_OK(register_payload_func("payload_sv_aware", true));
-    RETURN_NOT_OK(register_payload_func("payload_sv_unaware", false));
-  }
+  // Register two variants, one with selective exec and one without.
+  RETURN_NOT_OK(register_spin_function("spin_selective", SpinExec, SpinSelectiveExec));
+  RETURN_NOT_OK(register_spin_function("spin", SpinExec, /*selective_exec=*/nullptr));
 
   return Status::OK();
 }
 
-Expression if_else_regular(Expression cond, Expression if_true, Expression if_false) {
+Expression if_else(Expression cond, Expression if_true, Expression if_false) {
   return call("if_else", {std::move(cond), std::move(if_true), std::move(if_false)});
 }
 
-Expression sv_suppress(Expression arg) {
-  return call("payload_sv_unaware", {std::move(arg)});
-}
+auto kBooleanNullScalar = MakeNullScalar(boolean());
+auto kTrueScalar = MakeScalar(true);
+auto kFalseScalar = MakeScalar(false);
 
-Expression heavy(Expression arg) {
-  return call("payload_sv_aware", {std::move(arg)},
-              std::make_shared<PayloadOptions>(/*load=*/1024));
-}
+using MakeIfElseFunc = std::function<Expression(Expression, Expression, Expression)>;
 
-Expression sv_unaware_if_else_regular(Expression cond, Expression if_true,
-                                      Expression if_false) {
-  return if_else_regular(std::move(cond), sv_suppress(std::move(if_true)),
-                         sv_suppress(std::move(if_false)));
-}
+void BenchmarkIfElse(benchmark::State& state, MakeIfElseFunc make_if_else_func,
+                     const std::string& spin_function, int64_t if_true_kernel_intensity,
+                     int64_t if_false_kernel_intensity, Datum cond_datum,
+                     int64_t length) {
+  ARROW_CHECK_EQ(cond_datum.type()->id(), Type::BOOL);
 
-Expression sv_unaware_if_else_special(Expression cond, Expression if_true,
-                                      Expression if_false) {
-  return if_else_special(std::move(cond), sv_suppress(std::move(if_true)),
-                         sv_suppress(std::move(if_false)));
-}
+  static auto registered = RegisterSpinFunction();
+  ARROW_CHECK_OK(registered);
 
-auto kBooleanNull = literal(MakeNullScalar(boolean()));
+  auto expr = make_if_else_func(
+      field_ref(0),
+      call(spin_function, {field_ref(1)}, SpinOptions(if_true_kernel_intensity)),
+      call(spin_function, {field_ref(2)}, SpinOptions(if_false_kernel_intensity)));
+  auto bound = expr.Bind(*schema({field("", cond_datum.type()), field("", int32()),
+                                  field("", int32())}))
+                   .ValueOrDie();
+  if (cond_datum.is_arraylike()) {
+    ARROW_CHECK_EQ(cond_datum.length(), length);
+  }
+  auto if_true_datum = ConstantArrayGenerator::Int32(length, 1);
+  auto if_false_datum = ConstantArrayGenerator::Int32(length, 0);
+  auto batch = ExecBatch{
+      {std::move(cond_datum), std::move(if_true_datum), std::move(if_false_datum)},
+      length};
 
-void BenchmarkIfElse(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Expression cond, Expression if_true, Expression if_false,
-    const std::shared_ptr<Schema>& schema, const ExecBatch& batch) {
-  ARROW_CHECK_OK(RegisterAuxilaryFunctions());
-
-  auto if_else = if_else_func(std::move(cond), std::move(if_true), std::move(if_false));
-  auto bound = if_else.Bind(*schema).ValueOrDie();
   for (auto _ : state) {
     ARROW_CHECK_OK(ExecuteScalarExpression(bound, batch).status());
   }
 
-  state.SetItemsProcessed(batch.length * state.iterations());
+  state.SetItemsProcessed(state.iterations() * length);
 }
 
 }  // namespace
 
-#ifdef BM
-#  error ("BM is defined")
-#else
-#  define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, name, ...)      \
-    BM(name##_regular, if_else_regular, ##__VA_ARGS__);                       \
-    BM(name##_special, if_else_special, ##__VA_ARGS__);                       \
-    BM(name##_regular_sv_unaware, sv_unaware_if_else_regular, ##__VA_ARGS__); \
-    BM(name##_special_sv_unaware, sv_unaware_if_else_special, ##__VA_ARGS__);
-#endif
+// For each benchmark, expand to three variants:
+//  - Baseline: regular if_else with regular spin kernel.
+//  - Special: if_else_special with non-selective spin kernel - triggering dense
+//  execution.
+//  - SpecialSelective: if_else_special with selective spin kernel - triggering (more
+//  efficient) sparse execution.
+#define BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, name, ...)            \
+  BM(ARROW_CONCAT(name, Baseline), if_else, "spin", ##__VA_ARGS__);           \
+  BM(ARROW_CONCAT(name, Special), if_else_special, "spin", ##__VA_ARGS__);    \
+  BM(ARROW_CONCAT(name, SpecialSelective), if_else_special, "spin_selective", \
+     ##__VA_ARGS__);
 
-#define BENCHMARK_IF_ELSE(BM, name, if_else, arg_names, args, ...) \
-  BENCHMARK_CAPTURE(BM, name, if_else, ##__VA_ARGS__)              \
-      ->ArgNames(arg_names)                                        \
+#define BENCHMARK_IF_ELSE(BM, name, if_else, spin_func, arg_names, args, ...) \
+  BENCHMARK_CAPTURE(BM, name, if_else, spin_func, ##__VA_ARGS__)              \
+      ->ArgNames(arg_names)                                                   \
       ->ArgsProduct(args)
 
-template <typename... Args>
-static void BM_IfElseTrivialCond(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Expression cond, Args&&...) {
+// Benchmark with scalar condition, see if short-circuiting takes place.
+static void BM_IfElseScalarCond(benchmark::State& state, MakeIfElseFunc make_if_else_func,
+                                std::string spin_func, Datum cond_datum) {
   const int64_t num_rows = state.range(0);
 
-  auto schema = arrow::schema({field("i1", int32()), field("i2", int32())});
-
-  auto i1 = ConstantArrayGenerator::Int32(num_rows, 1);
-  auto i2 = ConstantArrayGenerator::Int32(num_rows, 0);
-  ExecBatch batch{std::vector<Datum>{std::move(i1), std::move(i2)}, num_rows};
-
-  BenchmarkIfElse(state, std::move(if_else_func), std::move(cond), field_ref("i1"),
-                  field_ref("i2"), schema, batch);
+  BenchmarkIfElse(state, std::move(make_if_else_func), spin_func,
+                  /*if_true_kernel_intensity=*/0,
+                  /*if_false_kernel_intensity=*/0, std::move(cond_datum), num_rows);
 }
 
-const std::vector<std::string> kNumRowsArgNames{"num_rows"};
-const std::vector<int64_t> kNumRowsArg = benchmark::CreateRange(1, 64 * 1024, 32);
+const std::string kNumRowsArgName = "num_rows";
+const std::vector<int64_t> kNumRowsArg{1, 4 * 1024, 64 * 1024};
 
-#define BM(name, if_else, ...)                                             \
-  BENCHMARK_IF_ELSE(BM_IfElseTrivialCond, name, if_else, kNumRowsArgNames, \
+#define BM(name, if_else, spin_func, ...)                                             \
+  BENCHMARK_IF_ELSE(BM_IfElseScalarCond, name, if_else, spin_func, {kNumRowsArgName}, \
                     {kNumRowsArg}, ##__VA_ARGS__)
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_null, kBooleanNull)
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_true, literal(true))
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, literal_false, literal(false))
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, Null, kBooleanNullScalar)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, True, kTrueScalar)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, False, kFalseScalar)
 #undef BM
 
-namespace {
-
-void BenchmarkIfElseWithCondArray(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    int64_t num_rows, double true_probability, double null_probability) {
+static void BenchmarkIfElseArrayCond(benchmark::State& state,
+                                     MakeIfElseFunc make_if_else_func,
+                                     std::string spin_func, int64_t num_rows,
+                                     double true_probability, double null_probability,
+                                     int64_t if_true_kernel_intensity,
+                                     int64_t if_false_kernel_intensity) {
   random::RandomArrayGenerator rag(42);
-  auto b = rag.Boolean(num_rows, true_probability, null_probability);
-  auto schema = arrow::schema({field("b", boolean())});
+  auto cond_datum = rag.Boolean(num_rows, true_probability, null_probability);
 
-  ExecBatch batch{std::vector<Datum>{std::move(b)}, num_rows};
-
-  BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), literal(1), literal(0),
-                  schema, batch);
+  BenchmarkIfElse(state, std::move(make_if_else_func), spin_func,
+                  if_true_kernel_intensity, if_false_kernel_intensity,
+                  std::move(cond_datum), num_rows);
 }
 
-}  // namespace
+// Benchmark that:
+// - Both branches are evenly heavy.
+// - Array condition of tunable null probability.
+// See if skipping evaluating both true/false branches takes place.
+static void BM_IfElseEvenBranchesNullProbability(benchmark::State& state,
+                                                 MakeIfElseFunc make_if_else_func,
+                                                 std::string spin_func) {
+  const double null_probability = state.range(0) / 100.0;
 
-template <typename... Args>
-static void BM_IfElseNumRows(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Args&&...) {
-  const int64_t num_rows = state.range(0);
-
-  BenchmarkIfElseWithCondArray(state, std::move(if_else_func), num_rows,
-                               /*true_probability=*/0.5, /*null_probability=*/0.0);
+  BenchmarkIfElseArrayCond(state, std::move(make_if_else_func), spin_func,
+                           /*num_rows=*/16 * 1024, /*true_probability=*/0.5,
+                           null_probability,
+                           /*if_true_kernel_intensity=*/0,
+                           /*if_false_kernel_intensity=*/0);
 }
 
-#define BM(name, if_else, ...) \
-  BENCHMARK_IF_ELSE(BM_IfElseNumRows, name, if_else, kNumRowsArgNames, {kNumRowsArg})
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, num_rows)
+const std::string kNullProbabilityArgName = "null_probability";
+const std::vector<int64_t> kNullProbabilityArg{0, 25, 50, 100};
+
+#define BM(name, if_else, spin_func, ...)                                           \
+  BENCHMARK_IF_ELSE(BM_IfElseEvenBranchesNullProbability, name, if_else, spin_func, \
+                    {kNullProbabilityArgName}, {kNullProbabilityArg}, ##__VA_ARGS__)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, )
 #undef BM
 
-template <typename... Args>
-static void BM_IfElseNullProbability(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Args&&...) {
-  const int64_t num_rows = state.range(0);
-  const double null_probability = state.range(1) / 100.0;
+// Benchmark that:
+// - Both branches are evenly heavy.
+// - Array condition of tunable true probability.
+// See the performance of different selectiveties and short-circuiting for extreme cases.
+static void BM_IfElseEvenBranchesTrueProbability(benchmark::State& state,
+                                                 MakeIfElseFunc make_if_else_func,
+                                                 std::string spin_func) {
+  const double true_probability = state.range(0) / 100.0;
 
-  BenchmarkIfElseWithCondArray(state, std::move(if_else_func), num_rows,
-                               /*true_probability=*/0.5, null_probability);
+  BenchmarkIfElseArrayCond(state, std::move(make_if_else_func), spin_func,
+                           /*num_rows=*/16 * 1024, true_probability,
+                           /*null_probability=*/0,
+                           /*if_true_kernel_intensity=*/0,
+                           /*if_false_kernel_intensity=*/0);
 }
 
-const std::vector<std::string> kNumRowsAndNullProbabilityArgNames{"num_rows",
-                                                                  "null_probability"};
-const std::vector<std::vector<int64_t>> kNumRowsAndNullProbabilityArgs{
-    {4 * 1024, 64 * 1024}, {0, 50, 90, 100}};
+const std::string kTrueProbabilityArgName = "true_probability";
+const std::vector<int64_t> kTrueProbabilityArg{0, 25, 50, 100};
 
-#define BM(name, if_else, ...)                               \
-  BENCHMARK_IF_ELSE(BM_IfElseNullProbability, name, if_else, \
-                    kNumRowsAndNullProbabilityArgNames, kNumRowsAndNullProbabilityArgs)
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, null_probability);
+#define BM(name, if_else, spin_func, ...)                                           \
+  BENCHMARK_IF_ELSE(BM_IfElseEvenBranchesTrueProbability, name, if_else, spin_func, \
+                    {kTrueProbabilityArgName}, {kTrueProbabilityArg}, ##__VA_ARGS__)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, )
 #undef BM
 
-template <typename... Args>
-void BM_IfElseWithOneHeavySide(
-    benchmark::State& state,
-    std::function<Expression(Expression, Expression, Expression)> if_else_func,
-    Args&&...) {
-  const double heavy_ratio = state.range(0) / 100.0;
-  constexpr int64_t num_rows = 65536;
+// Benchmark that:
+// - False branch is tunably heavier than true branch.
+// - Array condition of tunable true probability.
+// See the performance benefit of maskable execution when skipping the heavy false branch.
+static void BM_IfElseHeavyFalse(benchmark::State& state, MakeIfElseFunc make_if_else_func,
+                                std::string spin_func) {
+  const double true_probability = state.range(0) / 100.0;
+  const int64_t heaviness = state.range(1);
 
-  random::RandomArrayGenerator rag(42);
-  auto b =
-      rag.Boolean(num_rows, /*true_probability=*/heavy_ratio, /*null_probability=*/0.0);
-  auto i = ConstantArrayGenerator::Int32(num_rows, 42);
-  auto schema = arrow::schema({field("b", boolean()), field("i", int32())});
-
-  ExecBatch batch{std::vector<Datum>{std::move(b), std::move(i)}, num_rows};
-
-  BenchmarkIfElse(state, std::move(if_else_func), field_ref("b"), heavy(field_ref("i")),
-                  literal(0), schema, batch);
+  BenchmarkIfElseArrayCond(state, std::move(make_if_else_func), spin_func,
+                           /*num_rows=*/16 * 1024, /*true_probability=*/true_probability,
+                           /*null_probability=*/0,
+                           /*if_true_kernel_intensity=*/0, heaviness);
 }
 
-const std::vector<std::string> kHeavyRatioArgNames{"heavy_ratio"};
-const std::vector<int64_t> kHeavyRatioArgs{{0, 25, 50, 75, 100}};
+const std::string kHeavinessArgName = "heaviness";
+const std::vector<int64_t> kHeavinessArg{0, 10, 100};
 
-#define BM(name, if_else, ...)                                                     \
-  BENCHMARK_IF_ELSE(BM_IfElseWithOneHeavySide, name, if_else, kHeavyRatioArgNames, \
-                    {kHeavyRatioArgs})
-BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SV_SUPPRESS(BM, one_heavy_side);
+#define BM(name, if_else, spin_func, ...)                                            \
+  BENCHMARK_IF_ELSE(BM_IfElseHeavyFalse, name, if_else, spin_func,                   \
+                    ARROW_ALLOW_COMMA({kTrueProbabilityArgName, kHeavinessArgName}), \
+                    ARROW_ALLOW_COMMA({{10, 50, 90}, kHeavinessArg}), ##__VA_ARGS__)
+BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, )
 #undef BM
 
-}  // namespace compute
-
-}  // namespace arrow
+}  // namespace arrow::compute
