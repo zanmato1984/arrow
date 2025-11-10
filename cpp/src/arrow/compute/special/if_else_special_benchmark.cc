@@ -199,12 +199,10 @@ BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, True, kTrueScalar)
 BENCHMARK_IF_ELSE_WITH_BASELINE_AND_SPECIAL(BM, False, kFalseScalar)
 #undef BM
 
-static void BenchmarkIfElseArrayCond(benchmark::State& state,
-                                     MakeIfElseFunc make_if_else_func,
-                                     std::string spin_func, int64_t num_rows,
-                                     double true_probability, double null_probability,
-                                     int64_t if_true_kernel_intensity,
-                                     int64_t if_false_kernel_intensity) {
+static void BenchmarkIfElseArrayCond(
+    benchmark::State& state, MakeIfElseFunc make_if_else_func, std::string spin_func,
+    int64_t num_rows, double true_probability = 0.5, double null_probability = 0,
+    int64_t if_true_kernel_intensity = 0, int64_t if_false_kernel_intensity = 0) {
   random::RandomArrayGenerator rag(42);
   auto cond_datum = rag.Boolean(num_rows, true_probability, null_probability);
 
@@ -224,9 +222,7 @@ static void BM_IfElseEvenBranchesNullProbability(benchmark::State& state,
 
   BenchmarkIfElseArrayCond(state, std::move(make_if_else_func), spin_func,
                            /*num_rows=*/16 * 1024, /*true_probability=*/0.5,
-                           null_probability,
-                           /*if_true_kernel_intensity=*/0,
-                           /*if_false_kernel_intensity=*/0);
+                           null_probability);
 }
 
 const std::string kNullProbabilityArgName = "null_probability";
@@ -248,10 +244,7 @@ static void BM_IfElseEvenBranchesTrueProbability(benchmark::State& state,
   const double true_probability = state.range(0) / 100.0;
 
   BenchmarkIfElseArrayCond(state, std::move(make_if_else_func), spin_func,
-                           /*num_rows=*/16 * 1024, true_probability,
-                           /*null_probability=*/0,
-                           /*if_true_kernel_intensity=*/0,
-                           /*if_false_kernel_intensity=*/0);
+                           /*num_rows=*/16 * 1024, true_probability);
 }
 
 const std::string kTrueProbabilityArgName = "true_probability";
