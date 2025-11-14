@@ -36,8 +36,8 @@ namespace arrow::compute {
 /// under call-by-value semantics, `divide(b, a)` is evaluated regardless of the
 /// condition, so a divide-by-zero error can still occur. To address this, a special form
 /// for `if_else` would be needed, namely `if_else_special`, that follows a
-/// call-by-name-like evaluation strategy, where, for each row in a batch, only one of `b`
-/// or `c` is evaluated based on the corresponding value of `a`.
+/// call-by-name-like evaluation strategy, where, for each row in a batch, only one of the
+/// branches is evaluated based on the corresponding value of condition.
 ///
 /// Each API in this file is intended to refer to a concrete special form. In addition to
 /// the aforementioned `if_else_special`, the design anticipates variants of conditional
