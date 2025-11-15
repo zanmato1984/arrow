@@ -26,13 +26,12 @@
 
 namespace arrow::compute::internal {
 
-/// Structures to manage masks for branching expressions.
-/// Mostly for efficient short circuiting of if-else chains.
-/// The whole abstraction is as follows:
-/// - A branch represents an compound expression of condition and body;
+/// Structures to model masks for branching expressions, mostly for efficient
+/// short-circuiting of branching chains. The whole abstraction is as follows:
+/// - A branch represents a compound expression of condition and body;
 /// - A branch mask represents the set of rows (in an ExecBatch) to be evaluated for the
 ///   branch condition;
-/// - When a branch mask is applied to an condition expression, it produces a body mask;
+/// - When a branch mask is applied to a condition expression, it produces a body mask;
 /// - A body mask represents the set of rows (in an ExecBatch) to be evaluated for the
 ///   branch body.
 /// - A body mask also produces the next branch mask, representing the set of rows
