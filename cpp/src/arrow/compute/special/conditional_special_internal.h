@@ -23,6 +23,7 @@
 #include "arrow/compute/exec.h"
 #include "arrow/compute/special/special_form_internal.h"
 #include "arrow/compute/visibility.h"
+#include "arrow/util/unreachable.h"
 
 namespace arrow::compute::internal {
 
@@ -39,33 +40,57 @@ namespace arrow::compute::internal {
 
 struct ARROW_COMPUTE_EXPORT BodyMask;
 
+/// @brief A mask representing the set of rows to be evaluated for a branch condition.
+/// Being empty indicates that the entire branch, in addition to all the subsequent
+/// branches, are concluded. Otherwise, a selection vector can be obtained to evaluate the
+/// branch condition, whose result will be used to further produce a body mask.
 struct ARROW_COMPUTE_EXPORT BranchMask : public std::enable_shared_from_this<BranchMask> {
   virtual ~BranchMask() = default;
 
+  /// @brief Check if the branch mask is empty, in which case no rows are to be evaluated.
   virtual bool empty() const = 0;
 
+  /// @brief Get the selection vector representing the rows to be evaluated. Null
+  /// indicates that all rows are to be evaluated.
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const = 0;
 
+  /// @brief Create a body mask for this branch from the given datum, which is the result
+  /// of evaluating the condition under this branch mask. All possible trivial cases, such
+  /// as constant true/false/null and all-true/false/null arrays, are handled here. If
+  /// none of the trivial cases apply, the call is forwarded to the concrete
+  /// implementations of MakeBodyMaskFromBitmap().
   Result<std::shared_ptr<const BodyMask>> MakeBodyMask(const Datum& datum,
                                                        ExecContext* exec_context) const;
 
+  /// @brief Create a branch mask from the given selection vector. Based on the content of
+  /// the selection vector, it may return concrete branch mask implementations that can
+  /// take advantage of short-circuiting.
   static Result<std::shared_ptr<const BranchMask>> FromSelectionVector(
       std::shared_ptr<SelectionVector> selection, int64_t length);
 
  protected:
+  /// @brief Create a body mask from the given bitmap, which is the result of evaluating
+  /// the condition under this branch mask.
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap, ExecContext* exec_context) const = 0;
 
+  /// @brief Create a body mask from the given chunked bitmap, which is the result of
+  /// evaluating the condition under this branch mask.
   virtual Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<ChunkedArray>& bitmap, ExecContext* exec_context) const = 0;
 };
 
+/// @brief A branch mask that evaluates the condition for all rows. The selection vector
+/// obtained is null, indicating that all rows are to be evaluated. And the body mask
+/// produced is solely based on the condition result.
 struct ARROW_COMPUTE_EXPORT AllPassBranchMask : public BranchMask {
   explicit AllPassBranchMask(int64_t length) : length_(length) {}
 
   bool empty() const override { return length_ == 0; }
 
-  Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override;
+  Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
+    return NULLPTR;
+  }
 
  protected:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
@@ -80,34 +105,36 @@ struct ARROW_COMPUTE_EXPORT AllPassBranchMask : public BranchMask {
   int64_t length_;
 };
 
+/// @brief A branch mask that evaluates the condition for no rows and concludes
+/// all the subsequent branches. One should never try to obtain a selection vector or
+/// produce a body mask from this branch mask.
 struct ARROW_COMPUTE_EXPORT AllFailBranchMask : public BranchMask {
   AllFailBranchMask() = default;
 
   bool empty() const override { return true; }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
-    DCHECK(false);
-    return Status::Invalid("AllFailBranchMask::GetSelectionVector should not be called");
+    Unreachable("AllFailBranchMask::GetSelectionVector should not be called");
   }
 
  protected:
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<BooleanArray>& bitmap,
       ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid(
-        "AllFailBranchMask::MakeBodyMaskFromBitmap should not be called");
+    Unreachable("AllFailBranchMask::MakeBodyMaskFromBitmap should not be called");
   }
 
   Result<std::shared_ptr<const BodyMask>> MakeBodyMaskFromBitmap(
       const std::shared_ptr<ChunkedArray>& bitmap,
       ExecContext* exec_context) const override {
-    DCHECK(false);
-    return Status::Invalid(
-        "AllFailBranchMask::MakeBodyMaskFromBitmap should not be called");
+    Unreachable("AllFailBranchMask::MakeBodyMaskFromBitmap should not be called");
   }
 };
 
+/// @brief A branch mask that evaluates the condition for rows indicated by the given
+/// selection vector, which is also the one obtained from it. The body mask produced, if
+/// no short-circuiting available, is one that with a selection vector that is
+/// conceptually AND-ing the branch mask's selection vector and the condition result.
 struct ARROW_COMPUTE_EXPORT ConditionalBranchMask : public BranchMask {
   ConditionalBranchMask(std::shared_ptr<SelectionVector> selection_vector, int64_t length)
       : selection_vector_(std::move(selection_vector)), length_(length) {
@@ -136,13 +163,22 @@ struct ARROW_COMPUTE_EXPORT ConditionalBranchMask : public BranchMask {
   int64_t length_ = 0;
 };
 
+/// @brief A mask representing the set of rows to be evaluated for a branch body. Being
+/// empty indicates that no rows are to be evaluated for the body. Otherwise, a selection
+/// vector can be obtained to evaluate the branch body, whose result will be used as part
+/// of the final result. In addition, a branch mask is produced for the next branch.
 struct ARROW_COMPUTE_EXPORT BodyMask : public std::enable_shared_from_this<BodyMask> {
   virtual ~BodyMask() = default;
 
+  /// @brief Check if the body mask is empty, in which case no rows are to be evaluated.
   virtual bool empty() const = 0;
 
+  /// @brief Get the selection vector representing the rows to be evaluated. Null
+  /// indicates that all rows are to be evaluated.
   virtual Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const = 0;
 
+  /// @brief Create a branch mask for the next branch. May return concrete branch mask
+  /// implementations for short-circuiting.
   virtual Result<std::shared_ptr<const BranchMask>> NextBranchMask() const = 0;
 };
 
@@ -152,8 +188,7 @@ struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public BodyMask {
   bool empty() const override { return true; }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
-    DCHECK(false);
-    return Status::Invalid("AllNullBodyMask::GetSelectionVector should not be called");
+    Unreachable("AllNullBodyMask::GetSelectionVector should not be called");
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {
@@ -189,8 +224,7 @@ struct ARROW_COMPUTE_EXPORT AllFailBodyMask : public DelegateBodyMask {
   bool empty() const override { return true; }
 
   Result<std::shared_ptr<SelectionVector>> GetSelectionVector() const override {
-    DCHECK(false);
-    return Status::Invalid("AllFailBodyMask::GetSelectionVector should not be called");
+    Unreachable("AllFailBodyMask::GetSelectionVector should not be called");
   }
 
   Result<std::shared_ptr<const BranchMask>> NextBranchMask() const override {

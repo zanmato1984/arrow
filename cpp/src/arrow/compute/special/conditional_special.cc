@@ -131,10 +131,6 @@ Result<std::shared_ptr<const BranchMask>> BranchMask::FromSelectionVector(
   return std::make_shared<ConditionalBranchMask>(std::move(selection), length);
 }
 
-Result<std::shared_ptr<SelectionVector>> AllPassBranchMask::GetSelectionVector() const {
-  return nullptr;
-}
-
 Result<std::shared_ptr<const BodyMask>> AllPassBranchMask::MakeBodyMaskFromBitmap(
     const std::shared_ptr<BooleanArray>& bitmap, ExecContext* exec_context) const {
   DCHECK_EQ(bitmap->length(), length_);
