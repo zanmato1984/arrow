@@ -30,6 +30,7 @@
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression_internal.h"
 #include "arrow/compute/function_internal.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/compute/util.h"
 #include "arrow/io/memory.h"
 #ifdef ARROW_IPC
@@ -59,6 +60,13 @@ void Expression::Call::ComputeHash() {
   }
 }
 
+void Expression::Special::ComputeHash() {
+  hash = std::hash<std::string>{}(special_form->name());
+  for (const auto& arg : arguments) {
+    arrow::internal::hash_combine(hash, arg.hash());
+  }
+}
+
 Expression::Expression(Call call) {
   call.ComputeHash();
   impl_ = std::make_shared<Impl>(std::move(call));
@@ -69,6 +77,9 @@ Expression::Expression(Datum literal)
 
 Expression::Expression(Parameter parameter)
     : impl_(std::make_shared<Impl>(std::move(parameter))) {}
+
+Expression::Expression(Special special)
+    : impl_(std::make_shared<Impl>(std::move(special))) {}
 
 Expression literal(Datum lit) { return Expression(std::move(lit)); }
 
@@ -110,6 +121,12 @@ const Expression::Call* Expression::call() const {
   return std::get_if<Call>(impl_.get());
 }
 
+const Expression::Special* Expression::special() const {
+  if (impl_ == nullptr) return nullptr;
+
+  return std::get_if<Special>(impl_.get());
+}
+
 const DataType* Expression::type() const {
   if (impl_ == nullptr) return nullptr;
 
@@ -119,6 +136,10 @@ const DataType* Expression::type() const {
 
   if (const Parameter* parameter = this->parameter()) {
     return parameter->type.type;
+  }
+
+  if (const Special* special = this->special()) {
+    return special->type.type;
   }
 
   return CallNotNull(*this)->type.type;
@@ -167,6 +188,15 @@ std::string Expression::ToString() const {
       return path->ToString();
     }
     return ref->ToString();
+  }
+
+  if (auto sp = special()) {
+    std::string out = sp->special_form->name() + "_special(";
+    for (const auto& arg : sp->arguments) {
+      out += arg.ToString() + ", ";
+    }
+    out.resize(out.size() - 2);
+    return out + ")";
   }
 
   auto call = CallNotNull(*this);
@@ -239,6 +269,30 @@ bool Expression::Equals(const Expression& other) const {
     return ref->Equals(*other.field_ref());
   }
 
+  auto args_and_options_eq = [](const auto* special_or_call, const auto* other) -> bool {
+    for (size_t i = 0; i < special_or_call->arguments.size(); ++i) {
+      if (!special_or_call->arguments[i].Equals(other->arguments[i])) {
+        return false;
+      }
+    }
+
+    if (special_or_call->options == other->options) return true;
+    if (special_or_call->options && other->options) {
+      return special_or_call->options->Equals(*other->options);
+    }
+    return false;
+  };
+
+  if (auto special = this->special(); special) {
+    auto other_special = SpecialNotNull(other);
+
+    if (special->special_form->name() != other_special->special_form->name()) {
+      return false;
+    }
+
+    return args_and_options_eq(special, other_special);
+  }
+
   auto call = CallNotNull(*this);
   auto other_call = CallNotNull(other);
 
@@ -247,17 +301,7 @@ bool Expression::Equals(const Expression& other) const {
     return false;
   }
 
-  for (size_t i = 0; i < call->arguments.size(); ++i) {
-    if (!call->arguments[i].Equals(other_call->arguments[i])) {
-      return false;
-    }
-  }
-
-  if (call->options == other_call->options) return true;
-  if (call->options && other_call->options) {
-    return call->options->Equals(*other_call->options);
-  }
-  return false;
+  return args_and_options_eq(call, other_call);
 }
 
 bool Expression::Identical(const Expression& l, const Expression& r) {
@@ -274,6 +318,10 @@ size_t Expression::hash() const {
 
   if (auto ref = field_ref()) {
     return ref->hash();
+  }
+
+  if (auto special = this->special()) {
+    return special->hash;
   }
 
   return CallNotNull(*this)->hash;
@@ -299,6 +347,8 @@ bool Expression::IsScalarExpression() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -359,6 +409,8 @@ bool Expression::IsSatisfiable() const {
   }
 
   if (field_ref()) return true;
+
+  if (special()) return true;
 
   auto call = CallNotNull(*this);
 
@@ -536,7 +588,49 @@ inline std::vector<TypeHolder> GetTypesWithSmallestLiteralRepresentation(
   return types;
 }
 
-// Produce a bound Expression from unbound Call and bound arguments.
+template <typename TypeOrSchema>
+Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
+                            compute::ExecContext* exec_context) {
+  if (exec_context == nullptr) {
+    compute::ExecContext exec_context;
+    return BindImpl(std::move(expr), in, &exec_context);
+  }
+
+  if (expr.literal()) return expr;
+
+  if (const FieldRef* ref = expr.field_ref()) {
+    ARROW_ASSIGN_OR_RAISE(FieldPath path, ref->FindOne(in));
+
+    Expression::Parameter param = *expr.parameter();
+    param.indices.resize(path.indices().size());
+    std::copy(path.indices().begin(), path.indices().end(), param.indices.begin());
+    ARROW_ASSIGN_OR_RAISE(auto field, path.Get(in));
+    param.type = field->type();
+    return Expression{std::move(param)};
+  }
+
+  if (expr.special()) {
+    auto special = *expr.special();
+    for (auto& argument : special.arguments) {
+      ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
+    }
+    ARROW_ASSIGN_OR_RAISE(
+        special.special_executor,
+        special.special_form->Bind(special.arguments, special.options, exec_context));
+    DCHECK_NE(special.special_executor, nullptr);
+    special.type = special.special_executor->out_type();
+    return Expression(std::move(special));
+  }
+
+  auto call = *CallNotNull(expr);
+  for (auto& argument : call.arguments) {
+    ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
+  }
+  return BindNonRecursive(call, /*insert_implicit_casts=*/true, exec_context);
+}
+
+}  // namespace
+
 Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_casts,
                                     compute::ExecContext* exec_context) {
   DCHECK(std::all_of(call.arguments.begin(), call.arguments.end(),
@@ -602,37 +696,6 @@ Result<Expression> BindNonRecursive(Expression::Call call, bool insert_implicit_
 
   return Expression(std::move(call));
 }
-
-template <typename TypeOrSchema>
-Result<Expression> BindImpl(Expression expr, const TypeOrSchema& in,
-                            compute::ExecContext* exec_context) {
-  if (exec_context == nullptr) {
-    compute::ExecContext exec_context;
-    return BindImpl(std::move(expr), in, &exec_context);
-  }
-
-  if (expr.literal()) return expr;
-
-  if (const FieldRef* ref = expr.field_ref()) {
-    ARROW_ASSIGN_OR_RAISE(FieldPath path, ref->FindOne(in));
-
-    Expression::Parameter param = *expr.parameter();
-    param.indices.resize(path.indices().size());
-    std::copy(path.indices().begin(), path.indices().end(), param.indices.begin());
-    ARROW_ASSIGN_OR_RAISE(auto field, path.Get(in));
-    param.type = field->type();
-    return Expression{std::move(param)};
-  }
-
-  auto call = *CallNotNull(expr);
-  for (auto& argument : call.arguments) {
-    ARROW_ASSIGN_OR_RAISE(argument, BindImpl(std::move(argument), in, exec_context));
-  }
-  return BindNonRecursive(std::move(call),
-                          /*insert_implicit_casts=*/true, exec_context);
-}
-
-}  // namespace
 
 Result<Expression> Expression::Bind(const TypeHolder& in,
                                     compute::ExecContext* exec_context) const {
@@ -758,6 +821,10 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
     return field;
   }
 
+  if (auto special = expr.special()) {
+    return special->special_executor->Execute(input, exec_context);
+  }
+
   auto call = CallNotNull(expr);
 
   std::vector<Datum> arguments(call->arguments.size());
@@ -770,12 +837,19 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
   }
 
   int64_t input_length;
+  std::shared_ptr<SelectionVector> input_selection_vector = nullptr;
   if (!arguments.empty() && all_scalar) {
     // all inputs are scalar, so use a 1-long batch to avoid
     // computing input.length equivalent outputs
     input_length = 1;
   } else {
     input_length = input.length;
+    input_selection_vector = input.selection_vector;
+#ifndef NDEBUG
+    if (input_selection_vector) {
+      RETURN_NOT_OK(input_selection_vector->Validate(input.length));
+    }
+#endif
   }
 
   auto executor = compute::detail::KernelExecutor::MakeScalar();
@@ -789,7 +863,8 @@ Result<Datum> ExecuteScalarExpression(const Expression& expr, const ExecBatch& i
   RETURN_NOT_OK(executor->Init(&kernel_context, {kernel, types, options}));
 
   compute::detail::DatumAccumulator listener;
-  RETURN_NOT_OK(executor->Execute(ExecBatch(arguments, input_length), &listener));
+  RETURN_NOT_OK(executor->Execute(
+      ExecBatch(arguments, input_length, std::move(input_selection_vector)), &listener));
   const auto out = executor->WrapResults(arguments, listener.values());
 #ifndef NDEBUG
   DCHECK_OK(executor->CheckResultType(out, call->function_name.c_str()));
@@ -817,18 +892,34 @@ std::vector<FieldRef> FieldsInExpression(const Expression& expr) {
     return {*ref};
   }
 
-  std::vector<FieldRef> fields;
-  for (const Expression& arg : CallNotNull(expr)->arguments) {
-    auto argument_fields = FieldsInExpression(arg);
-    std::move(argument_fields.begin(), argument_fields.end(), std::back_inserter(fields));
+  const auto& fields = [](const auto& expr) {
+    std::vector<FieldRef> fields;
+    for (const Expression& arg : expr->arguments) {
+      auto argument_fields = FieldsInExpression(arg);
+      std::move(argument_fields.begin(), argument_fields.end(),
+                std::back_inserter(fields));
+    }
+    return fields;
+  };
+
+  if (auto sp = expr.special()) {
+    return fields(sp);
   }
-  return fields;
+
+  return fields(CallNotNull(expr));
 }
 
 bool ExpressionHasFieldRefs(const Expression& expr) {
   if (expr.literal()) return false;
 
   if (expr.field_ref()) return true;
+
+  if (auto sp = expr.special()) {
+    for (const Expression& arg : sp->arguments) {
+      if (ExpressionHasFieldRefs(arg)) return true;
+    }
+    return false;
+  }
 
   for (const Expression& arg : CallNotNull(expr)->arguments) {
     if (ExpressionHasFieldRefs(arg)) return true;

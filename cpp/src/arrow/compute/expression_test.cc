@@ -28,11 +28,12 @@
 #include <gtest/gtest.h>
 
 #include "arrow/array/builder_primitive.h"
-#include "arrow/compute/expression_internal.h"
+#include "arrow/compute/expression_test_internal.h"
 #include "arrow/compute/function_internal.h"
 #include "arrow/compute/registry.h"
-#include "arrow/testing/gtest_util.h"
+#include "arrow/compute/special_form.h"
 #include "arrow/testing/matchers.h"
+#include "arrow/util/logging_internal.h"
 
 using testing::Eq;
 using testing::HasSubstr;
@@ -47,50 +48,47 @@ using internal::checked_pointer_cast;
 
 namespace compute {
 
-const std::shared_ptr<Schema> kBoringSchema = schema({
-    field("bool", boolean()),
-    field("i8", int8()),
-    field("i32", int32()),
-    field("i32_req", int32(), /*nullable=*/false),
-    field("u32", uint32()),
-    field("i64", int64()),
-    field("f32", float32()),
-    field("f32_req", float32(), /*nullable=*/false),
-    field("f64", float64()),
-    field("date64", date64()),
-    field("str", utf8()),
-    field("dict_str", dictionary(int32(), utf8())),
-    field("dict_i32", dictionary(int32(), int32())),
-    field("ts_ns", timestamp(TimeUnit::NANO)),
-    field("ts_s", timestamp(TimeUnit::SECOND)),
-    field("binary", binary()),
-    field("ts_s_utc", timestamp(TimeUnit::SECOND, "UTC")),
-});
+using internal::add;
+using internal::cast;
+using internal::ExpectBindsTo;
+using internal::kBoringSchema;
+using internal::make_range_json;
+using internal::no_change;
+using internal::true_unless_null;
 
-Expression cast(Expression argument, std::shared_ptr<DataType> to_type) {
-  return call("cast", {std::move(argument)},
-              compute::CastOptions::Safe(std::move(to_type)));
-}
+class EchoSpecialExecutor : public SpecialExecutor {
+ public:
+  EchoSpecialExecutor(Expression argument)
+      : SpecialExecutor(argument.type()), argument_(std::move(argument)) {}
 
-Expression true_unless_null(Expression argument) {
-  return call("true_unless_null", {std::move(argument)});
-}
-
-Expression add(Expression l, Expression r) {
-  return call("add", {std::move(l), std::move(r)});
-}
-
-std::string make_range_json(int start, int end) {
-  std::string result = "[";
-  for (int i = start; i <= end; ++i) {
-    if (i > start) result += ",";
-    result += std::to_string(i);
+  Result<Datum> Execute(const ExecBatch& input,
+                        ExecContext* exec_context) const override {
+    return ExecuteScalarExpression(argument_, input, exec_context);
   }
-  result += "]";
-  return result;
-}
 
-const auto no_change = std::nullopt;
+ private:
+  Expression argument_;
+};
+
+class EchoSpecialForm : public SpecialForm {
+ public:
+  EchoSpecialForm() : SpecialForm("echo") {}
+
+ protected:
+  Result<std::unique_ptr<SpecialExecutor>> Bind(
+      std::vector<Expression>& arguments, std::shared_ptr<FunctionOptions> options,
+      ExecContext* exec_context) const override {
+    DCHECK_EQ(arguments.size(), 1);
+    return std::make_unique<EchoSpecialExecutor>(arguments[0]);
+  }
+};
+
+Expression echo_special(Expression input) {
+  Expression::Special special;
+  special.special_form = std::make_shared<EchoSpecialForm>();
+  special.arguments.push_back(std::move(input));
+  return Expression(std::move(special));
+}
 
 TEST(ExpressionUtils, Comparison) {
   auto cmp_name = [](Datum l, Datum r) {
@@ -323,6 +321,8 @@ TEST(Expression, ToString) {
             "round(3.14, {ndigits=0, round_mode=HALF_TO_EVEN})");
   EXPECT_EQ(call("random", {}, compute::RandomOptions()).ToString(),
             "random({initializer=SystemRandom, seed=0})");
+
+  EXPECT_EQ(echo_special(field_ref("a")).ToString(), "echo_special(a)");
 }
 
 TEST(Expression, Equality) {
@@ -375,6 +375,19 @@ TEST(Expression, Equality) {
   EXPECT_NE(cast(field_ref("a"), int32()), cast(field_ref("a"), int64()));
   EXPECT_NE(cast(field_ref("a"), int32()),
             call("cast", {field_ref("a")}, compute::CastOptions::Unsafe(int32())));
+
+  EXPECT_EQ(echo_special(literal(42)), echo_special(literal(42)));
+  EXPECT_NE(echo_special(literal(42)), literal(42));
+  EXPECT_NE(echo_special(literal(42)), echo_special(literal(0)));
+  EXPECT_EQ(echo_special(field_ref("a")), echo_special(field_ref("a")));
+  EXPECT_NE(echo_special(field_ref("a")), field_ref("a"));
+  EXPECT_NE(echo_special(field_ref("a")), echo_special(field_ref("b")));
+  EXPECT_EQ(echo_special(add(literal(42), field_ref("a"))),
+            echo_special(add(literal(42), field_ref("a"))));
+  EXPECT_NE(echo_special(add(literal(42), field_ref("a"))),
+            add(literal(42), field_ref("a")));
+  EXPECT_NE(echo_special(add(literal(42), field_ref("a"))),
+            echo_special(add(field_ref("a"), literal(42))));
 }
 
 Expression null_literal(const std::shared_ptr<DataType>& type) {
@@ -402,7 +415,11 @@ TEST(Expression, Hash) {
   // NB: unbound expressions don't check for availability in any registry
   EXPECT_TRUE(set.emplace(call("widgetify", {})).second);
 
-  EXPECT_EQ(set.size(), 8);
+  EXPECT_TRUE(set.emplace(echo_special(field_ref("a"))).second);
+  EXPECT_FALSE(set.emplace(echo_special(field_ref("a"))).second) << "already inserted";
+  EXPECT_TRUE(set.emplace(echo_special(field_ref("b"))).second);
+
+  EXPECT_EQ(set.size(), 10);
 }
 
 TEST(Expression, IsScalarExpression) {
@@ -422,6 +439,8 @@ TEST(Expression, IsScalarExpression) {
 
   // non scalar function
   EXPECT_FALSE(call("take", {field_ref("a"), literal(arr)}).IsScalarExpression());
+
+  EXPECT_TRUE(echo_special(field_ref("a")).IsScalarExpression());
 }
 
 TEST(Expression, IsSatisfiable) {
@@ -491,6 +510,8 @@ TEST(Expression, IsSatisfiable) {
     // fill_na)
     EXPECT_TRUE(Bind(call("is_null", {never_true})).IsSatisfiable());
   }
+
+  EXPECT_TRUE(Bind(echo_special(field_ref("i32"))).IsSatisfiable());
 }
 
 TEST(Expression, FieldsInExpression) {
@@ -518,6 +539,9 @@ TEST(Expression, FieldsInExpression) {
                            equal(field_ref("b"), literal(2))),
                       not_(less(field_ref("c"), literal(3)))),
                   {"a", "b", "c"});
+
+  ExpectFieldsAre(echo_special(literal(42)), {});
+  ExpectFieldsAre(echo_special(field_ref("a")), {"a"});
 }
 
 TEST(Expression, ExpressionHasFieldRefs) {
@@ -540,6 +564,9 @@ TEST(Expression, ExpressionHasFieldRefs) {
   EXPECT_TRUE(ExpressionHasFieldRefs(or_(
       and_(not_(equal(field_ref("a"), literal(1))), equal(field_ref("b"), literal(2))),
       not_(less(field_ref("c"), literal(3))))));
+
+  EXPECT_FALSE(ExpressionHasFieldRefs(echo_special(literal(42))));
+  EXPECT_TRUE(ExpressionHasFieldRefs(echo_special(field_ref("a"))));
 }
 
 TEST(Expression, BindLiteral) {
@@ -552,24 +579,6 @@ TEST(Expression, BindLiteral) {
     Expression expr = literal(dat);
     EXPECT_TRUE(dat.type()->Equals(*expr.type()));
     EXPECT_TRUE(expr.IsBound());
-  }
-}
-
-void ExpectBindsTo(Expression expr, std::optional<Expression> expected,
-                   Expression* bound_out = nullptr,
-                   const Schema& schema = *kBoringSchema) {
-  if (!expected) {
-    expected = expr;
-  }
-
-  ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(schema));
-  EXPECT_TRUE(bound.IsBound());
-
-  ASSERT_OK_AND_ASSIGN(expected, expected->Bind(schema));
-  EXPECT_EQ(bound, *expected) << " unbound: " << expr.ToString();
-
-  if (bound_out) {
-    *bound_out = bound;
   }
 }
 
@@ -948,6 +957,40 @@ TEST(Expression, BindNestedCall) {
   EXPECT_TRUE(expr.IsBound());
 }
 
+TEST(Expression, BindSpecialForm) {
+  {
+    auto expr = echo_special(literal(42));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*int32()));
+  }
+
+  {
+    auto expr = echo_special(field_ref("bool"));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*boolean()));
+  }
+
+  {
+    auto expr = echo_special(add(field_ref("i64"), literal(42)));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*int64()));
+  }
+
+  {
+    auto expr = add(literal(42), echo_special(field_ref("i64")));
+    EXPECT_FALSE(expr.IsBound());
+    ExpectBindsTo(expr, no_change, &expr);
+    EXPECT_TRUE(expr.IsBound());
+    EXPECT_TRUE(expr.type()->Equals(*int64()));
+  }
+}
+
 TEST(Expression, ExecuteFieldRef) {
   auto ExpectRefIs = [](FieldRef ref, Datum in, Datum expected) {
     auto expr = field_ref(ref);
@@ -1042,15 +1085,32 @@ Result<Datum> NaiveExecuteScalarExpression(const Expression& expr, const Datum& 
     return ref->GetOneOrNone(*input.record_batch());
   }
 
-  auto call = CallNotNull(expr);
-
-  std::vector<Datum> arguments(call->arguments.size());
-  for (size_t i = 0; i < arguments.size(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(arguments[i],
-                          NaiveExecuteScalarExpression(call->arguments[i], input));
-  }
+  auto execute_args = [](const std::vector<Expression>& args,
+                         const Datum& input) -> Result<std::vector<Datum>> {
+    std::vector<Datum> results(args.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(results[i], NaiveExecuteScalarExpression(args[i], input));
+    }
+    return results;
+  };
 
   compute::ExecContext exec_context;
+
+  if (auto special = expr.special()) {
+    auto arguments_cpy = special->arguments;
+    ARROW_ASSIGN_OR_RAISE(
+        auto executor,
+        special->special_form->Bind(arguments_cpy, special->options, &exec_context));
+    ARROW_ASSIGN_OR_RAISE(auto arguments, execute_args(special->arguments, input));
+    ExecBatch batch{std::move(arguments), input.length()};
+    return executor->Execute(batch, &exec_context);
+  }
+
+  auto call = CallNotNull(expr);
+
+  ARROW_ASSIGN_OR_RAISE(std::vector<Datum> arguments,
+                        execute_args(call->arguments, input));
+
   ARROW_ASSIGN_OR_RAISE(auto function, GetFunction(*call, &exec_context));
 
   std::vector<TypeHolder> types = GetTypes(call->arguments);
@@ -1213,6 +1273,58 @@ TEST(Expression, ExecuteDictionaryTransparent) {
     {"i32": 1, "dict_str": "eh"},
     {"i32": 2, "dict_str": "eh"}
   ])"));
+}
+
+TEST(Expression, NaiveExecuteSpecialForm) {
+  ExpectExecute(echo_special(field_ref("i32")),
+                ArrayFromJSON(struct_({field("i32", int32())}), R"([
+    {"i32": 0},
+    {"i32": 1},
+    {"i32": 2}
+  ])"));
+}
+
+TEST(Expression, ExecuteSpecialFormNested) {
+  const int64_t length = 3;
+
+  auto array = ArrayFromJSON(int32(), R"([null, 42, 42])");
+  auto scalar = ScalarFromJSON(int32(), R"(42)");
+  auto chunked_array = ChunkedArrayFromJSON(int32(), {R"([null, 42])", R"([42])"});
+  std::vector<ExecBatch> inputs = {ExecBatch{{array, array}, length},
+                                   ExecBatch{{array, scalar}, length},
+                                   ExecBatch{{array, chunked_array}, length},
+                                   ExecBatch{{scalar, array}, length},
+                                   ExecBatch{{scalar, scalar}, 1},
+                                   ExecBatch{{scalar, chunked_array}, length},
+                                   ExecBatch{{chunked_array, array}, length},
+                                   ExecBatch{{chunked_array, scalar}, length},
+                                   ExecBatch{{chunked_array, chunked_array}, length}};
+
+  auto schm = schema({field("a", int32()), field("b", int32())});
+  auto a = field_ref("a");
+  auto b = field_ref("b");
+  std::vector<Expression> exprs = {add(echo_special(a), b),
+                                   add(a, echo_special(b)),
+                                   add(echo_special(a), echo_special(b)),
+                                   echo_special(add(a, b)),
+                                   echo_special(add(echo_special(a), b)),
+                                   echo_special(add(a, echo_special(b))),
+                                   echo_special(add(echo_special(a), echo_special(b)))};
+
+  for (const auto& input : inputs) {
+    ARROW_SCOPED_TRACE("Input: " + input.ToString());
+
+    ASSERT_OK_AND_ASSIGN(auto bound, add(a, b).Bind(*schm));
+    ASSERT_OK_AND_ASSIGN(auto expected, ExecuteScalarExpression(bound, input));
+
+    for (const auto& expr : exprs) {
+      ARROW_SCOPED_TRACE("Expr: " + expr.ToString());
+
+      ASSERT_OK_AND_ASSIGN(auto bound, expr.Bind(*schm));
+      ASSERT_OK_AND_ASSIGN(auto result, ExecuteScalarExpression(bound, input));
+      AssertDatumsEqual(result, expected, /*verbose=*/true);
+    }
+  }
 }
 
 void ExpectIdenticalIfUnchanged(Expression modified, Expression original) {
