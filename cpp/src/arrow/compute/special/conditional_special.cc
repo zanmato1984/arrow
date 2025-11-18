@@ -286,6 +286,8 @@ Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
     results.Emplace(std::move(body_result), std::move(selection_vector));
     ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
   }
+  // Should have no remaining rows.
+  DCHECK(branch_mask->empty());
   return MultiplexResults(input, results, exec_context);
 }
 
