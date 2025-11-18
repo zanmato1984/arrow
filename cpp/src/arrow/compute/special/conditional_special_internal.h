@@ -182,6 +182,11 @@ struct ARROW_COMPUTE_EXPORT BodyMask : public std::enable_shared_from_this<BodyM
   virtual Result<std::shared_ptr<const BranchMask>> NextBranchMask() const = 0;
 };
 
+/// @brief A body mask that emits nulls for all rows and produces an all-fail branch mask
+/// for the next branch. For example, the body mask for branch:
+///  [... else] if (null) ...
+// XXX Only works for null policy of intersection (any operands null -> null). Other
+// variants may needed for different null policies.
 struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public BodyMask {
   AllNullBodyMask() = default;
 
@@ -196,6 +201,8 @@ struct ARROW_COMPUTE_EXPORT AllNullBodyMask : public BodyMask {
   }
 };
 
+/// @brief A body mask that delegates certain operations to an underlying branch mask.
+/// Subclasses can override behaviors as needed.
 struct ARROW_COMPUTE_EXPORT DelegateBodyMask : public BodyMask {
   explicit DelegateBodyMask(std::shared_ptr<const BranchMask> branch_mask)
       : branch_mask_(std::move(branch_mask)) {}
@@ -204,6 +211,10 @@ struct ARROW_COMPUTE_EXPORT DelegateBodyMask : public BodyMask {
   std::shared_ptr<const BranchMask> branch_mask_;
 };
 
+/// @brief A body mask that evaluates the body for all rows indicated by the underlying
+/// branch mask, and produces an all-fail branch mask for the next branch. For example,
+/// the body mask for branch:
+///   [... else] if (true) ...
 struct ARROW_COMPUTE_EXPORT AllPassBodyMask : public DelegateBodyMask {
   using DelegateBodyMask::DelegateBodyMask;
 
@@ -218,6 +229,9 @@ struct ARROW_COMPUTE_EXPORT AllPassBodyMask : public DelegateBodyMask {
   }
 };
 
+/// @brief A body mask that evaluates the body for no rows, and pass through the
+/// underlying branch mask for the next branch. For example, the body mask for branch:
+///   [... else] if (false) ...
 struct ARROW_COMPUTE_EXPORT AllFailBodyMask : public DelegateBodyMask {
   using DelegateBodyMask::DelegateBodyMask;
 
@@ -232,6 +246,8 @@ struct ARROW_COMPUTE_EXPORT AllFailBodyMask : public DelegateBodyMask {
   }
 };
 
+/// @brief A body mask that evaluates the body for rows indicated by the given selection
+/// vector, and produces a branch mask for the next branch from the remainder rows.
 struct ARROW_COMPUTE_EXPORT ConditionalBodyMask : public BodyMask {
   ConditionalBodyMask(std::shared_ptr<SelectionVector> body,
                       std::shared_ptr<SelectionVector> remainder, int64_t length)
