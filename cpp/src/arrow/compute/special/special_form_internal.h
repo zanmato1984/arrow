@@ -23,6 +23,14 @@
 
 namespace arrow::compute::internal {
 
+/// @brief A CRTP base class for special forms whose binding are backed by a function
+/// call.
+///
+/// Many special forms share the same binding logic as its non-special function
+/// counterpart, e.g., implicit casts and output type resolution. This class encapsulates
+/// the binding logic for such special forms, instantiating a Call instance and binding
+/// it, then delegating the actual binding of the special form to the derived class via
+/// BindWithBoundCall() with the bound Call instance.
 template <typename Impl>
 class FunctionBackedSpecialForm : public SpecialForm {
  public:
