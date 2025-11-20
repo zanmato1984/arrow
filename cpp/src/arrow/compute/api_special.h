@@ -45,7 +45,7 @@ namespace arrow::compute {
 /// operators with short-circuit semantics, such as `and_special` and `or_special`, some
 /// of which may not be implemented yet.
 
-/// TODO: Doc.
+/// @brief Construct an Expression representing an if-else special form.
 ARROW_EXPORT
 Expression if_else_special(Expression cond, Expression if_true, Expression if_false);
 
