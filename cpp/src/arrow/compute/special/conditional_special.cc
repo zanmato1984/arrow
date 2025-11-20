@@ -291,6 +291,46 @@ Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
   return MultiplexResults(input, results, exec_context);
 }
 
+namespace {
+
+/// @brief Results multiplexing is done by invoking a "choose" function to choose values
+/// from each branch result based on the selection vectors. This function prepares the
+/// choose indices from the branch selection vectors. For the example in
+/// ConditionalExec::MultiplexResults's doc string, the choose indices will be:
+///   [0, 1, 2, 0, 1, 2, 0]
+Result<Datum> ChooseIndices(
+    const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
+    int64_t length, ExecContext* exec_context) {
+  const int64_t validity_bytes = bit_util::BytesForBits(length);
+  ARROW_ASSIGN_OR_RAISE(
+      std::shared_ptr<ResizableBuffer> validity_buf,
+      AllocateResizableBuffer(validity_bytes, exec_context->memory_pool()));
+  auto validity_data = validity_buf->mutable_data_as<uint8_t>();
+  std::memset(validity_data, 0, validity_bytes);
+
+  ARROW_ASSIGN_OR_RAISE(
+      std::shared_ptr<ResizableBuffer> indices_buf,
+      AllocateResizableBuffer(length * sizeof(int32_t), exec_context->memory_pool()));
+  auto indices_data = indices_buf->mutable_data_as<int32_t>();
+  for (int32_t index = 0; index < static_cast<int32_t>(selection_vectors.size());
+       ++index) {
+    DCHECK_NE(selection_vectors[index], nullptr);
+    DCHECK_GT(selection_vectors[index]->length(), 0);
+    auto row_ids = selection_vectors[index]->indices();
+    for (int64_t i = 0; i < selection_vectors[index]->length(); ++i) {
+      const int32_t row_id = row_ids[i];
+      DCHECK_EQ(bit_util::GetBit(validity_data, row_id), false);
+      bit_util::SetBitTo(validity_data, row_id, true);
+      indices_data[row_id] = index;
+    }
+  }
+
+  return ArrayData::Make(int32(), length,
+                         {std::move(validity_buf), std::move(indices_buf)});
+}
+
+}  // namespace
+
 Result<Datum> ConditionalExec::MultiplexResults(const ExecBatch& input,
                                                 const BranchResults& results,
                                                 ExecContext* exec_context) const {
@@ -332,37 +372,6 @@ Result<Datum> ConditionalExec::MultiplexResults(const ExecBatch& input,
   choose_args.insert(choose_args.end(), results.body_results().begin(),
                      results.body_results().end());
   return CallFunction("choose", choose_args, exec_context);
-}
-
-Result<Datum> ConditionalExec::ChooseIndices(
-    const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
-    int64_t length, ExecContext* exec_context) const {
-  const int64_t validity_bytes = bit_util::BytesForBits(length);
-  ARROW_ASSIGN_OR_RAISE(
-      std::shared_ptr<ResizableBuffer> validity_buf,
-      AllocateResizableBuffer(validity_bytes, exec_context->memory_pool()));
-  auto validity_data = validity_buf->mutable_data_as<uint8_t>();
-  std::memset(validity_data, 0, validity_bytes);
-
-  ARROW_ASSIGN_OR_RAISE(
-      std::shared_ptr<ResizableBuffer> indices_buf,
-      AllocateResizableBuffer(length * sizeof(int32_t), exec_context->memory_pool()));
-  auto indices_data = indices_buf->mutable_data_as<int32_t>();
-  for (int32_t index = 0; index < static_cast<int32_t>(selection_vectors.size());
-       ++index) {
-    DCHECK_NE(selection_vectors[index], nullptr);
-    DCHECK_GT(selection_vectors[index]->length(), 0);
-    auto row_ids = selection_vectors[index]->indices();
-    for (int64_t i = 0; i < selection_vectors[index]->length(); ++i) {
-      const int32_t row_id = row_ids[i];
-      DCHECK_EQ(bit_util::GetBit(validity_data, row_id), false);
-      bit_util::SetBitTo(validity_data, row_id, true);
-      indices_data[row_id] = index;
-    }
-  }
-
-  return ArrayData::Make(int32(), length,
-                         {std::move(validity_buf), std::move(indices_buf)});
 }
 
 }  // namespace arrow::compute::internal

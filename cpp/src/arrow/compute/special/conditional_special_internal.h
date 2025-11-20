@@ -389,14 +389,16 @@ struct ARROW_COMPUTE_EXPORT ConditionalExec {
   }
 
   /// @brief Multiplex all branch body results into the final result based on their
-  /// corresponding selection vectors.
+  /// corresponding selection vectors. For example, given three branch body results and
+  /// selection vectors:
+  ///   [a, -, -, d, -, -, g], [0, 3, 6]
+  ///   [-, b, -, -, e, -, -], [1, 4]
+  ///   [-, -, c, -, -, f, -], [2, 5]
+  /// Note each branch result has the same length as the input batch, the non-selected
+  /// rows are indicated by '-'. The multiplexed result will be:
+  ///   [a, b, c, d, e, f, g]
   Result<Datum> MultiplexResults(const ExecBatch& input, const BranchResults& results,
                                  ExecContext* exec_context) const;
-
-  /// @brief A helper function to choose indices from multiple selection vectors.
-  Result<Datum> ChooseIndices(
-      const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
-      int64_t length, ExecContext* exec_context) const;
 
  private:
   const std::vector<Branch>& branches;
