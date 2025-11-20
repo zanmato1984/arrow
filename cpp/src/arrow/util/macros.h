@@ -22,6 +22,7 @@
 #define ARROW_EXPAND(x) x
 #define ARROW_STRINGIFY(x) #x
 #define ARROW_CONCAT(x, y) x##y
+#define ARROW_ALLOW_COMMA(...) __VA_ARGS__
 
 // From Google gutil
 #ifndef ARROW_DISALLOW_COPY_AND_ASSIGN

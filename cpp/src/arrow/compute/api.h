@@ -39,7 +39,13 @@
 #include "arrow/compute/registry.h"          // IWYU pragma: export
 #include "arrow/datum.h"                     // IWYU pragma: export
 
+/// \defgroup expressions Expressions of computation
+/// @{
+/// @}
+
 #include "arrow/compute/expression.h"  // IWYU pragma: export
+
+#include "arrow/compute/api_special.h"  // IWYU pragma: export
 
 /// \defgroup execnode-row Utilities for working with data in a row-major format
 /// @{
