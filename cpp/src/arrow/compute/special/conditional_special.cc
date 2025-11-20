@@ -271,11 +271,13 @@ Result<Datum> ConditionalExec::Execute(const ExecBatch& input,
   ARROW_ASSIGN_OR_RAISE(auto branch_mask, InitBranchMask(input, exec_context));
   for (const auto& branch : branches) {
     if (branch_mask->empty()) {
+      // No more rows to evaluate.
       break;
     }
     ARROW_ASSIGN_OR_RAISE(auto body_mask,
                           EvaluateCond(branch_mask, branch.cond, input, exec_context));
     if (body_mask->empty()) {
+      // No rows taken for this branch.
       ARROW_ASSIGN_OR_RAISE(branch_mask, body_mask->NextBranchMask());
       continue;
     }
