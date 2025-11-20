@@ -35,8 +35,38 @@ namespace arrow::compute::internal {
 /// - When a branch mask is applied to a condition expression, it produces a body mask;
 /// - A body mask represents the set of rows (in an ExecBatch) to be evaluated for the
 ///   branch body.
-/// - A body mask also produces the next branch mask, representing the set of rows
-///   remaining to be evaluated for the next branch in the chain.
+/// - A body mask also preserves information from its originating branch mask and derives
+///   the next branch mask, representing the set of rows remaining to be evaluated for the
+///   next branch in the chain.
+///
+/// For example, consider the following conditional special form:
+///   if_else_sp(/*cond=*/eq(a, 'x'), /*if_true=*/foo(b), /*if_false=*/bar(c))
+/// is being evaluated on an ExecBatch:
+///   [a: ['x', 'y', 'x', 'z'], b: ['b0', 'b1', 'b2', 'b3'], c: ['c0', 'c1', 'c2', 'c3']]
+/// We'll have an initial branch mask that passes all rows:
+///   BranchMask0: [0, 1, 2, 3] // all rows in the batch
+/// (In practice we can have a specialized branch mask implementation that doesn't
+/// necessarily store all the row indices when all rows are to be evaluated.)
+/// Then BranchMask0 is applied to the condition eq(a, 'x'), producing the condition
+/// result:
+///   [true, false, true, false]
+/// Which is then used by BranchMask0 to make a body mask:
+///   BodyMask0: [0, 2] // rows with true condition out of [0, 1, 2, 3]
+/// It is then applied to the first branch body foo(b), producing the result for this
+/// branch:
+///   [foo('b0'), foo('b2')] // at rows [0, 2]
+/// After that, BodyMask0 produces the next branch mask:
+///   BranchMask1: [1, 3] // [0, 1, 2, 3] - [0, 2]
+/// Which is then applied to the next branch condition, which is an implicit true literal
+/// in this case, producing the condition result:
+///   [true, true] // at rows [1, 3]
+/// Which is then used by BranchMask1 to make a body mask:
+///   BodyMask1: [1, 3] // rows with true condition out of [1, 3]
+/// It is then applied to the second branch body bar(c), producing the result for this
+/// branch:
+///   [bar('c1'), bar('c3')] // at rows [1, 3]
+/// Finally, the results from all branches are combined to produce the final result:
+///   [foo('b0'), bar('c1'), foo('b2'), bar('c3')]
 
 struct ARROW_COMPUTE_EXPORT BodyMask;
 
@@ -279,6 +309,15 @@ struct ARROW_COMPUTE_EXPORT Branch {
   Expression body;
 };
 
+/// @brief A simple structure that assembles the process of executing a sequence of
+/// branches, including:
+/// - Iterating all branches by:
+///   - Evaluating each branch condition under the branch mask;
+///   - Producing the body mask from the condition result;
+///   - Evaluating the branch body under the body mask;
+///   - Producing the next branch mask from the body mask.
+/// - Collecting all branch body results and selection vectors, and multiplexing them into
+///   the final result.
 struct ARROW_COMPUTE_EXPORT ConditionalExec {
   ConditionalExec(const std::vector<Branch>& branches, const TypeHolder& result_type)
       : branches(branches), result_type(result_type) {}
@@ -286,6 +325,8 @@ struct ARROW_COMPUTE_EXPORT ConditionalExec {
   Result<Datum> Execute(const ExecBatch& input, ExecContext* exec_context) const&&;
 
  private:
+  /// @brief A simple helper structure to collect branch body results and their
+  /// corresponding selection vectors.
   struct BranchResults {
     void Reserve(int64_t size) {
       body_results_.reserve(size);
@@ -312,6 +353,13 @@ struct ARROW_COMPUTE_EXPORT ConditionalExec {
     std::vector<std::shared_ptr<SelectionVector>> selection_vectors_;
   };
 
+  /// @brief Get the initial branch mask based on the existence of the selection vector in
+  /// the given ExecBatch.
+  ///
+  /// If a selection vector exists in the input batch, it implies that we are under a
+  /// masked execution, e.g., within another outer conditional special form. In this case,
+  /// the initial selection vector should be respected by all the branches, and thus
+  /// treated as the initial branch mask and propagated to the rest.
   Result<std::shared_ptr<const BranchMask>> InitBranchMask(
       const ExecBatch& input, ExecContext* exec_context) const {
     if (input.selection_vector) {
@@ -340,14 +388,17 @@ struct ARROW_COMPUTE_EXPORT ConditionalExec {
     return ExecuteScalarExpression(body, input_with_selection, exec_context);
   }
 
+  /// @brief Multiplex all branch body results into the final result based on their
+  /// corresponding selection vectors.
   Result<Datum> MultiplexResults(const ExecBatch& input, const BranchResults& results,
                                  ExecContext* exec_context) const;
 
+  /// @brief A helper function to choose indices from multiple selection vectors.
   Result<Datum> ChooseIndices(
       const std::vector<std::shared_ptr<SelectionVector>>& selection_vectors,
       int64_t length, ExecContext* exec_context) const;
 
- protected:
+ private:
   const std::vector<Branch>& branches;
   const TypeHolder& result_type;
 };

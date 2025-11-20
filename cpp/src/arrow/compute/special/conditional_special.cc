@@ -295,19 +295,30 @@ Result<Datum> ConditionalExec::MultiplexResults(const ExecBatch& input,
                                                 const BranchResults& results,
                                                 ExecContext* exec_context) const {
   if (results.empty()) {
+    // No branches were taken, return an array of nulls.
     return MakeArrayOfNull(result_type.GetSharedPtr(), input.length,
                            exec_context->memory_pool());
   }
 
   if (results.size() == 1) {
+    // Single branch taken.
     const auto& result = results.body_results()[0];
     if (results.selection_vectors()[0] == nullptr) {
+      // This branch has no selection vector, then this branch covers all rows, regardless
+      // of the existence of outer selection vector, return as is.
       return result;
     }
     if (input.selection_vector == nullptr) {
+      // This branch has a selection vector but there is no outer selection vector, then
+      // this branch must not be covering all rows - other branches might just have all
+      // failed. And we need to go through the choose path to fill in nulls for the rows
+      // not covered.
       DCHECK_NE(results.selection_vectors()[0]->length(), input.length);
     } else {
       if (results.selection_vectors()[0]->length() == input.selection_vector->length()) {
+        // This branch has a selection vector and there is outer selection vector, and
+        // their lengths equal, then this branch must be covering all rows under the outer
+        // selection vector, return as is.
         return result;
       }
     }
