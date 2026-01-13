@@ -337,10 +337,11 @@ class ARROW_ACERO_EXPORT AggregateNodeOptions : public ExecNodeOptions {
   /// \brief create an instance from values
   explicit AggregateNodeOptions(std::vector<Aggregate> aggregates,
                                 std::vector<FieldRef> keys = {},
-                                std::vector<FieldRef> segment_keys = {})
+                                std::vector<FieldRef> segment_keys = {}, bool fast = true)
       : aggregates(std::move(aggregates)),
         keys(std::move(keys)),
-        segment_keys(std::move(segment_keys)) {}
+        segment_keys(std::move(segment_keys)),
+        fast(fast) {}
 
   // aggregations which will be applied to the targeted fields
   std::vector<Aggregate> aggregates;
@@ -348,6 +349,7 @@ class ARROW_ACERO_EXPORT AggregateNodeOptions : public ExecNodeOptions {
   std::vector<FieldRef> keys;
   // keys by which aggregations will be segmented (optional)
   std::vector<FieldRef> segment_keys;
+  bool fast;
 };
 
 /// \brief a default value at which backpressure will be applied

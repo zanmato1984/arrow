@@ -186,6 +186,7 @@ Result<ExecNode*> GroupByNode::Make(ExecPlan* plan, std::vector<ExecNode*> input
   const auto& keys = aggregate_options.keys;
   const auto& segment_keys = aggregate_options.segment_keys;
   auto aggs = aggregate_options.aggregates;
+  bool fast = aggregate_options.fast;
   bool is_cpu_parallel = plan->query_context()->executor()->GetCapacity() > 1;
 
   const auto& input_schema = input->output_schema();
@@ -198,7 +199,7 @@ Result<ExecNode*> GroupByNode::Make(ExecPlan* plan, std::vector<ExecNode*> input
       input, std::move(args.output_schema), std::move(args.grouping_key_field_ids),
       std::move(args.segment_key_field_ids), std::move(args.segmenter),
       std::move(args.kernel_intypes), std::move(args.target_fieldsets),
-      std::move(args.aggregates), std::move(args.kernels));
+      std::move(args.aggregates), std::move(args.kernels), fast);
 }
 
 Status GroupByNode::ResetKernelStates() {
@@ -430,8 +431,9 @@ Status GroupByNode::InitLocalStateIfNeeded(ThreadLocalState* state) {
   }
 
   // Construct grouper
-  ARROW_ASSIGN_OR_RAISE(state->grouper,
-                        Grouper::Make(key_types, plan_->query_context()->exec_context()));
+  ARROW_ASSIGN_OR_RAISE(
+      state->grouper,
+      Grouper::Make(key_types, plan_->query_context()->exec_context(), fast_));
 
   // Build vector of aggregate source field data types
   std::vector<std::vector<TypeHolder>> agg_src_types(agg_kernels_.size());
