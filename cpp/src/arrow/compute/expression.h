@@ -60,6 +60,20 @@ class ARROW_EXPORT Expression {
     void ComputeHash();
   };
 
+  struct Special {
+    std::shared_ptr<SpecialForm> special_form;
+    std::vector<Expression> arguments;
+    std::shared_ptr<FunctionOptions> options;
+    // Cached hash value
+    size_t hash;
+
+    // post-Bind properties:
+    std::shared_ptr<SpecialExecutor> special_executor;
+    TypeHolder type;
+
+    void ComputeHash();
+  };
+
   std::string ToString() const;
   bool Equals(const Expression& other) const;
   size_t hash() const;
@@ -112,6 +126,8 @@ class ARROW_EXPORT Expression {
   const Datum* literal() const;
   /// Access a FieldRef or return nullptr if this expression is not a field_ref
   const FieldRef* field_ref() const;
+  /// Access a FieldRef or return nullptr if this expression is not a field_ref
+  const Special* special() const;
 
   /// The type to which this expression will evaluate
   const DataType* type() const;
@@ -131,11 +147,12 @@ class ARROW_EXPORT Expression {
   explicit Expression(Call call);
   explicit Expression(Datum literal);
   explicit Expression(Parameter parameter);
+  explicit Expression(Special special);
 
   static bool Identical(const Expression& l, const Expression& r);
 
  private:
-  using Impl = std::variant<Datum, Parameter, Call>;
+  using Impl = std::variant<Datum, Parameter, Call, Special>;
   std::shared_ptr<Impl> impl_;
 };
 
