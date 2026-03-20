@@ -1345,6 +1345,20 @@ Result<Datum> Month(const Datum& values, ExecContext* ctx = NULLPTR);
 ARROW_EXPORT
 Result<Datum> Day(const Datum& values, ExecContext* ctx = NULLPTR);
 
+/// \brief MakeDate composes date32 values from year, month and day components.
+///
+/// \param[in] year input year component
+/// \param[in] month input month component
+/// \param[in] day input day component
+/// \param[in] ctx the function execution context, optional
+/// \return the resulting datum
+///
+/// \since 22.0.0
+/// \note API not yet finalized
+ARROW_EXPORT
+Result<Datum> MakeDate(const Datum& year, const Datum& month, const Datum& day,
+                       ExecContext* ctx = NULLPTR);
+
 /// \brief YearMonthDay returns a struct containing the Year, Month and Day value for
 /// each element of `values`.
 ///

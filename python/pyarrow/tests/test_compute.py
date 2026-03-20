@@ -2548,6 +2548,26 @@ def _check_datetime_components(timestamps, timezone=None):
     assert pc.week(tsa, options=week_options).equals(pa.array(iso_week))
 
 
+def test_make_date():
+    year = pa.array([1970, 2000, 2019, None], type=pa.int32())
+    month = pa.array([1, 2, 12, 1], type=pa.int8())
+    day = pa.array([1, 29, 31, 1], type=pa.uint8())
+    expected = pa.array([datetime.date(1970, 1, 1),
+                         datetime.date(2000, 2, 29),
+                         datetime.date(2019, 12, 31),
+                         None], type=pa.date32())
+    assert pc.make_date(year, month, day).equals(expected)
+
+    broadcasted = pc.make_date(2024, pa.array([1, 2, None], type=pa.int16()), 1)
+    expected_broadcasted = pa.array([datetime.date(2024, 1, 1),
+                                     datetime.date(2024, 2, 1),
+                                     None], type=pa.date32())
+    assert broadcasted.equals(expected_broadcasted)
+
+    with pytest.raises(pa.ArrowInvalid, match="Invalid date components"):
+        pc.make_date([2021], [2], [29])
+
+
 @pytest.mark.pandas
 def test_extract_datetime_components(request):
     timestamps = ["1970-01-01T00:00:59.123456789",

@@ -15,8 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <array>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <sstream>
 
 #include "arrow/builder.h"
@@ -24,6 +26,8 @@
 #include "arrow/compute/kernels/common_internal.h"
 #include "arrow/compute/kernels/temporal_internal.h"
 #include "arrow/compute/registry_internal.h"
+#include "arrow/scalar.h"
+#include "arrow/util/bit_util.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging_internal.h"
 #include "arrow/util/time.h"
@@ -48,8 +52,10 @@ using chrono::jan;
 using chrono::last;
 using chrono::local_days;
 using chrono::local_time;
+using chrono::month;
 using chrono::mon;
 using chrono::sun;
+using chrono::day;
 using chrono::sys_days;
 using chrono::sys_time;
 using chrono::thu;
@@ -57,6 +63,7 @@ using chrono::trunc;
 using chrono::wed;
 using chrono::weekday;
 using chrono::weeks;
+using chrono::year;
 using chrono::year_month_day;
 using chrono::year_month_weekday;
 using chrono::years;
@@ -311,6 +318,73 @@ using MicrosecondsBetween = UnitsBetween<std::chrono::microseconds, Duration, Lo
 template <typename Duration, typename Localizer>
 using NanosecondsBetween = UnitsBetween<std::chrono::nanoseconds, Duration, Localizer>;
 
+bool IsValueValid(const ArraySpan& array, int64_t i) {
+  return !array.MayHaveNulls() ||
+         bit_util::GetBit(array.buffers[0].data, array.offset + i);
+}
+
+Result<Date32Type::c_type> ComposeDate32(int64_t year_component, int64_t month_component,
+                                         int64_t day_component) {
+  const int64_t year_min = static_cast<int>(year::min());
+  const int64_t year_max = static_cast<int>(year::max());
+  if (year_component < year_min || year_component > year_max) {
+    return Status::Invalid("Year component out of range for date32: ", year_component);
+  }
+
+  const auto ymd = year{static_cast<int>(year_component)} /
+                   month{static_cast<unsigned>(month_component)} /
+                   day{static_cast<unsigned>(day_component)};
+  if (!ymd.ok()) {
+    return Status::Invalid("Invalid date components: year=", year_component,
+                           ", month=", month_component, ", day=", day_component);
+  }
+
+  const auto days_since_epoch = sys_days{ymd}.time_since_epoch().count();
+  if (days_since_epoch < std::numeric_limits<Date32Type::c_type>::min() ||
+      days_since_epoch > std::numeric_limits<Date32Type::c_type>::max()) {
+    return Status::Invalid("Composed date is out of range for date32: year=",
+                           year_component, ", month=", month_component,
+                           ", day=", day_component);
+  }
+  return static_cast<Date32Type::c_type>(days_since_epoch);
+}
+
+struct MakeDate {
+  static Status Exec(KernelContext*, const ExecSpan& batch, ExecResult* out) {
+    std::array<const ArraySpan*, 3> arrays = {nullptr, nullptr, nullptr};
+    std::array<const int64_t*, 3> data = {nullptr, nullptr, nullptr};
+    std::array<int64_t, 3> scalars = {0, 0, 0};
+
+    for (int i = 0; i < batch.num_values(); ++i) {
+      if (batch[i].is_array()) {
+        arrays[i] = &batch[i].array;
+        data[i] = batch[i].array.GetValues<int64_t>(1);
+      } else {
+        const auto& scalar = *batch[i].scalar;
+        if (!scalar.is_valid) {
+          return Status::OK();
+        }
+        scalars[i] = checked_cast<const Int64Scalar&>(scalar).value;
+      }
+    }
+
+    auto* out_values = out->array_span_mutable()->GetValues<Date32Type::c_type>(1);
+    for (int64_t i = 0; i < batch.length; ++i) {
+      if ((arrays[0] && !IsValueValid(*arrays[0], i)) ||
+          (arrays[1] && !IsValueValid(*arrays[1], i)) ||
+          (arrays[2] && !IsValueValid(*arrays[2], i))) {
+        continue;
+      }
+
+      const int64_t years = arrays[0] ? data[0][i] : scalars[0];
+      const int64_t months = arrays[1] ? data[1][i] : scalars[1];
+      const int64_t days = arrays[2] ? data[2][i] : scalars[2];
+      ARROW_ASSIGN_OR_RAISE(out_values[i], ComposeDate32(years, months, days));
+    }
+    return Status::OK();
+  }
+};
+
 // ----------------------------------------------------------------------
 // Registration helpers
 
@@ -453,9 +527,24 @@ const FunctionDoc nanoseconds_between_doc{
      "Null values emit null."),
     {"start", "end"}};
 
+const FunctionDoc make_date_doc{
+    "Compose date32 values from year, month, and day components",
+    ("For each set of input components, compose a date32 value.\n"
+     "Null values emit null.\n"
+     "An error is returned if any component set does not form a valid date."),
+    {"year", "month", "day"}};
+
 }  // namespace
 
 void RegisterScalarTemporalBinary(FunctionRegistry* registry) {
+  // Temporal composition functions
+  auto make_date =
+      std::make_shared<ScalarFunction>("make_date", Arity::Ternary(), make_date_doc);
+  ScalarKernel make_date_kernel({int64(), int64(), int64()}, date32(), MakeDate::Exec);
+  make_date_kernel.null_handling = NullHandling::INTERSECTION;
+  DCHECK_OK(make_date->AddKernel(std::move(make_date_kernel)));
+  DCHECK_OK(registry->AddFunction(std::move(make_date)));
+
   // Temporal difference functions
   auto years_between =
       BinaryTemporalFactory<YearsBetween, TemporalBinary, Int64Type>::Make<
