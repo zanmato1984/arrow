@@ -651,15 +651,23 @@ bool ReadBytesZeroCopy(const std::shared_ptr<Buffer>& source_data,
   if (!input->ReadVarint32(&length)) {
     return false;
   }
-  auto buf =
-      SliceBuffer(source_data, input->CurrentPosition(), static_cast<int64_t>(length));
-  *out = buf;
-  return input->Skip(static_cast<int>(length));
+  auto offset = static_cast<int64_t>(input->CurrentPosition());
+  auto maybe_buf = SliceBufferSafe(source_data, offset, static_cast<int64_t>(length));
+  if (!maybe_buf.ok()) {
+    return false;
+  }
+  if (!input->Skip(static_cast<int>(length))) {
+    return false;
+  }
+  *out = std::move(maybe_buf).MoveValueUnsafe();
+  return true;
 }
 
 }  // namespace
 
 arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload& msg) {
+  ARROW_RETURN_NOT_OK(msg.Validate());
+
   // Size of the IPC body (protobuf: data_body)
   size_t body_size = 0;
   // Size of the Protobuf "header" (everything except for the body)
@@ -689,7 +697,16 @@ arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload
   bool has_body = has_ipc ? ipc::Message::HasBody(ipc_msg.type) : false;
 
   if (has_ipc) {
-    DCHECK(has_body || ipc_msg.body_length == 0);
+    if (!ipc_msg.metadata) {
+      return Status::Invalid("Cannot serialize FlightPayload: missing IPC metadata");
+    }
+    if (ipc_msg.body_length < 0) {
+      return Status::Invalid("Cannot serialize FlightPayload: negative IPC body_length");
+    }
+    if (!has_body && ipc_msg.body_length != 0) {
+      return Status::Invalid("Cannot serialize FlightPayload: non-zero body_length for IPC ",
+                             "message type without body");
+    }
     ARROW_RETURN_NOT_OK(
         IpcMessageHeaderSize(ipc_msg, has_body, &header_size, &metadata_size));
     body_size = static_cast<size_t>(ipc_msg.body_length);
@@ -738,6 +755,8 @@ arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload
     }
 
     if (has_body) {
+      int64_t computed_body_size = 0;
+
       // Write body tag
       WireFormatLite::WriteTag(pb::FlightData::kDataBodyFieldNumber,
                                WireFormatLite::WIRETYPE_LENGTH_DELIMITED, &header_stream);
@@ -756,6 +775,13 @@ arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload
         if (remainder) {
           buffers.push_back(std::make_shared<arrow::Buffer>(kPaddingBytes, remainder));
         }
+        computed_body_size += bit_util::RoundUpToMultipleOf8(buffer->size());
+      }
+
+      if (computed_body_size != ipc_msg.body_length) {
+        return Status::Invalid("Cannot serialize FlightPayload: body_length (",
+                               ipc_msg.body_length, ") doesn't match serialized body size (",
+                               computed_body_size, ")");
       }
     }
 
@@ -773,6 +799,9 @@ arrow::Result<arrow::flight::internal::FlightData> DeserializeFlightData(
     const std::shared_ptr<arrow::Buffer>& buffer) {
   if (!buffer) {
     return Status::Invalid("No payload");
+  }
+  if (buffer->size() > kInt32Max) {
+    return Status::Invalid("Cannot deserialize FlightData over 2GiB");
   }
 
   arrow::flight::internal::FlightData out;
@@ -795,11 +824,11 @@ arrow::Result<arrow::flight::internal::FlightData> DeserializeFlightData(
         }
         // Can't use ParseFromCodedStream as this reads the entire
         // rest of the stream into the descriptor command field.
-        std::string buffer;
-        if (!pb_stream.ReadString(&buffer, length)) {
+        std::string descriptor_data;
+        if (!pb_stream.ReadString(&descriptor_data, length)) {
           return Status::Invalid("Unable to read FlightDescriptor from protobuf");
         }
-        if (!pb_descriptor.ParseFromString(buffer)) {
+        if (!pb_descriptor.ParseFromString(descriptor_data)) {
           return Status::Invalid("Unable to parse FlightDescriptor");
         }
         arrow::flight::FlightDescriptor descriptor;

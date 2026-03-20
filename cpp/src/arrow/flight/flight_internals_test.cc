@@ -743,11 +743,11 @@ TEST(FlightSerialization, RoundtripPayloadWithBody) {
   auto schema = arrow::schema({arrow::field("a", arrow::int32())});
   auto arr = ArrayFromJSON(arrow::int32(), "[1, 2, 3]");
   auto batch = RecordBatch::Make(schema, 3, {arr});
-  auto reader = RecordBatchReader::Make({batch}).ValueOrDie();
+  ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({batch}));
   RecordBatchStream stream(std::move(reader));
 
   // Get a FlightPayload from the stream
-  ASSERT_OK_AND_ASSIGN(auto schema_payload, stream.GetSchemaPayload());
+  ASSERT_OK(stream.GetSchemaPayload().status());
   ASSERT_OK_AND_ASSIGN(auto flight_payload, stream.Next());
 
   // Add app_metadata to the flight payload
@@ -801,6 +801,40 @@ TEST(FlightSerialization, RoundtripMetadataOnly) {
   ASSERT_EQ(data.metadata, nullptr);
   ASSERT_NE(data.app_metadata, nullptr);
   ASSERT_EQ(data.app_metadata->ToString(), "metadata-only-message");
+}
+
+TEST(FlightSerialization, RejectsMissingIpcMetadata) {
+  auto schema = arrow::schema({arrow::field("a", arrow::int32())});
+  auto arr = ArrayFromJSON(arrow::int32(), "[1, 2, 3]");
+  auto batch = RecordBatch::Make(schema, 3, {arr});
+  ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({batch}));
+  RecordBatchStream stream(std::move(reader));
+
+  ASSERT_OK(stream.GetSchemaPayload().status());
+  ASSERT_OK_AND_ASSIGN(auto flight_payload, stream.Next());
+  ASSERT_NE(flight_payload.ipc_message.metadata, nullptr);
+
+  flight_payload.ipc_message.metadata = nullptr;
+  EXPECT_RAISES_WITH_MESSAGE_THAT(
+      Invalid, ::testing::HasSubstr("missing IPC metadata"),
+      internal::SerializePayloadToBuffers(flight_payload));
+}
+
+TEST(FlightSerialization, RejectsMismatchedBodyLength) {
+  auto schema = arrow::schema({arrow::field("a", arrow::int32())});
+  auto arr = ArrayFromJSON(arrow::int32(), "[1, 2, 3]");
+  auto batch = RecordBatch::Make(schema, 3, {arr});
+  ASSERT_OK_AND_ASSIGN(auto reader, RecordBatchReader::Make({batch}));
+  RecordBatchStream stream(std::move(reader));
+
+  ASSERT_OK(stream.GetSchemaPayload().status());
+  ASSERT_OK_AND_ASSIGN(auto flight_payload, stream.Next());
+  ASSERT_GT(flight_payload.ipc_message.body_length, 0);
+
+  flight_payload.ipc_message.body_length += 8;
+  EXPECT_RAISES_WITH_MESSAGE_THAT(
+      Invalid, ::testing::HasSubstr("doesn't match serialized body size"),
+      internal::SerializePayloadToBuffers(flight_payload));
 }
 
 // ----------------------------------------------------------------------
