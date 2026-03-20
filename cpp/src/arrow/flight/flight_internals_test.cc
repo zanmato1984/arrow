@@ -815,9 +815,8 @@ TEST(FlightSerialization, RejectsMissingIpcMetadata) {
   ASSERT_NE(flight_payload.ipc_message.metadata, nullptr);
 
   flight_payload.ipc_message.metadata = nullptr;
-  EXPECT_RAISES_WITH_MESSAGE_THAT(
-      Invalid, ::testing::HasSubstr("missing IPC metadata"),
-      internal::SerializePayloadToBuffers(flight_payload));
+  EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid, ::testing::HasSubstr("missing IPC metadata"),
+                                  internal::SerializePayloadToBuffers(flight_payload));
 }
 
 TEST(FlightSerialization, RejectsMismatchedBodyLength) {

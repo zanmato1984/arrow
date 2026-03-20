@@ -704,8 +704,9 @@ arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload
       return Status::Invalid("Cannot serialize FlightPayload: negative IPC body_length");
     }
     if (!has_body && ipc_msg.body_length != 0) {
-      return Status::Invalid("Cannot serialize FlightPayload: non-zero body_length for IPC ",
-                             "message type without body");
+      return Status::Invalid(
+          "Cannot serialize FlightPayload: non-zero body_length for IPC ",
+          "message type without body");
     }
     ARROW_RETURN_NOT_OK(
         IpcMessageHeaderSize(ipc_msg, has_body, &header_size, &metadata_size));
@@ -779,9 +780,9 @@ arrow::Result<arrow::BufferVector> SerializePayloadToBuffers(const FlightPayload
       }
 
       if (computed_body_size != ipc_msg.body_length) {
-        return Status::Invalid("Cannot serialize FlightPayload: body_length (",
-                               ipc_msg.body_length, ") doesn't match serialized body size (",
-                               computed_body_size, ")");
+        return Status::Invalid(
+            "Cannot serialize FlightPayload: body_length (", ipc_msg.body_length,
+            ") doesn't match serialized body size (", computed_body_size, ")");
       }
     }
 
