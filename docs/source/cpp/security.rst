@@ -32,10 +32,10 @@ Parameter mismatch
 ==================
 
 Many Arrow C++ APIs report errors using the :class:`arrow::Status` and
-:class:`arrow::Result`. Such APIs can be assumed to detect common errors in the
-provided arguments. However, there are also often implicit pre-conditions that
-have to be upheld; these can usually be deduced from the semantics of an API
-as described by its documentation.
+:class:`arrow::Result` types. Such APIs can be assumed to detect common errors
+in the provided arguments. However, there are also often implicit
+pre-conditions that have to be upheld; these can usually be deduced from the
+semantics of an API as described by its documentation.
 
 .. seealso:: Arrow C++ :ref:`cpp-conventions`
 
@@ -56,7 +56,7 @@ wrong kind of data as input may lead to undefined behavior.
 .. _cpp-valid-data:
 
 Data validity
--------------
+=============
 
 Arrow data, for example passed as :class:`arrow::Array` or :class:`arrow::Table`,
 is always assumed to be :ref:`valid <format-invalid-data>`. If your program may
@@ -64,7 +64,7 @@ encounter invalid data, it must explicitly check its validity by calling one of
 the following validation APIs.
 
 Structural validity
-'''''''''''''''''''
+-------------------
 
 The ``Validate`` methods exposed on various Arrow C++ classes perform relatively
 inexpensive validity checks that the data is structurally valid. This implies
@@ -82,7 +82,7 @@ potential bugs in your own code. However, they are not enough to detect all clas
 invalid data, and they won't protect against all kinds of malicious payloads.
 
 Full validity
-'''''''''''''
+-------------
 
 The ``ValidateFull`` methods exposed by the same classes perform the same validity
 checks as the ``Validate`` methods, but they also check the data extensively for
@@ -100,7 +100,7 @@ for the advertised precision.
 * :func:`arrow::Scalar::ValidateFull`
 
 "Safe" and "unsafe" APIs
-------------------------
+========================
 
 Some APIs are exposed in both "safe" and "unsafe" variants. The naming convention
 for such pairs varies: sometimes the former has a ``Safe`` suffix (for example

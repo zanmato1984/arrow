@@ -121,8 +121,9 @@ Non-owning data class
 
 .. warning::
    As this class doesn't keep alive the objects and data it points to, their
-   lifetime must be ensured separately. We recommend using :class:`arrow::ArrayData`
-   instead.
+   lifetime must be ensured separately. Use :class:`arrow::ArraySpan` only
+   when you can guarantee that lifetime and need a lightweight non-owning
+   view; otherwise, prefer :class:`arrow::ArrayData`.
 
 .. doxygenclass:: arrow::ArraySpan
    :members:
