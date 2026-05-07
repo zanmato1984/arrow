@@ -174,31 +174,40 @@ Status PropagateNulls(KernelContext* ctx, const ExecSpan& batch, ArrayData* out)
 ARROW_EXPORT
 void PropagateNullsSpans(const ExecSpan& batch, ArraySpan* out);
 
+// Lambda helper & CTAD
+template <class... Ts>
+struct Overloaded : Ts... {
+  using Ts::operator()...;
+};
+template <class... Ts>
+Overloaded(Ts...)->Overloaded<Ts...>;
+
 template <typename OnSelectionFn>
 typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, Status>::type
 VisitSelectionSpanInline(const SelectionSpan& selection, OnSelectionFn&& on_selection) {
   return std::visit(
-      [&](const auto& span) -> Status {
-        using SpanType = std::decay_t<decltype(span)>;
-        if constexpr (std::is_same_v<SpanType, ContiguousSpan>) {
-          for (int64_t i = 0; i < span.length; ++i) {
-            RETURN_NOT_OK(on_selection(span.start_offset + i));
-          }
-          return Status::OK();
-        } else if constexpr (std::is_same_v<SpanType, FilteredSpan>) {
-          DCHECK_NE(span.bitmap, nullptr);
-          for (int64_t i = 0; i < span.length; ++i) {
-            if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {
+      Overloaded{
+          [&](const ContiguousSpan& span) -> Status {
+            for (int64_t i = 0; i < span.length; ++i) {
               RETURN_NOT_OK(on_selection(span.start_offset + i));
             }
-          }
-          return Status::OK();
-        } else {
-          for (int64_t i = 0; i < span.length(); ++i) {
-            RETURN_NOT_OK(on_selection(span[i]));
-          }
-          return Status::OK();
-        }
+            return Status::OK();
+          },
+          [&](const FilteredSpan& span) -> Status {
+            DCHECK_NE(span.bitmap, nullptr);
+            for (int64_t i = 0; i < span.length; ++i) {
+              if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {
+                RETURN_NOT_OK(on_selection(span.start_offset + i));
+              }
+            }
+            return Status::OK();
+          },
+          [&](const DiscreteSpan& span) -> Status {
+            for (int64_t i = 0; i < span.length; ++i) {
+              RETURN_NOT_OK(on_selection(span[i]));
+            }
+            return Status::OK();
+          },
       },
       selection);
 }
@@ -207,24 +216,25 @@ template <typename OnSelectionFn>
 typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, void>::type
 VisitSelectionSpanInline(const SelectionSpan& selection, OnSelectionFn&& on_selection) {
   std::visit(
-      [&](const auto& span) {
-        using SpanType = std::decay_t<decltype(span)>;
-        if constexpr (std::is_same_v<SpanType, ContiguousSpan>) {
-          for (int64_t i = 0; i < span.length; ++i) {
-            on_selection(span.start_offset + i);
-          }
-        } else if constexpr (std::is_same_v<SpanType, FilteredSpan>) {
-          DCHECK_NE(span.bitmap, nullptr);
-          for (int64_t i = 0; i < span.length; ++i) {
-            if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {
+      Overloaded{
+          [&](const ContiguousSpan& span) {
+            for (int64_t i = 0; i < span.length; ++i) {
               on_selection(span.start_offset + i);
             }
-          }
-        } else {
-          for (int64_t i = 0; i < span.length(); ++i) {
-            on_selection(span[i]);
-          }
-        }
+          },
+          [&](const FilteredSpan& span) {
+            DCHECK_NE(span.bitmap, nullptr);
+            for (int64_t i = 0; i < span.length; ++i) {
+              if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {
+                on_selection(span.start_offset + i);
+              }
+            }
+          },
+          [&](const DiscreteSpan& span) {
+            for (int64_t i = 0; i < span.length; ++i) {
+              on_selection(span[i]);
+            }
+          },
       },
       selection);
 }

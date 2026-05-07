@@ -186,22 +186,21 @@ TEST(SelectionVector, Validate) {
   }
 }
 
-TEST(SelectionVectorSpan, Basics) {
+TEST(DiscreteSpan, Basics) {
   auto indices = ArrayFromJSON(uint64(), "[0, 3, 7]");
-  SelectionVectorSpan sel_span(indices->data()->GetValues<uint64_t>(1),
-                               indices->length() - 1,
-                               /*offset=*/1, /*index_back_shift=*/1);
+  const uint64_t* idx = indices->data()->GetValues<uint64_t>(1);
+  DiscreteSpan sel_span{idx + 1, /*length=*/2, /*index_back_shift=*/1};
   ASSERT_EQ(sel_span[0], 2);
   ASSERT_EQ(sel_span[1], 6);
 
-  sel_span.SetSlice(/*offset=*/1, /*length=*/2, /*index_back_shift=*/0);
-  ASSERT_EQ(sel_span[0], 3);
-  ASSERT_EQ(sel_span[1], 7);
+  DiscreteSpan sel_span2{idx + 1, /*length=*/2, /*index_back_shift=*/0};
+  ASSERT_EQ(sel_span2[0], 3);
+  ASSERT_EQ(sel_span2[1], 7);
 
-  sel_span.SetSlice(/*offset=*/0, /*length=*/3);
-  ASSERT_EQ(sel_span[0], 0);
-  ASSERT_EQ(sel_span[1], 3);
-  ASSERT_EQ(sel_span[2], 7);
+  DiscreteSpan sel_span3{idx, /*length=*/3, /*index_back_shift=*/0};
+  ASSERT_EQ(sel_span3[0], 0);
+  ASSERT_EQ(sel_span3[1], 3);
+  ASSERT_EQ(sel_span3[2], 7);
 }
 
 void AssertValidityZeroExtraBits(const uint8_t* data, int64_t length, int64_t offset) {
@@ -803,13 +802,12 @@ class TestExecSpanIterator : public TestComputeInternals {
       ASSERT_EQ(selection_position, iterator_.selection_position());
       ASSERT_TRUE(iterator_.Next(&batch, selection_ptr));
       ASSERT_EQ(ex_batch_sizes[i], batch.length);
-      const DiscreteSpan* discrete = nullptr;
-      int64_t selection_length = 0;
+      std::vector<int64_t> visited_indices;
       if (selection_ptr) {
-        discrete = std::get_if<DiscreteSpan>(&selection);
-        ASSERT_NE(discrete, nullptr);
-        selection_length = discrete->length();
+        detail::VisitSelectionSpanInline(selection,
+                                         [&](int64_t i) { visited_indices.push_back(i); });
       }
+      const int64_t selection_length = static_cast<int64_t>(visited_indices.size());
       ASSERT_EQ(ex_selection_sizes[i], selection_length);
 
       for (size_t j = 0; j < input.values.size(); ++j) {
@@ -837,13 +835,13 @@ class TestExecSpanIterator : public TestComputeInternals {
         }
       }
       if (iterator_.have_selection_vector()) {
-        for (int64_t j = 0; j < discrete->length(); ++j) {
+        for (int64_t j = 0; j < selection_length; ++j) {
           ASSERT_EQ(static_cast<int64_t>(
                         input.selection_vector->indices()[selection_position + j]) -
                         position,
-                    (*discrete)[j]);
-          ASSERT_GE((*discrete)[j], 0);
-          ASSERT_LT((*discrete)[j], batch.length);
+                    visited_indices[static_cast<size_t>(j)]);
+          ASSERT_GE(visited_indices[static_cast<size_t>(j)], 0);
+          ASSERT_LT(visited_indices[static_cast<size_t>(j)], batch.length);
         }
       }
       position += ex_batch_sizes[i];
@@ -1086,7 +1084,6 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
                                                       const Datum& result) {
   ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
   const ChunkedArray& carr = *result.chunked_array();
-  SelectionVectorSpan selection_span(selection->indices(), selection->length());
   ASSERT_EQ(bit_util::CeilDiv(input.length(), exec_chunksize), carr.num_chunks());
   int64_t selection_idx = 0;
   for (int i = 0; i < carr.num_chunks(); ++i) {
@@ -1097,8 +1094,9 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
            selection->indices()[next_selection_idx] < chunk_end) {
       ++next_selection_idx;
     }
-    selection_span.SetSlice(selection_idx, next_selection_idx - selection_idx,
-                            static_cast<uint64_t>(exec_chunksize * i));
+    DiscreteSpan selection_span{selection->indices() + selection_idx,
+                                next_selection_idx - selection_idx,
+                                static_cast<uint64_t>(exec_chunksize * i)};
     selection_idx = next_selection_idx;
     AssertArraysEqualSparseWithSelection(
         *input.Slice(exec_chunksize * i,
@@ -1111,8 +1109,8 @@ void AssertChunkedExecResultsEqualDenseWithSelection(int64_t exec_chunksize,
                                                      const Array& input,
                                                      const SelectionVector* selection,
                                                      const Datum& result) {
-  SelectionVectorSpan selection_span(selection->indices(), selection->length());
-  if (selection_span.length() <= exec_chunksize) {
+  DiscreteSpan selection_span{selection->indices(), selection->length()};
+  if (selection_span.length <= exec_chunksize) {
     ASSERT_EQ(Datum::ARRAY, result.kind());
     AssertArraysEqualDenseWithSelection(input, selection_span, *result.make_array());
   } else {
@@ -1843,7 +1841,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
@@ -1862,7 +1860,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
@@ -1908,7 +1906,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
@@ -1931,7 +1929,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
@@ -2077,7 +2075,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, BasicSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_nopre,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestBasic(test_nopre.get(), *arr, selection, [&](const Datum& result) {
@@ -2096,7 +2094,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, BasicSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_nopre,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionVectorSpan selection_span(selection->indices(), selection->length());
+      DiscreteSpan selection_span{selection->indices(), selection->length()};
       ResetContexts();
 
       DoTestBasic(test_nopre.get(), *arr, selection, [&](const Datum& result) {
@@ -2225,7 +2223,7 @@ TEST_F(TestCallScalarFunctionStatefulKernel, BasicSelectiveSparse) {
   ASSERT_OK_AND_ASSIGN(
       auto caller, ExpressionFunctionCaller::Maker("test_stateful_selective", {int32()}));
   for (const auto& selection : selections) {
-    SelectionVectorSpan selection_span(selection->indices(), selection->length());
+    DiscreteSpan selection_span{selection->indices(), selection->length()};
     ResetContexts();
 
     DoTestBasic(caller.get(), *input, multiplier, selection, [&](const Datum& result) {
@@ -2244,7 +2242,7 @@ TEST_F(TestCallScalarFunctionStatefulKernel, BasicSelectiveDense) {
   ASSERT_OK_AND_ASSIGN(auto caller,
                        ExpressionFunctionCaller::Maker("test_stateful", {int32()}));
   for (const auto& selection : selections) {
-    SelectionVectorSpan selection_span(selection->indices(), selection->length());
+    DiscreteSpan selection_span{selection->indices(), selection->length()};
     ResetContexts();
 
     DoTestBasic(caller.get(), *input, multiplier, selection, [&](const Datum& result) {

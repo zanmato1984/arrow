@@ -150,42 +150,6 @@ class ARROW_EXPORT SelectionVector {
   const uint64_t* indices_;
 };
 
-/// \brief A span of a SelectionVector's indices. Can represent a slice of the
-/// underlying indices.
-///
-/// Note that as an indirection of indices to the data in an ExecBatch, when sliced
-/// along with the batch, the indices themselves need to be back-shifted to be relative to
-/// the batch slice (ExecSpan). For example, consider an ExecBatch of 10 rows with a
-/// SelectionVector [0, 1, 9] is to be executed per-8-rows. The first slice of the batch
-/// will have row 0 to row 7 of the original batch with selection slice [0, 1]. The second
-/// slice of the batch will have row 8 and row 9 of the original batch however they are
-/// referred to as row 0 and row 1 by the kernel. Therefore the second selection slice
-/// should be [9 - 8] = [1]. This is done by setting index_back_shift to 8 for the second
-/// selection slice.
-class ARROW_EXPORT SelectionVectorSpan {
- public:
-  explicit SelectionVectorSpan(const uint64_t* indices = NULLPTR, int64_t length = 0,
-                               int64_t offset = 0, uint64_t index_back_shift = 0)
-      : indices_(indices),
-        length_(length),
-        offset_(offset),
-        index_back_shift_(index_back_shift) {}
-
-  void SetSlice(int64_t offset, int64_t length, uint64_t index_back_shift = 0);
-
-  int64_t operator[](int64_t i) const {
-    return static_cast<int64_t>(indices_[i + offset_] - index_back_shift_);
-  }
-
-  int64_t length() const { return length_; }
-
- private:
-  const uint64_t* indices_;
-  int64_t length_;
-  int64_t offset_;
-  uint64_t index_back_shift_;
-};
-
 /// \brief A selection span representing a contiguous run of selected rows.
 ///
 /// Offsets are relative to the current ExecSpan.
@@ -207,8 +171,23 @@ struct ARROW_EXPORT FilteredSpan {
 
 /// \brief A selection span representing a discrete set of sorted row indices.
 ///
-/// This is currently represented by SelectionVectorSpan.
-using DiscreteSpan = SelectionVectorSpan;
+/// Offsets are relative to the current ExecSpan.
+///
+/// When derived from a SelectionVector (whose indices are absolute row ids in the
+/// underlying ExecBatch), the `index_back_shift` is subtracted to make the indices
+/// relative to the current ExecSpan slice. For example, if an ExecBatch of 10 rows
+/// is executed per 8 rows and the selection contains row 9, then the second ExecSpan
+/// slice (rows 8 and 9) should represent this as index 1 by setting
+/// `index_back_shift = 8`.
+struct ARROW_EXPORT DiscreteSpan {
+  const uint64_t* indices = NULLPTR;
+  int64_t length = 0;
+  uint64_t index_back_shift = 0;
+
+  int64_t operator[](int64_t i) const {
+    return static_cast<int64_t>(indices[i] - index_back_shift);
+  }
+};
 
 /// \brief A selection span for selective execution.
 ///

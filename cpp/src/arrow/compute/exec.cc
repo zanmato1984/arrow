@@ -451,13 +451,6 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
       PromoteExecSpanScalars(span);
     }
 
-    if (!have_all_scalars_ || promote_if_all_scalars_) {
-      if (selection_vector_) {
-        DCHECK_NE(selection_span, nullptr);
-        *selection_span = DiscreteSpan(selection_vector_->indices());
-      }
-    }
-
     initialized_ = true;
   } else if (position_ == length_) {
     // We've emitted at least one span and we're at the end so we are done
@@ -484,15 +477,36 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
   // Then the selection span
   if (selection_vector_) {
     DCHECK_NE(selection_span, nullptr);
-    auto indices_begin = selection_vector_->indices() + selection_position_;
-    auto indices_end = selection_vector_->indices() + selection_vector_->length();
+    const uint64_t chunk_start = static_cast<uint64_t>(position_);
+    const uint64_t chunk_end =
+        static_cast<uint64_t>(position_) + static_cast<uint64_t>(iteration_size);
+
+    const uint64_t* indices_begin = selection_vector_->indices() + selection_position_;
+    const uint64_t* indices_end = selection_vector_->indices() + selection_vector_->length();
     DCHECK_LE(indices_begin, indices_end);
-    auto indices_limit = std::lower_bound(
-        indices_begin, indices_end, static_cast<uint64_t>(position_ + iteration_size));
-    int64_t num_indices = indices_limit - indices_begin;
-    auto* discrete = std::get_if<DiscreteSpan>(selection_span);
-    DCHECK_NE(discrete, nullptr);
-    discrete->SetSlice(selection_position_, num_indices, static_cast<uint64_t>(position_));
+
+    const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
+    const int64_t num_indices = indices_limit - indices_begin;
+
+    if (num_indices > 0) {
+      const uint64_t first = indices_begin[0];
+      const uint64_t last = indices_begin[num_indices - 1];
+      DCHECK_GE(first, chunk_start);
+      DCHECK_LT(last, chunk_end);
+
+      // If the discrete indices form a contiguous run, represent them as such.
+      // Since SelectionVector::Validate enforces strict increasing order, checking
+      // (last - first == num_indices - 1) is sufficient.
+      if (last - first == static_cast<uint64_t>(num_indices - 1)) {
+        *selection_span =
+            ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
+      } else {
+        *selection_span = DiscreteSpan{indices_begin, num_indices, chunk_start};
+      }
+    } else {
+      *selection_span = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+    }
+
     selection_position_ += num_indices;
   }
 
@@ -1489,8 +1503,8 @@ Status SelectionVector::Validate(int64_t values_length) const {
     return Status::Invalid("SelectionVector cannot contain nulls");
   }
   for (int64_t i = 1; i < length(); ++i) {
-    if (indices_[i - 1] > indices_[i]) {
-      return Status::Invalid("SelectionVector indices must be sorted");
+    if (indices_[i - 1] >= indices_[i]) {
+      return Status::Invalid("SelectionVector indices must be strictly increasing");
     }
   }
   if (values_length >= 0) {
@@ -1503,14 +1517,6 @@ Status SelectionVector::Validate(int64_t values_length) const {
     }
   }
   return Status::OK();
-}
-
-void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length,
-                                   uint64_t index_back_shift) {
-  DCHECK_NE(indices_, nullptr);
-  offset_ = offset;
-  length_ = length;
-  index_back_shift_ = index_back_shift;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
