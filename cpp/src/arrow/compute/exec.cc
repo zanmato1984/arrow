@@ -487,10 +487,10 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
     auto indices_end = selection_vector_->indices() + selection_vector_->length();
     DCHECK_LE(indices_begin, indices_end);
     auto indices_limit = std::lower_bound(
-        indices_begin, indices_end, static_cast<int32_t>(position_ + iteration_size));
+        indices_begin, indices_end, static_cast<uint64_t>(position_ + iteration_size));
     int64_t num_indices = indices_limit - indices_begin;
     selection_span->SetSlice(selection_position_, num_indices,
-                             static_cast<int32_t>(position_));
+                             static_cast<uint64_t>(position_));
     selection_position_ += num_indices;
   }
 
@@ -1459,8 +1459,8 @@ const CpuInfo* ExecContext::cpu_info() const { return CpuInfo::GetInstance(); }
 SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
     : data_(std::move(data)) {
   DCHECK_NE(data_, nullptr);
-  DCHECK_EQ(data_->type->id(), Type::INT32);
-  indices_ = data_->GetValues<int32_t>(1);
+  DCHECK_EQ(data_->type->id(), Type::UINT64);
+  indices_ = data_->GetValues<uint64_t>(1);
 }
 
 SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
@@ -1472,8 +1472,8 @@ Status SelectionVector::Validate(int64_t values_length) const {
     return Status::Invalid("SelectionVector not initialized");
   }
   ARROW_CHECK_NE(indices_, nullptr);
-  if (data_->type->id() != Type::INT32) {
-    return Status::Invalid("SelectionVector must be of type int32");
+  if (data_->type->id() != Type::UINT64) {
+    return Status::Invalid("SelectionVector must be of type uint64");
   }
   if (data_->GetNullCount() != 0) {
     return Status::Invalid("SelectionVector cannot contain nulls");
@@ -1483,14 +1483,10 @@ Status SelectionVector::Validate(int64_t values_length) const {
       return Status::Invalid("SelectionVector indices must be sorted");
     }
   }
-  for (int64_t i = 0; i < length(); ++i) {
-    if (indices_[i] < 0) {
-      return Status::Invalid("SelectionVector indices must be non-negative");
-    }
-  }
   if (values_length >= 0) {
+    const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
     for (int64_t i = 0; i < length(); ++i) {
-      if (indices_[i] >= values_length) {
+      if (indices_[i] >= values_length_u64) {
         return Status::Invalid("SelectionVector index ", indices_[i],
                                " >= values length ", values_length);
       }
@@ -1500,7 +1496,7 @@ Status SelectionVector::Validate(int64_t values_length) const {
 }
 
 void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length,
-                                   int32_t index_back_shift) {
+                                   uint64_t index_back_shift) {
   DCHECK_NE(indices_, nullptr);
   offset_ = offset;
   length_ = length;

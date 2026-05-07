@@ -139,14 +139,14 @@ class ARROW_EXPORT SelectionVector {
   explicit SelectionVector(const Array& arr);
 
   std::shared_ptr<ArrayData> data() const { return data_; }
-  const int32_t* indices() const { return indices_; }
+  const uint64_t* indices() const { return indices_; }
   int64_t length() const;
 
   Status Validate(int64_t values_length = -1) const;
 
  private:
   std::shared_ptr<ArrayData> data_;
-  const int32_t* indices_;
+  const uint64_t* indices_;
 };
 
 /// \brief A span of a SelectionVector's indices. Can represent a slice of the
@@ -163,26 +163,26 @@ class ARROW_EXPORT SelectionVector {
 /// selection slice.
 class ARROW_EXPORT SelectionVectorSpan {
  public:
-  explicit SelectionVectorSpan(const int32_t* indices = NULLPTR, int64_t length = 0,
-                               int64_t offset = 0, int32_t index_back_shift = 0)
+  explicit SelectionVectorSpan(const uint64_t* indices = NULLPTR, int64_t length = 0,
+                               int64_t offset = 0, uint64_t index_back_shift = 0)
       : indices_(indices),
         length_(length),
         offset_(offset),
         index_back_shift_(index_back_shift) {}
 
-  void SetSlice(int64_t offset, int64_t length, int32_t index_back_shift = 0);
+  void SetSlice(int64_t offset, int64_t length, uint64_t index_back_shift = 0);
 
-  int32_t operator[](int64_t i) const {
-    return indices_[i + offset_] - index_back_shift_;
+  int64_t operator[](int64_t i) const {
+    return static_cast<int64_t>(indices_[i + offset_] - index_back_shift_);
   }
 
   int64_t length() const { return length_; }
 
  private:
-  const int32_t* indices_;
+  const uint64_t* indices_;
   int64_t length_;
   int64_t offset_;
-  int32_t index_back_shift_;
+  uint64_t index_back_shift_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
@@ -238,9 +238,7 @@ struct ARROW_EXPORT ExecBatch {
 
   /// The semantic length of the ExecBatch. When the values are all scalars,
   /// the length should be set to 1 for non-aggregate kernels, otherwise the
-  /// length is taken from the array values, except when there is a selection
-  /// vector. When there is a selection vector set, the length of the batch is
-  /// the length of the selection. Aggregate kernels can have an ExecBatch
+  /// length is taken from the array values. Aggregate kernels can have an ExecBatch
   /// formed by projecting just the partition columns from a batch in which
   /// case, it would have scalar rows with length greater than 1.
   ///
@@ -251,8 +249,9 @@ struct ARROW_EXPORT ExecBatch {
   /// A deferred filter represented as an array of indices into the values.
   ///
   /// For example, the filter [true, true, false, true] would be represented as
-  /// the selection vector [0, 1, 3]. When the selection vector is set,
-  /// ExecBatch::length is equal to the length of this array.
+  /// the selection vector [0, 1, 3]. When the selection vector is set, the indices
+  /// refer to row positions in the underlying values (and may be smaller than the
+  /// underlying length).
   std::shared_ptr<SelectionVector> selection_vector;
 
   /// \brief index of this batch in a sorted stream of batches

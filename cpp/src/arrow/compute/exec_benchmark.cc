@@ -115,7 +115,7 @@ Status RegisterSpinFunction() {
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorTo(int64_t length) {
-  auto res = gen::Step<int32_t>()->Generate(length);
+  auto res = gen::Step<uint64_t>()->Generate(length);
   ARROW_CHECK_OK(res.status());
   auto arr = res.ValueUnsafe();
   return std::make_shared<SelectionVector>(*arr);

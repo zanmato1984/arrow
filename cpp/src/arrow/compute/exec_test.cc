@@ -169,10 +169,6 @@ TEST(SelectionVector, Validate) {
     ASSERT_RAISES(Invalid, sel_vector->Validate());
   }
   {
-    auto sel_vector = SelectionVectorFromJSON("[-42, 0]");
-    ASSERT_RAISES(Invalid, sel_vector->Validate());
-  }
-  {
     auto sel_vector = SelectionVectorFromJSON("[]");
     ASSERT_OK(sel_vector->Validate(/*values_length=*/0));
   }
@@ -191,8 +187,8 @@ TEST(SelectionVector, Validate) {
 }
 
 TEST(SelectionVectorSpan, Basics) {
-  auto indices = ArrayFromJSON(int32(), "[0, 3, 7]");
-  SelectionVectorSpan sel_span(indices->data()->GetValues<int32_t>(1),
+  auto indices = ArrayFromJSON(uint64(), "[0, 3, 7]");
+  SelectionVectorSpan sel_span(indices->data()->GetValues<uint64_t>(1),
                                indices->length() - 1,
                                /*offset=*/1, /*index_back_shift=*/1);
   ASSERT_EQ(sel_span[0], 2);
@@ -831,7 +827,9 @@ class TestExecSpanIterator : public TestComputeInternals {
       }
       if (iterator_.have_selection_vector()) {
         for (int64_t j = 0; j < selection.length(); ++j) {
-          ASSERT_EQ(input.selection_vector->indices()[selection_position + j] - position,
+          ASSERT_EQ(static_cast<int64_t>(
+                        input.selection_vector->indices()[selection_position + j]) -
+                        position,
                     selection[j]);
           ASSERT_GE(selection[j], 0);
           ASSERT_LT(selection[j], batch.length);
