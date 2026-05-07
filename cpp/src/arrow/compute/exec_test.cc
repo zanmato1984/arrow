@@ -792,14 +792,25 @@ class TestExecSpanIterator : public TestComputeInternals {
                       const std::vector<int>& ex_selection_sizes) {
     SetupIterator(input, chunksize);
     ExecSpan batch;
-    SelectionVectorSpan selection;
+    SelectionSpan selection;
+    SelectionSpan* selection_ptr = nullptr;
+    if (iterator_.have_selection_vector()) {
+      selection_ptr = &selection;
+    }
     int64_t position = 0, selection_position = 0;
     for (size_t i = 0; i < ex_batch_sizes.size(); ++i) {
       ASSERT_EQ(position, iterator_.position());
       ASSERT_EQ(selection_position, iterator_.selection_position());
-      ASSERT_TRUE(iterator_.Next(&batch, &selection));
+      ASSERT_TRUE(iterator_.Next(&batch, selection_ptr));
       ASSERT_EQ(ex_batch_sizes[i], batch.length);
-      ASSERT_EQ(ex_selection_sizes[i], selection.length());
+      const DiscreteSpan* discrete = nullptr;
+      int64_t selection_length = 0;
+      if (selection_ptr) {
+        discrete = std::get_if<DiscreteSpan>(&selection);
+        ASSERT_NE(discrete, nullptr);
+        selection_length = discrete->length();
+      }
+      ASSERT_EQ(ex_selection_sizes[i], selection_length);
 
       for (size_t j = 0; j < input.values.size(); ++j) {
         switch (input[j].kind()) {
@@ -826,20 +837,20 @@ class TestExecSpanIterator : public TestComputeInternals {
         }
       }
       if (iterator_.have_selection_vector()) {
-        for (int64_t j = 0; j < selection.length(); ++j) {
+        for (int64_t j = 0; j < discrete->length(); ++j) {
           ASSERT_EQ(static_cast<int64_t>(
                         input.selection_vector->indices()[selection_position + j]) -
                         position,
-                    selection[j]);
-          ASSERT_GE(selection[j], 0);
-          ASSERT_LT(selection[j], batch.length);
+                    (*discrete)[j]);
+          ASSERT_GE((*discrete)[j], 0);
+          ASSERT_LT((*discrete)[j], batch.length);
         }
       }
       position += ex_batch_sizes[i];
       selection_position += ex_selection_sizes[i];
     }
     // Ensure that the iterator is exhausted
-    ASSERT_FALSE(iterator_.Next(&batch, &selection));
+    ASSERT_FALSE(iterator_.Next(&batch, selection_ptr));
 
     ASSERT_EQ(iterator_.length(), iterator_.position());
     ASSERT_EQ(iterator_.selection_length(), iterator_.selection_position());
@@ -982,14 +993,18 @@ TEST_F(TestExecSpanIterator, SelectionSpanChunked) {
 // Scalar function execution
 
 template <typename OnSelectedFn, typename OnNonSelectedFn>
-void VisitIndicesWithSelection(int64_t length, const SelectionVectorSpan& selection,
+void VisitIndicesWithSelection(int64_t length, const SelectionSpan& selection,
                                OnSelectedFn&& on_selected,
                                OnNonSelectedFn&& on_non_selected) {
-  int64_t selected = 0;
+  std::vector<uint8_t> is_selected(static_cast<size_t>(length), 0);
+  detail::VisitSelectionSpanInline(selection, [&](int64_t i) {
+    ASSERT_GE(i, 0);
+    ASSERT_LT(i, length);
+    is_selected[static_cast<size_t>(i)] = 1;
+  });
   for (int64_t i = 0; i < length; ++i) {
-    if (selected < selection.length() && i == selection[selected]) {
+    if (is_selected[static_cast<size_t>(i)]) {
       on_selected(i);
-      ++selected;
     } else {
       on_non_selected(i);
     }
@@ -999,7 +1014,7 @@ void VisitIndicesWithSelection(int64_t length, const SelectionVectorSpan& select
 constexpr uint8_t kNonSelectedByte = 0xFE;
 
 void AssertArraysEqualSparseWithSelection(const Array& src,
-                                          const SelectionVectorSpan& selection,
+                                          const SelectionSpan& selection,
                                           const Array& dst) {
   ASSERT_EQ(src.length(), dst.length());
   ASSERT_EQ(src.type()->id(), dst.type()->id());
@@ -1034,7 +1049,7 @@ void AssertArraysEqualSparseWithSelection(const Array& src,
 }
 
 void AssertArraysEqualDenseWithSelection(const Array& src,
-                                         const SelectionVectorSpan& selection,
+                                         const SelectionSpan& selection,
                                          const Array& dst) {
   ASSERT_EQ(src.length(), dst.length());
   ASSERT_EQ(src.type()->id(), dst.type()->id());
@@ -1075,13 +1090,15 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
   ASSERT_EQ(bit_util::CeilDiv(input.length(), exec_chunksize), carr.num_chunks());
   int64_t selection_idx = 0;
   for (int i = 0; i < carr.num_chunks(); ++i) {
+    const uint64_t chunk_end =
+        static_cast<uint64_t>(exec_chunksize) * static_cast<uint64_t>(i + 1);
     auto next_selection_idx = selection_idx;
     while (next_selection_idx < selection->length() &&
-           selection->indices()[next_selection_idx] < exec_chunksize * (i + 1)) {
+           selection->indices()[next_selection_idx] < chunk_end) {
       ++next_selection_idx;
     }
     selection_span.SetSlice(selection_idx, next_selection_idx - selection_idx,
-                            static_cast<int32_t>(exec_chunksize * i));
+                            static_cast<uint64_t>(exec_chunksize * i));
     selection_idx = next_selection_idx;
     AssertArraysEqualSparseWithSelection(
         *input.Slice(exec_chunksize * i,
@@ -1119,7 +1136,7 @@ Status ExecCopyArrayData(KernelContext*, const ExecSpan& batch, ExecResult* out)
 }
 
 Status SelectiveExecCopyArrayData(KernelContext* ctx, const ExecSpan& batch,
-                                  const SelectionVectorSpan& selection, ExecResult* out) {
+                                  const SelectionSpan& selection, ExecResult* out) {
   DCHECK_EQ(1, batch.num_values());
   int value_size = batch[0].type()->byte_width();
 
@@ -1156,7 +1173,7 @@ Status ExecCopyArraySpan(KernelContext*, const ExecSpan& batch, ExecResult* out)
 }
 
 Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
-                                  const SelectionVectorSpan& selection, ExecResult* out) {
+                                  const SelectionSpan& selection, ExecResult* out) {
   DCHECK_EQ(1, batch.num_values());
   int value_size = batch[0].type()->byte_width();
   const ArraySpan& arg0 = batch[0].array;
@@ -1197,7 +1214,7 @@ Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult*
 }
 
 Status SelectiveExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch,
-                                   const SelectionVectorSpan& selection,
+                                   const SelectionSpan& selection,
                                    ExecResult* out) {
   // Propagate nulls not used. Check that the out bitmap isn't the same already
   // as the input bitmap
@@ -1226,7 +1243,7 @@ Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
 }
 
 Status SelectiveExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
-                                       const SelectionVectorSpan& selection,
+                                       const SelectionSpan& selection,
                                        ExecResult* out) {
   // Validity preallocated, but not the data
   ArrayData* out_arr = out->array_data().get();
@@ -1253,7 +1270,7 @@ Status ExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
 }
 
 Status SelectiveExecNoPreallocatedAnything(KernelContext* ctx, const ExecSpan& batch,
-                                           const SelectionVectorSpan& selection,
+                                           const SelectionSpan& selection,
                                            ExecResult* out) {
   // Neither validity nor data preallocated
   ArrayData* out_arr = out->array_data().get();
@@ -1323,7 +1340,7 @@ Status ExecStateful(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
 }
 
 Status SelectiveExecStateful(KernelContext* ctx, const ExecSpan& batch,
-                             const SelectionVectorSpan& selection, ExecResult* out) {
+                             const SelectionSpan& selection, ExecResult* out) {
   // We take the value from the state and multiply the data in batch[0] with it
   ExampleState* state = static_cast<ExampleState*>(ctx->state());
   int32_t multiplier = checked_cast<const Int32Scalar&>(*state->value).value;
@@ -1360,7 +1377,7 @@ Status ExecAddInt32(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
 }
 
 Status SelectiveExecAddInt32(KernelContext* ctx, const ExecSpan& batch,
-                             const SelectionVectorSpan& selection, ExecResult* out) {
+                             const SelectionSpan& selection, ExecResult* out) {
   const int32_t* left_data = batch[0].array.GetValues<int32_t>(1);
   const int32_t* right_data = batch[1].array.GetValues<int32_t>(1);
   ArraySpan* out_arr = out->array_span_mutable();

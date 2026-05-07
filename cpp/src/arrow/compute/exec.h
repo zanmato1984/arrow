@@ -27,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "arrow/array/data.h"
@@ -184,6 +185,36 @@ class ARROW_EXPORT SelectionVectorSpan {
   int64_t offset_;
   uint64_t index_back_shift_;
 };
+
+/// \brief A selection span representing a contiguous run of selected rows.
+///
+/// Offsets are relative to the current ExecSpan.
+struct ARROW_EXPORT ContiguousSpan {
+  int64_t start_offset = 0;
+  int64_t length = 0;
+};
+
+/// \brief A selection span representing a bitmap over a contiguous range.
+///
+/// Offsets are relative to the current ExecSpan. The bitmap is interpreted as a
+/// bit-packed array where bit i corresponds to row (start_offset + i).
+struct ARROW_EXPORT FilteredSpan {
+  int64_t start_offset = 0;
+  int64_t length = 0;
+  const uint8_t* bitmap = NULLPTR;
+  int64_t bitmap_offset = 0;
+};
+
+/// \brief A selection span representing a discrete set of sorted row indices.
+///
+/// This is currently represented by SelectionVectorSpan.
+using DiscreteSpan = SelectionVectorSpan;
+
+/// \brief A selection span for selective execution.
+///
+/// Kernels should handle all alternatives (e.g. using std::visit or
+/// compute::detail::VisitSelectionSpanInline).
+using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 
 /// An index to represent that a batch does not belong to an ordered stream
 constexpr int64_t kUnsequencedIndex = -1;

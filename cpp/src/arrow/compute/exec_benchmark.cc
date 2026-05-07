@@ -73,13 +73,13 @@ Status SpinExec(KernelContext* ctx, const ExecSpan& span, ExecResult* out) {
 }
 
 Status SpinSelectiveExec(KernelContext* ctx, const ExecSpan& span,
-                         const SelectionVectorSpan& selection_span, ExecResult* out) {
+                         const SelectionSpan& selection, ExecResult* out) {
   ARROW_CHECK_EQ(span.num_values(), 1);
   const auto& arg = span[0];
   ARROW_CHECK(arg.is_array());
 
   int64_t count = SpinState::Get(ctx).count;
-  detail::VisitSelectionVectorSpanInline(selection_span, [&](int64_t i) { Spin(count); });
+  detail::VisitSelectionSpanInline(selection, [&](int64_t i) { Spin(count); });
   *out->array_data_mutable() = *arg.array.ToArrayData();
   return Status::OK();
 }

@@ -556,11 +556,11 @@ struct ARROW_EXPORT Kernel {
 using ArrayKernelExec = Status (*)(KernelContext*, const ExecSpan&, ExecResult*);
 
 /// \brief The optional scalar kernel selective execution API for SCALAR kernel types.
-/// It's like ArrayKernelExec but with an additional SelectionVectorSpan argument. When a
+/// It's like ArrayKernelExec but with an additional SelectionSpan argument. When a
 /// selection vector is specified in the batch, this API will be preferred, if provided,
 /// over ArrayKernelExec.
 using ArrayKernelSelectiveExec = Status (*)(KernelContext*, const ExecSpan&,
-                                            const SelectionVectorSpan&, ExecResult*);
+                                            const SelectionSpan&, ExecResult*);
 
 /// \brief Kernel data structure for implementations of ScalarFunction. In
 /// addition to the members found in Kernel, contains the null handling

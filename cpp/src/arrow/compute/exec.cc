@@ -31,6 +31,7 @@
 #include "arrow/array/util.h"
 #include "arrow/buffer.h"
 #include "arrow/chunked_array.h"
+#include "arrow/compute/cast.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/function.h"
 #include "arrow/compute/function_internal.h"
@@ -411,7 +412,7 @@ int64_t ExecSpanIterator::GetNextChunkSpan(int64_t iteration_size, ExecSpan* spa
   return iteration_size;
 }
 
-bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span) {
+bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
   if (!initialized_) {
     span->length = 0;
 
@@ -453,7 +454,7 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
     if (!have_all_scalars_ || promote_if_all_scalars_) {
       if (selection_vector_) {
         DCHECK_NE(selection_span, nullptr);
-        *selection_span = SelectionVectorSpan(selection_vector_->indices());
+        *selection_span = DiscreteSpan(selection_vector_->indices());
       }
     }
 
@@ -489,8 +490,9 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
     auto indices_limit = std::lower_bound(
         indices_begin, indices_end, static_cast<uint64_t>(position_ + iteration_size));
     int64_t num_indices = indices_limit - indices_begin;
-    selection_span->SetSlice(selection_position_, num_indices,
-                             static_cast<uint64_t>(position_));
+    auto* discrete = std::get_if<DiscreteSpan>(selection_span);
+    DCHECK_NE(discrete, nullptr);
+    discrete->SetSlice(selection_position_, num_indices, static_cast<uint64_t>(position_));
     selection_position_ += num_indices;
   }
 
@@ -909,8 +911,16 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
     Datum dense_result = WrapResults(input.values, dense_listener.values());
 
+    // Scatter only accepts signed indices, while our SelectionVector is UInt64.
+    // Cast once here rather than constraining SelectionVector to signed indices.
+    Datum scatter_indices = batch.selection_vector->data();
+    if (scatter_indices.type()->id() == Type::UINT64) {
+      ARROW_ASSIGN_OR_RAISE(
+          scatter_indices,
+          Cast(scatter_indices, int64(), CastOptions::Safe(), exec_context()));
+    }
     ARROW_ASSIGN_OR_RAISE(auto result,
-                          Scatter(dense_result, *batch.selection_vector->data(),
+                          Scatter(dense_result, scatter_indices,
                                   ScatterOptions{/*max_index=*/batch.length - 1}));
     return listener->OnResult(std::move(result));
   }
@@ -933,8 +943,8 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // eventually skip the creation of ArrayData altogether
     std::shared_ptr<ArrayData> preallocation;
     ExecSpan input;
-    SelectionVectorSpan selection;
-    SelectionVectorSpan* selection_ptr = nullptr;
+    SelectionSpan selection;
+    SelectionSpan* selection_ptr = nullptr;
     if (span_iterator_.have_selection_vector()) {
       selection_ptr = &selection;
     }
@@ -973,7 +983,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Status ExecuteSingleSpan(const ExecSpan& input, const SelectionVectorSpan* selection,
+  Status ExecuteSingleSpan(const ExecSpan& input, const SelectionSpan* selection,
                            ExecResult* out) {
     ArraySpan* result_span = out->array_span_mutable();
     if (output_type_.type->id() == Type::NA) {
@@ -1000,8 +1010,8 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // We will eventually delete the Scalar output path per
     // ARROW-16757.
     ExecSpan input;
-    SelectionVectorSpan selection;
-    SelectionVectorSpan* selection_ptr = nullptr;
+    SelectionSpan selection;
+    SelectionSpan* selection_ptr = nullptr;
     if (span_iterator_.have_selection_vector()) {
       selection_ptr = &selection;
     }
@@ -1087,7 +1097,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
 
   // Actually invoke the kernel on the given input span, either selectively if there is a
   // selection or non-selectively otherwise.
-  Status ExecuteKernel(const ExecSpan& input, const SelectionVectorSpan* selection,
+  Status ExecuteKernel(const ExecSpan& input, const SelectionSpan* selection,
                        ExecResult* out) {
     if (selection) {
       DCHECK_NE(kernel_->selective_exec, nullptr);
