@@ -481,33 +481,9 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
     const uint64_t chunk_end =
         static_cast<uint64_t>(position_) + static_cast<uint64_t>(iteration_size);
 
-    const uint64_t* indices_begin = selection_vector_->indices() + selection_position_;
-    const uint64_t* indices_end = selection_vector_->indices() + selection_vector_->length();
-    DCHECK_LE(indices_begin, indices_end);
-
-    const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
-    const int64_t num_indices = indices_limit - indices_begin;
-
-    if (num_indices > 0) {
-      const uint64_t first = indices_begin[0];
-      const uint64_t last = indices_begin[num_indices - 1];
-      DCHECK_GE(first, chunk_start);
-      DCHECK_LT(last, chunk_end);
-
-      // If the discrete indices form a contiguous run, represent them as such.
-      // Since SelectionVector::Validate enforces strict increasing order, checking
-      // (last - first == num_indices - 1) is sufficient.
-      if (last - first == static_cast<uint64_t>(num_indices - 1)) {
-        *selection_span =
-            ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
-      } else {
-        *selection_span = DiscreteSpan{indices_begin, num_indices, chunk_start};
-      }
-    } else {
-      *selection_span = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
-    }
-
-    selection_position_ += num_indices;
+    const int64_t consumed = selection_vector_->GetSpanForChunk(
+        chunk_start, chunk_end, selection_position_, selection_span);
+    selection_position_ += consumed;
   }
 
   position_ += iteration_size;
@@ -906,15 +882,20 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return ExecuteBatch(input, listener);
     }
 
+    ARROW_ASSIGN_OR_RAISE(
+        std::shared_ptr<ArrayData> take_indices_data,
+        batch.selection_vector->ToIndicesArrayData(exec_context()->memory_pool()));
+    Datum take_indices = Datum(std::move(take_indices_data));
+
     std::vector<Datum> values(batch.num_values());
     for (int i = 0; i < batch.num_values(); ++i) {
       if (batch[i].is_scalar()) {
         // XXX: Skip gather for scalars since it is not currently supported by Take.
         values[i] = batch[i];
       } else {
-        ARROW_ASSIGN_OR_RAISE(values[i],
-                              Take(batch[i], *batch.selection_vector->data(),
-                                   TakeOptions{/*boundcheck=*/false}, exec_context()));
+        ARROW_ASSIGN_OR_RAISE(
+            values[i],
+            Take(batch[i], take_indices, TakeOptions{/*boundcheck=*/false}, exec_context()));
       }
     }
     ARROW_ASSIGN_OR_RAISE(
@@ -927,7 +908,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
 
     // Scatter only accepts signed indices, while our SelectionVector is UInt64.
     // Cast once here rather than constraining SelectionVector to signed indices.
-    Datum scatter_indices = batch.selection_vector->data();
+    Datum scatter_indices = take_indices;
     if (scatter_indices.type()->id() == Type::UINT64) {
       ARROW_ASSIGN_OR_RAISE(
           scatter_indices,
@@ -1517,6 +1498,46 @@ Status SelectionVector::Validate(int64_t values_length) const {
     }
   }
   return Status::OK();
+}
+
+Result<std::shared_ptr<ArrayData>> SelectionVector::ToIndicesArrayData(
+    MemoryPool* pool) const {
+  (void)pool;
+  return data_;
+}
+
+int64_t SelectionVector::GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+                                        int64_t selection_position,
+                                        SelectionSpan* out) const {
+  DCHECK_NE(out, nullptr);
+  DCHECK_LE(chunk_start, chunk_end);
+
+  const uint64_t* indices_begin = indices_ + selection_position;
+  const uint64_t* indices_end = indices_ + length();
+  DCHECK_LE(indices_begin, indices_end);
+
+  const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
+  const int64_t num_indices = indices_limit - indices_begin;
+
+  if (num_indices > 0) {
+    const uint64_t first = indices_begin[0];
+    const uint64_t last = indices_begin[num_indices - 1];
+    DCHECK_GE(first, chunk_start);
+    DCHECK_LT(last, chunk_end);
+
+    // If the discrete indices form a contiguous run, represent them as such.
+    // Since SelectionVector::Validate enforces strict increasing order, checking
+    // (last - first == num_indices - 1) is sufficient.
+    if (last - first == static_cast<uint64_t>(num_indices - 1)) {
+      *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
+    } else {
+      *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
+    }
+  } else {
+    *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+  }
+
+  return num_indices;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,

@@ -123,33 +123,6 @@ class ARROW_EXPORT ExecContext {
 // TODO: Consider standardizing on uint16 selection vectors and only use them
 // when we can ensure that each value is 64K length or smaller
 
-/// \brief Container for an array of value selection indices that were
-/// materialized from a filter.
-///
-/// Columnar query engines (see e.g. [1]) have found that rather than
-/// materializing filtered data, the filter can instead be converted to an
-/// array of the "on" indices and then "fusing" these indices in operator
-/// implementations. This is especially relevant for aggregations but also
-/// applies to scalar operations.
-///
-/// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
-class ARROW_EXPORT SelectionVector {
- public:
-  explicit SelectionVector(std::shared_ptr<ArrayData> data);
-
-  explicit SelectionVector(const Array& arr);
-
-  std::shared_ptr<ArrayData> data() const { return data_; }
-  const uint64_t* indices() const { return indices_; }
-  int64_t length() const;
-
-  Status Validate(int64_t values_length = -1) const;
-
- private:
-  std::shared_ptr<ArrayData> data_;
-  const uint64_t* indices_;
-};
-
 /// \brief A selection span representing a contiguous run of selected rows.
 ///
 /// Offsets are relative to the current ExecSpan.
@@ -194,6 +167,53 @@ struct ARROW_EXPORT DiscreteSpan {
 /// Kernels should handle all alternatives (e.g. using std::visit or
 /// compute::detail::VisitSelectionSpanInline).
 using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
+
+/// \brief Container for a deferred selection of rows over an ExecBatch.
+///
+/// This is currently an index-backed selection (UInt64 indices). The public API
+/// avoids exposing the backing representation so that bitmap / run-based
+/// selections can be supported in the future without changing call sites.
+///
+/// Columnar query engines (see e.g. [1]) have found that rather than
+/// materializing filtered data, the filter can instead be converted to a
+/// selection and then "fused" in operator implementations. This is especially
+/// relevant for aggregations but also applies to scalar operations.
+///
+/// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
+class ARROW_EXPORT SelectionVector {
+ public:
+  explicit SelectionVector(std::shared_ptr<ArrayData> data);
+
+  explicit SelectionVector(const Array& arr);
+
+  /// \brief Number of selected row indices.
+  int64_t length() const;
+
+  /// \brief Validate selection (e.g. increasing, non-null, in-bounds).
+  Status Validate(int64_t values_length = -1) const;
+
+  /// \brief Materialize selection as a UInt64 indices ArrayData.
+  ///
+  /// For index-backed selections this is a cheap accessor. Other future
+  /// representations may need to allocate or compute the indices.
+  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
+      MemoryPool* pool = default_memory_pool()) const;
+
+  /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
+  ///
+  /// \param[in] chunk_start Absolute row start (inclusive).
+  /// \param[in] chunk_end Absolute row end (exclusive).
+  /// \param[in] selection_position Number of selected indices already consumed
+  /// in earlier chunks (rank).
+  /// \param[out] out Selection span relative to chunk_start.
+  /// \return Number of selected indices consumed from this chunk.
+  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+                          int64_t selection_position, SelectionSpan* out) const;
+
+ private:
+  std::shared_ptr<ArrayData> data_;
+  const uint64_t* indices_;
+};
 
 /// An index to represent that a batch does not belong to an ordered stream
 constexpr int64_t kUnsequencedIndex = -1;
