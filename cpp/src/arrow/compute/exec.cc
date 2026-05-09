@@ -27,7 +27,6 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
-#include "arrow/array/concatenate.h"
 #include "arrow/array/data.h"
 #include "arrow/array/util.h"
 #include "arrow/buffer.h"
@@ -883,56 +882,41 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return ExecuteBatch(input, listener);
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto values,
-                          batch.selection_vector->GatherValues(batch, exec_context()));
+    ARROW_ASSIGN_OR_RAISE(
+        std::shared_ptr<ArrayData> take_indices_data,
+        batch.selection_vector->ToIndicesArrayData(exec_context()->memory_pool()));
+    Datum take_indices = Datum(std::move(take_indices_data));
+
+    std::vector<Datum> values(batch.num_values());
+    for (int i = 0; i < batch.num_values(); ++i) {
+      if (batch[i].is_scalar()) {
+        // XXX: Skip gather for scalars since it is not currently supported by Take.
+        values[i] = batch[i];
+      } else {
+        ARROW_ASSIGN_OR_RAISE(
+            values[i],
+            Take(batch[i], take_indices, TakeOptions{/*boundcheck=*/false}, exec_context()));
+      }
+    }
     ARROW_ASSIGN_OR_RAISE(
         ExecBatch input,
         ExecBatch::Make(std::move(values), batch.selection_vector->length()));
 
     DatumAccumulator dense_listener;
     RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
-    std::vector<Datum> dense_outputs = dense_listener.values();
-    const bool dense_split_execution = dense_outputs.size() > 1;
-    Datum dense_result = WrapResults(input.values, dense_outputs);
+    Datum dense_result = WrapResults(input.values, dense_listener.values());
 
-    ARROW_ASSIGN_OR_RAISE(
-        Datum result,
-        batch.selection_vector->ScatterDenseResult(dense_result, batch.length,
-                                                   exec_context()));
-
-    // Preserve ScalarExecutor chunking semantics:
-    // - If any original inputs were chunked, WrapResults always returns a ChunkedArray.
-    // - If execution yielded multiple output chunks (typically because execution was
-    //   split and results were not fully preallocated), WrapResults returns a
-    //   ChunkedArray.
-    //
-    // The scatter step can return either an Array or a ChunkedArray depending on the
-    // selection backend; normalize to the expected output kind.
-    const bool want_chunked =
-        HaveChunkedArray(batch.values) || dense_split_execution;
-    if (want_chunked) {
-      if (result.is_array()) {
-        auto chunk = MakeArray(result.array());
-        result = Datum(std::make_shared<ChunkedArray>(std::move(chunk)));
-      } else if (result.is_chunked_array() && result.chunked_array()->num_chunks() != 1) {
-        ARROW_ASSIGN_OR_RAISE(auto combined,
-                              Concatenate(result.chunked_array()->chunks(),
-                                          exec_context()->memory_pool()));
-        result = Datum(std::make_shared<ChunkedArray>(std::move(combined)));
-      }
-    } else {
-      if (result.is_chunked_array()) {
-        const auto& carr = *result.chunked_array();
-        if (carr.num_chunks() == 1) {
-          result = Datum(carr.chunk(0)->data());
-        } else {
-          ARROW_ASSIGN_OR_RAISE(
-              auto combined,
-              Concatenate(carr.chunks(), exec_context()->memory_pool()));
-          result = Datum(std::move(combined));
-        }
-      }
+    // Scatter only accepts signed indices, while our SelectionVector is UInt64.
+    // Cast once here rather than constraining SelectionVector to signed indices.
+    Datum scatter_indices = take_indices;
+    if (scatter_indices.type()->id() == Type::UINT64) {
+      ARROW_ASSIGN_OR_RAISE(
+          scatter_indices,
+          Cast(scatter_indices, int64(), CastOptions::Safe(), exec_context()));
     }
+    ARROW_ASSIGN_OR_RAISE(auto result,
+                          Scatter(dense_result, scatter_indices,
+                                  ScatterOptions{/*max_index=*/batch.length - 1}));
     return listener->OnResult(std::move(result));
   }
 
@@ -1054,7 +1038,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
   Status SetupPreallocation(int64_t total_length, const std::vector<Datum>& args) {
     output_num_buffers_ = static_cast<int>(output_type_.type->layout().buffers.size());
     auto out_type_id = output_type_.type->id();
-    data_preallocated_.clear();
     // Default to no validity pre-allocation for following cases:
     // - Output Array is NullArray
     // - kernel_->null_handling is COMPUTED_NO_PREALLOCATE or OUTPUT_NOT_NULL
@@ -1078,6 +1061,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       }
     }
     if (kernel_->mem_allocation == MemAllocation::PREALLOCATE) {
+      data_preallocated_.clear();
       ComputeDataPreallocate(*output_type_.type, &data_preallocated_);
     }
 
@@ -1477,651 +1461,83 @@ const CpuInfo* ExecContext::cpu_info() const { return CpuInfo::GetInstance(); }
 // ----------------------------------------------------------------------
 // SelectionVector
 
-namespace {
-
-Result<Datum> CoalesceChunkedToArray(Datum value, ExecContext* ctx) {
-  if (ctx == nullptr) {
-    ctx = default_exec_context();
-  }
-  if (!value.is_chunked_array()) {
-    return value;
-  }
-
-  const ChunkedArray& carr = *value.chunked_array();
-  if (carr.num_chunks() == 0) {
-    ARROW_ASSIGN_OR_RAISE(auto empty,
-                          MakeEmptyArray(value.type(), ctx->memory_pool()));
-    return Datum(std::move(empty));
-  }
-  if (carr.num_chunks() == 1) {
-    return Datum(carr.chunk(0)->data());
-  }
-  ARROW_ASSIGN_OR_RAISE(auto combined,
-                        Concatenate(carr.chunks(), ctx->memory_pool()));
-  return Datum(std::move(combined));
-}
-
-}  // namespace
-
-struct SelectionVector::Impl {
-  virtual ~Impl() = default;
-
-  virtual int64_t length() const = 0;
-  virtual Status Validate(int64_t values_length) const = 0;
-  virtual Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const = 0;
-  virtual Result<std::vector<Datum>> GatherValues(const ExecBatch& batch,
-                                                  ExecContext* ctx) const = 0;
-  virtual Result<Datum> ScatterDenseResult(const Datum& dense_result,
-                                          int64_t values_length,
-                                          ExecContext* ctx) const = 0;
-  virtual int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                                  int64_t selection_position,
-                                  SelectionSpan* out) const = 0;
-};
-
-struct SelectionVector::IndicesImpl final : public SelectionVector::Impl {
- public:
-  explicit IndicesImpl(std::shared_ptr<ArrayData> data)
-      : data_(std::move(data)) {
-    DCHECK_NE(data_, nullptr);
-    DCHECK_EQ(data_->type->id(), Type::UINT64);
-    indices_ = data_->GetValues<uint64_t>(1);
-    DCHECK(length() == 0 || indices_ != nullptr);
-  }
-
-  int64_t length() const override { return data_->length; }
-
-  Status Validate(int64_t values_length) const override {
-    if (data_ == nullptr) {
-      return Status::Invalid("SelectionVector not initialized");
-    }
-    if (length() > 0 && indices_ == nullptr) {
-      return Status::Invalid("SelectionVector indices buffer is missing");
-    }
-    if (data_->type->id() != Type::UINT64) {
-      return Status::Invalid("SelectionVector must be of type uint64");
-    }
-    if (data_->GetNullCount() != 0) {
-      return Status::Invalid("SelectionVector cannot contain nulls");
-    }
-    for (int64_t i = 1; i < length(); ++i) {
-      if (indices_[i - 1] >= indices_[i]) {
-        return Status::Invalid("SelectionVector indices must be strictly increasing");
-      }
-    }
-    if (values_length >= 0) {
-      const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
-      for (int64_t i = 0; i < length(); ++i) {
-        if (indices_[i] >= values_length_u64) {
-          return Status::Invalid("SelectionVector index ", indices_[i],
-                                 " >= values length ", values_length);
-        }
-      }
-    }
-    return Status::OK();
-  }
-
-  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const override {
-    (void)pool;
-    return data_;
-  }
-
-  Result<std::vector<Datum>> GatherValues(const ExecBatch& batch,
-                                         ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-
-    Datum take_indices(data_);
-    std::vector<Datum> values(batch.num_values());
-    for (int i = 0; i < batch.num_values(); ++i) {
-      if (batch[i].is_scalar()) {
-        // XXX: Skip gather for scalars since it is not currently supported by Take.
-        values[i] = batch[i];
-      } else {
-        ARROW_ASSIGN_OR_RAISE(
-            values[i],
-            Take(batch[i], take_indices, TakeOptions{/*boundscheck=*/false}, ctx));
-        // Gather should preserve kind (Array vs ChunkedArray) where possible. Since Take
-        // may return a ChunkedArray for array inputs depending on ExecContext settings,
-        // coalesce to a single Array when the input is an Array.
-        if (batch[i].is_array() && values[i].is_chunked_array()) {
-          ARROW_ASSIGN_OR_RAISE(values[i], CoalesceChunkedToArray(std::move(values[i]), ctx));
-        }
-      }
-    }
-    return values;
-  }
-
-  Result<Datum> ScatterDenseResult(const Datum& dense_result, int64_t values_length,
-                                  ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-    if (values_length < 0) {
-      return Status::Invalid("values_length must be non-negative");
-    }
-
-    // Scatter only accepts signed indices, while our indices are UInt64.
-    Datum scatter_indices(data_);
-    if (scatter_indices.type()->id() == Type::UINT64) {
-      ARROW_ASSIGN_OR_RAISE(scatter_indices,
-                            Cast(scatter_indices, int64(), CastOptions::Safe(), ctx));
-    }
-
-    return Scatter(dense_result, scatter_indices,
-                   ScatterOptions{/*max_index=*/values_length - 1}, ctx);
-  }
-
-  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                          int64_t selection_position,
-                          SelectionSpan* out) const override {
-    DCHECK_NE(out, nullptr);
-    DCHECK_LE(chunk_start, chunk_end);
-
-    if (length() == 0) {
-      *out = DiscreteSpan{/*indices=*/nullptr, /*length=*/0, chunk_start};
-      return 0;
-    }
-
-    const uint64_t* indices_begin = indices_ + selection_position;
-    const uint64_t* indices_end = indices_ + length();
-    DCHECK_LE(indices_begin, indices_end);
-
-    const uint64_t* indices_limit =
-        std::lower_bound(indices_begin, indices_end, chunk_end);
-    const int64_t num_indices = indices_limit - indices_begin;
-
-    if (num_indices > 0) {
-      const uint64_t first = indices_begin[0];
-      const uint64_t last = indices_begin[num_indices - 1];
-      DCHECK_GE(first, chunk_start);
-      DCHECK_LT(last, chunk_end);
-
-      // If the discrete indices form a contiguous run, represent them as such.
-      // Since Validate enforces strict increasing order, checking (last - first ==
-      // num_indices - 1) is sufficient.
-      if (last - first == static_cast<uint64_t>(num_indices - 1)) {
-        *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
-      } else {
-        *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
-      }
-    } else {
-      *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
-    }
-
-    return num_indices;
-  }
-
- private:
-  std::shared_ptr<ArrayData> data_;
-  const uint64_t* indices_ = NULLPTR;
-};
-
-struct SelectionVector::MaskImpl final : public SelectionVector::Impl {
- public:
-  MaskImpl(std::shared_ptr<ArrayData> mask, int64_t selection_length)
-      : mask_(std::move(mask)), selection_length_(selection_length) {
-    DCHECK_NE(mask_, nullptr);
-    DCHECK_EQ(mask_->type->id(), Type::BOOL);
-    DCHECK_GE(selection_length_, 0);
-    // Boolean values are bit-packed, so always use absolute_offset=0 and apply
-    // any bit offset manually.
-    bitmap_ = mask_->GetValues<uint8_t>(1, /*absolute_offset=*/0);
-    DCHECK(mask_->length == 0 || bitmap_ != nullptr);
-  }
-
-  int64_t length() const override { return selection_length_; }
-
-  Status Validate(int64_t values_length) const override {
-    if (mask_ == nullptr) {
-      return Status::Invalid("SelectionVector not initialized");
-    }
-    if (mask_->type->id() != Type::BOOL) {
-      return Status::Invalid("SelectionVector mask must be of type bool");
-    }
-    if (values_length >= 0 && mask_->length != values_length) {
-      return Status::Invalid("SelectionVector mask length ", mask_->length,
-                             " != values length ", values_length);
-    }
-    if (mask_->GetNullCount() != 0) {
-      return Status::Invalid("SelectionVector mask cannot contain nulls");
-    }
-    const int64_t computed =
-        ::arrow::internal::CountSetBits(bitmap_, mask_->offset, mask_->length);
-    if (computed != selection_length_) {
-      return Status::Invalid("SelectionVector mask selection length mismatch");
-    }
-    return Status::OK();
-  }
-
-  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const override {
-    if (pool == nullptr) {
-      pool = default_memory_pool();
-    }
-    ARROW_ASSIGN_OR_RAISE(auto indices_buf,
-                          AllocateBuffer(selection_length_ * sizeof(uint64_t), pool));
-    auto out = reinterpret_cast<uint64_t*>(indices_buf->mutable_data());
-    int64_t out_pos = 0;
-    for (int64_t i = 0; i < mask_->length; ++i) {
-      if (bit_util::GetBit(bitmap_, mask_->offset + i)) {
-        out[out_pos++] = static_cast<uint64_t>(i);
-      }
-    }
-    DCHECK_EQ(out_pos, selection_length_);
-    return ArrayData::Make(uint64(), selection_length_, {nullptr, std::move(indices_buf)},
-                           /*null_count=*/0);
-  }
-
-  Result<std::vector<Datum>> GatherValues(const ExecBatch& batch,
-                                         ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-    Datum mask(mask_);
-    const FilterOptions opts(FilterOptions::DROP);
-
-    std::vector<Datum> values(batch.num_values());
-    for (int i = 0; i < batch.num_values(); ++i) {
-      if (batch[i].is_scalar()) {
-        values[i] = batch[i];
-      } else {
-        ARROW_ASSIGN_OR_RAISE(values[i], Filter(batch[i], mask, opts, ctx));
-        // Gather should preserve kind (Array vs ChunkedArray) where possible. Since
-        // Filter may return a ChunkedArray for array inputs depending on ExecContext
-        // settings, coalesce to a single Array when the input is an Array.
-        if (batch[i].is_array() && values[i].is_chunked_array()) {
-          ARROW_ASSIGN_OR_RAISE(values[i], CoalesceChunkedToArray(std::move(values[i]), ctx));
-        }
-      }
-    }
-    return values;
-  }
-
-  Result<Datum> ScatterDenseResult(const Datum& dense_result, int64_t values_length,
-                                  ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-    if (values_length < 0) {
-      return Status::Invalid("values_length must be non-negative");
-    }
-
-    // Try a mask-based scatter, which can avoid materializing indices.
-    ARROW_ASSIGN_OR_RAISE(
-        auto base_nulls,
-        MakeArrayOfNull(dense_result.type(), values_length, ctx->memory_pool()));
-    auto maybe_mask_scatter =
-        ReplaceWithMask(Datum(std::move(base_nulls)), Datum(mask_), dense_result, ctx);
-    if (maybe_mask_scatter.ok()) {
-      return maybe_mask_scatter;
-    }
-
-    // Fall back to an indices-based scatter for unsupported types.
-    ARROW_ASSIGN_OR_RAISE(auto indices_data, ToIndicesArrayData(ctx->memory_pool()));
-    Datum scatter_indices(std::move(indices_data));
-    ARROW_ASSIGN_OR_RAISE(scatter_indices,
-                          Cast(scatter_indices, int64(), CastOptions::Safe(), ctx));
-    return Scatter(dense_result, scatter_indices,
-                   ScatterOptions{/*max_index=*/values_length - 1}, ctx);
-  }
-
-  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                          int64_t selection_position,
-                          SelectionSpan* out) const override {
-    DCHECK_NE(out, nullptr);
-    DCHECK_LE(chunk_start, chunk_end);
-    DCHECK_GE(selection_position, 0);
-    DCHECK_LE(selection_position, selection_length_);
-
-    const uint64_t values_length = static_cast<uint64_t>(mask_->length);
-    const uint64_t clamped_start = std::min(chunk_start, values_length);
-    const uint64_t clamped_end = std::min(chunk_end, values_length);
-    DCHECK_LE(clamped_start, clamped_end);
-    const int64_t chunk_length = static_cast<int64_t>(clamped_end - clamped_start);
-    *out = FilteredSpan{/*start_offset=*/0,
-                        /*length=*/chunk_length,
-                        /*bitmap=*/bitmap_,
-                        /*bitmap_offset=*/static_cast<int64_t>(clamped_start) +
-                            mask_->offset};
-
-    return ::arrow::internal::CountSetBits(
-        bitmap_, static_cast<int64_t>(clamped_start) + mask_->offset, chunk_length);
-  }
-
- private:
-  std::shared_ptr<ArrayData> mask_;
-  int64_t selection_length_ = 0;
-  const uint8_t* bitmap_ = NULLPTR;
-};
-
-struct SelectionVector::RangesImpl final : public SelectionVector::Impl {
- public:
-  RangesImpl(std::vector<SelectionRange> ranges, int64_t values_length,
-             std::shared_ptr<ArrayData> mask, int64_t selection_length)
-      : ranges_(std::move(ranges)),
-        values_length_(values_length),
-        mask_(std::move(mask)),
-        selection_length_(selection_length) {
-    DCHECK_NE(mask_, nullptr);
-    DCHECK_EQ(mask_->type->id(), Type::BOOL);
-    // Boolean values are bit-packed, so always use absolute_offset=0 and apply
-    // any bit offset manually.
-    bitmap_ = mask_->GetValues<uint8_t>(1, /*absolute_offset=*/0);
-    DCHECK(mask_->length == 0 || bitmap_ != nullptr);
-  }
-
-  int64_t length() const override { return selection_length_; }
-
-  Status Validate(int64_t values_length) const override {
-    if (values_length >= 0 && values_length != values_length_) {
-      return Status::Invalid("SelectionVector values_length mismatch");
-    }
-    if (mask_->GetNullCount() != 0) {
-      return Status::Invalid("SelectionVector mask cannot contain nulls");
-    }
-    if (mask_->length != values_length_) {
-      return Status::Invalid("SelectionVector mask length mismatch");
-    }
-    uint64_t prev_end = 0;
-    bool first = true;
-    int64_t total = 0;
-    for (const auto& r : ranges_) {
-      if (r.length == 0) {
-        continue;
-      }
-      if (r.start + r.length < r.start) {
-        return Status::Invalid("SelectionVector range overflow");
-      }
-      if (!first && r.start < prev_end) {
-        return Status::Invalid("SelectionVector ranges must be sorted and non-overlapping");
-      }
-      first = false;
-      prev_end = r.start + r.length;
-      if (static_cast<int64_t>(prev_end) > values_length_) {
-        return Status::Invalid("SelectionVector range end out of bounds");
-      }
-      total += static_cast<int64_t>(r.length);
-    }
-    if (total != selection_length_) {
-      return Status::Invalid("SelectionVector ranges selection length mismatch");
-    }
-    const int64_t computed =
-        ::arrow::internal::CountSetBits(bitmap_, mask_->offset, mask_->length);
-    if (computed != selection_length_) {
-      return Status::Invalid("SelectionVector mask selection length mismatch");
-    }
-    return Status::OK();
-  }
-
-  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const override {
-    if (pool == nullptr) {
-      pool = default_memory_pool();
-    }
-    ARROW_ASSIGN_OR_RAISE(auto indices_buf,
-                          AllocateBuffer(selection_length_ * sizeof(uint64_t), pool));
-    auto out = reinterpret_cast<uint64_t*>(indices_buf->mutable_data());
-    int64_t out_pos = 0;
-    for (const auto& r : ranges_) {
-      for (uint64_t i = 0; i < r.length; ++i) {
-        out[out_pos++] = r.start + i;
-      }
-    }
-    DCHECK_EQ(out_pos, selection_length_);
-    return ArrayData::Make(uint64(), selection_length_, {nullptr, std::move(indices_buf)},
-                           /*null_count=*/0);
-  }
-
-  Result<std::vector<Datum>> GatherValues(const ExecBatch& batch,
-                                         ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-
-    std::vector<Datum> values(batch.num_values());
-    for (int i = 0; i < batch.num_values(); ++i) {
-      if (batch[i].is_scalar()) {
-        values[i] = batch[i];
-        continue;
-      }
-
-      if (ranges_.empty()) {
-        // Preserve the value kind (array vs chunked array) where possible.
-        if (batch[i].is_array()) {
-          values[i] = batch[i].array()->Slice(0, 0);
-        } else {
-          values[i] = batch[i].chunked_array()->Slice(0, 0);
-        }
-        continue;
-      }
-
-      if (ranges_.size() == 1) {
-        const auto& r = ranges_[0];
-        const int64_t start = static_cast<int64_t>(r.start);
-        const int64_t len = static_cast<int64_t>(r.length);
-        if (batch[i].is_array()) {
-          values[i] = batch[i].array()->Slice(start, len);
-        } else {
-          values[i] = batch[i].chunked_array()->Slice(start, len);
-        }
-        continue;
-      }
-
-      // Multiple ranges: build a ChunkedArray of slices (zero-copy where possible).
-      if (batch[i].is_array()) {
-        const auto& arr = *batch[i].array();
-        ArrayVector slices;
-        slices.reserve(ranges_.size());
-        for (const auto& r : ranges_) {
-          slices.push_back(MakeArray(arr.Slice(static_cast<int64_t>(r.start),
-                                               static_cast<int64_t>(r.length))));
-        }
-        // Preserve array kind for array inputs, even with multiple ranges.
-        ARROW_ASSIGN_OR_RAISE(auto concatenated,
-                              Concatenate(slices, ctx->memory_pool()));
-        values[i] = Datum(std::move(concatenated));
-      } else {
-        ArrayVector chunks;
-        chunks.reserve(ranges_.size());
-        const auto& carr = *batch[i].chunked_array();
-        for (const auto& r : ranges_) {
-          auto sliced = carr.Slice(static_cast<int64_t>(r.start),
-                                   static_cast<int64_t>(r.length));
-          for (const auto& chunk : sliced->chunks()) {
-            chunks.push_back(chunk);
-          }
-        }
-        values[i] =
-            Datum(std::make_shared<ChunkedArray>(std::move(chunks), batch[i].type()));
-      }
-    }
-
-    return values;
-  }
-
-  Result<Datum> ScatterDenseResult(const Datum& dense_result, int64_t values_length,
-                                  ExecContext* ctx) const override {
-    if (ctx == nullptr) {
-      ctx = default_exec_context();
-    }
-    if (values_length != values_length_) {
-      return Status::Invalid("SelectionVector ranges scatter values_length mismatch");
-    }
-    if (values_length < 0) {
-      return Status::Invalid("values_length must be non-negative");
-    }
-
-    // Prefer a mask-based scatter, which produces a single array and can avoid
-    // materializing indices.
-    ARROW_ASSIGN_OR_RAISE(
-        auto base_nulls,
-        MakeArrayOfNull(dense_result.type(), values_length_, ctx->memory_pool()));
-    auto maybe_mask_scatter =
-        ReplaceWithMask(Datum(std::move(base_nulls)), Datum(mask_), dense_result, ctx);
-    if (maybe_mask_scatter.ok()) {
-      return maybe_mask_scatter;
-    }
-
-    // Fall back to an indices-based scatter for unsupported types.
-    ARROW_ASSIGN_OR_RAISE(auto indices_data, ToIndicesArrayData(ctx->memory_pool()));
-    Datum scatter_indices(std::move(indices_data));
-    ARROW_ASSIGN_OR_RAISE(scatter_indices,
-                          Cast(scatter_indices, int64(), CastOptions::Safe(), ctx));
-    return Scatter(dense_result, scatter_indices,
-                   ScatterOptions{/*max_index=*/values_length_ - 1}, ctx);
-  }
-
-  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                          int64_t selection_position,
-                          SelectionSpan* out) const override {
-    DCHECK_NE(out, nullptr);
-    DCHECK_LE(chunk_start, chunk_end);
-    DCHECK_GE(selection_position, 0);
-    DCHECK_LE(selection_position, selection_length_);
-
-    const uint64_t values_length = static_cast<uint64_t>(values_length_);
-    const uint64_t clamped_start = std::min(chunk_start, values_length);
-    const uint64_t clamped_end = std::min(chunk_end, values_length);
-    DCHECK_LE(clamped_start, clamped_end);
-    const int64_t chunk_length = static_cast<int64_t>(clamped_end - clamped_start);
-    *out = FilteredSpan{/*start_offset=*/0,
-                        /*length=*/chunk_length,
-                        /*bitmap=*/bitmap_,
-                        /*bitmap_offset=*/static_cast<int64_t>(clamped_start) +
-                            mask_->offset};
-
-    return ::arrow::internal::CountSetBits(
-        bitmap_, static_cast<int64_t>(clamped_start) + mask_->offset, chunk_length);
-  }
-
- private:
-  std::vector<SelectionRange> ranges_;
-  int64_t values_length_ = 0;
-  std::shared_ptr<ArrayData> mask_;
-  int64_t selection_length_ = 0;
-  const uint8_t* bitmap_ = NULLPTR;
-};
-
 SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
-    : impl_(std::make_shared<IndicesImpl>(std::move(data))) {}
-
-SelectionVector::SelectionVector(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+    : data_(std::move(data)) {
+  DCHECK_NE(data_, nullptr);
+  DCHECK_EQ(data_->type->id(), Type::UINT64);
+  indices_ = data_->GetValues<uint64_t>(1);
+}
 
 SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
 
-Result<std::shared_ptr<SelectionVector>> SelectionVector::FromMask(const Array& mask,
-                                                                   MemoryPool* pool) {
-  if (pool == nullptr) {
-    pool = default_memory_pool();
-  }
-  if (mask.type_id() != Type::BOOL) {
-    return Status::TypeError("SelectionVector mask must be of type bool");
-  }
-
-  auto data = mask.data();
-  DCHECK_NE(data, nullptr);
-
-  const int64_t length = data->length;
-  const int64_t offset = data->offset;
-  // Boolean buffers are bit-packed, so always use absolute_offset=0 and apply
-  // the bit offset manually.
-  const uint8_t* values = data->GetValues<uint8_t>(1, /*absolute_offset=*/0);
-  const uint8_t* validity = data->GetValues<uint8_t>(0, /*absolute_offset=*/0);
-
-  std::shared_ptr<ArrayData> normalized;
-  if (offset == 0 && data->GetNullCount() == 0) {
-    normalized = data;
-  } else {
-    std::shared_ptr<Buffer> bitmap;
-    if (data->GetNullCount() == 0) {
-      ARROW_ASSIGN_OR_RAISE(bitmap, AllocateEmptyBitmap(length, pool));
-      CopyBitmap(values, offset, length, bitmap->mutable_data(),
-                           /*dest_offset=*/0);
-    } else {
-      // Treat nulls as false by intersecting validity and values bitmaps.
-      DCHECK_NE(validity, nullptr);
-      ARROW_ASSIGN_OR_RAISE(bitmap, BitmapAnd(pool, values, offset, validity, offset,
-                                              length, /*out_offset=*/0));
-    }
-    normalized = ArrayData::Make(boolean(), length, {nullptr, std::move(bitmap)},
-                                 /*null_count=*/0);
-  }
-
-  const uint8_t* bitmap = normalized->GetValues<uint8_t>(1, /*absolute_offset=*/0);
-  const int64_t selection_length = ::arrow::internal::CountSetBits(
-      bitmap, normalized->offset, normalized->length);
-  return std::shared_ptr<SelectionVector>(new SelectionVector(
-      std::make_shared<MaskImpl>(std::move(normalized), selection_length)));
-}
-
-Result<std::shared_ptr<SelectionVector>> SelectionVector::FromRanges(
-    std::vector<SelectionRange> ranges, int64_t values_length, MemoryPool* pool) {
-  if (pool == nullptr) {
-    pool = default_memory_pool();
-  }
-  if (values_length < 0) {
-    return Status::Invalid("values_length must be non-negative");
-  }
-
-  uint64_t prev_end = 0;
-  bool first = true;
-  int64_t selection_length = 0;
-  for (auto& r : ranges) {
-    if (r.length == 0) {
-      continue;
-    }
-    if (r.start + r.length < r.start) {
-      return Status::Invalid("SelectionVector range overflow");
-    }
-    if (!first && r.start < prev_end) {
-      return Status::Invalid("SelectionVector ranges must be sorted and non-overlapping");
-    }
-    first = false;
-    prev_end = r.start + r.length;
-    if (static_cast<int64_t>(prev_end) > values_length) {
-      return Status::Invalid("SelectionVector range end out of bounds");
-    }
-    selection_length += static_cast<int64_t>(r.length);
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto bitmap, AllocateEmptyBitmap(values_length, pool));
-  for (const auto& r : ranges) {
-    bit_util::SetBitsTo(bitmap->mutable_data(), static_cast<int64_t>(r.start),
-                        static_cast<int64_t>(r.length), true);
-  }
-  auto mask = ArrayData::Make(boolean(), values_length, {nullptr, std::move(bitmap)},
-                              /*null_count=*/0);
-
-  return std::shared_ptr<SelectionVector>(
-      new SelectionVector(std::make_shared<RangesImpl>(
-          std::move(ranges), values_length, std::move(mask), selection_length)));
-}
-
-int64_t SelectionVector::length() const { return impl_->length(); }
+int64_t SelectionVector::length() const { return data_->length; }
 
 Status SelectionVector::Validate(int64_t values_length) const {
-  return impl_->Validate(values_length);
+  if (data_ == nullptr) {
+    return Status::Invalid("SelectionVector not initialized");
+  }
+  ARROW_CHECK_NE(indices_, nullptr);
+  if (data_->type->id() != Type::UINT64) {
+    return Status::Invalid("SelectionVector must be of type uint64");
+  }
+  if (data_->GetNullCount() != 0) {
+    return Status::Invalid("SelectionVector cannot contain nulls");
+  }
+  for (int64_t i = 1; i < length(); ++i) {
+    if (indices_[i - 1] >= indices_[i]) {
+      return Status::Invalid("SelectionVector indices must be strictly increasing");
+    }
+  }
+  if (values_length >= 0) {
+    const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
+    for (int64_t i = 0; i < length(); ++i) {
+      if (indices_[i] >= values_length_u64) {
+        return Status::Invalid("SelectionVector index ", indices_[i],
+                               " >= values length ", values_length);
+      }
+    }
+  }
+  return Status::OK();
 }
 
-Result<std::shared_ptr<ArrayData>> SelectionVector::ToIndicesArrayData(MemoryPool* pool) const {
-  return impl_->ToIndicesArrayData(pool);
-}
-
-Result<std::vector<Datum>> SelectionVector::GatherValues(const ExecBatch& batch,
-                                                         ExecContext* ctx) const {
-  return impl_->GatherValues(batch, ctx);
-}
-
-Result<Datum> SelectionVector::ScatterDenseResult(const Datum& dense_result,
-                                                  int64_t values_length,
-                                                  ExecContext* ctx) const {
-  return impl_->ScatterDenseResult(dense_result, values_length, ctx);
+Result<std::shared_ptr<ArrayData>> SelectionVector::ToIndicesArrayData(
+    MemoryPool* pool) const {
+  (void)pool;
+  return data_;
 }
 
 int64_t SelectionVector::GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
                                         int64_t selection_position,
                                         SelectionSpan* out) const {
-  return impl_->GetSpanForChunk(chunk_start, chunk_end, selection_position, out);
+  DCHECK_NE(out, nullptr);
+  DCHECK_LE(chunk_start, chunk_end);
+
+  const uint64_t* indices_begin = indices_ + selection_position;
+  const uint64_t* indices_end = indices_ + length();
+  DCHECK_LE(indices_begin, indices_end);
+
+  const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
+  const int64_t num_indices = indices_limit - indices_begin;
+
+  if (num_indices > 0) {
+    const uint64_t first = indices_begin[0];
+    const uint64_t last = indices_begin[num_indices - 1];
+    DCHECK_GE(first, chunk_start);
+    DCHECK_LT(last, chunk_end);
+
+    // If the discrete indices form a contiguous run, represent them as such.
+    // Since SelectionVector::Validate enforces strict increasing order, checking
+    // (last - first == num_indices - 1) is sufficient.
+    if (last - first == static_cast<uint64_t>(num_indices - 1)) {
+      *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
+    } else {
+      *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
+    }
+  } else {
+    *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+  }
+
+  return num_indices;
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
