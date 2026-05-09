@@ -194,6 +194,9 @@ VisitSelectedIndicesInline(const ContiguousSpan& span, OnSelectionFn&& on_select
 template <typename OnSelectionFn>
 typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, Status>::type
 VisitSelectedIndicesInline(const FilteredSpan& span, OnSelectionFn&& on_selection) {
+  if (span.length == 0) {
+    return Status::OK();
+  }
   DCHECK_NE(span.bitmap, nullptr);
   for (int64_t i = 0; i < span.length; ++i) {
     if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {
@@ -206,6 +209,9 @@ VisitSelectedIndicesInline(const FilteredSpan& span, OnSelectionFn&& on_selectio
 template <typename OnSelectionFn>
 typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, void>::type
 VisitSelectedIndicesInline(const FilteredSpan& span, OnSelectionFn&& on_selection) {
+  if (span.length == 0) {
+    return;
+  }
   DCHECK_NE(span.bitmap, nullptr);
   for (int64_t i = 0; i < span.length; ++i) {
     if (bit_util::GetBit(span.bitmap, span.bitmap_offset + i)) {

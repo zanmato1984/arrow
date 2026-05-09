@@ -168,11 +168,22 @@ struct ARROW_EXPORT DiscreteSpan {
 /// compute::detail::VisitSelectionSpanInline).
 using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 
+struct ExecBatch;
+
+/// \brief A selection range for selecting rows over an ExecBatch.
+///
+/// Offsets are absolute row indices into the underlying ExecBatch.
+struct ARROW_EXPORT SelectionRange {
+  uint64_t start = 0;
+  uint64_t length = 0;
+};
+
 /// \brief Container for a deferred selection of rows over an ExecBatch.
 ///
-/// This is currently an index-backed selection (UInt64 indices). The public API
-/// avoids exposing the backing representation so that bitmap / run-based
-/// selections can be supported in the future without changing call sites.
+/// This abstraction supports multiple backing representations (e.g. discrete
+/// indices, boolean mask, or ranges). The public API avoids exposing the backing
+/// representation so that future selection formats can be added without changing
+/// call sites.
 ///
 /// Columnar query engines (see e.g. [1]) have found that rather than
 /// materializing filtered data, the filter can instead be converted to a
@@ -182,9 +193,22 @@ using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 /// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
 class ARROW_EXPORT SelectionVector {
  public:
+  /// \brief Construct an index-backed selection from a UInt64 ArrayData.
   explicit SelectionVector(std::shared_ptr<ArrayData> data);
 
+  /// \brief Construct an index-backed selection from a UInt64 Array.
   explicit SelectionVector(const Array& arr);
+
+  /// \brief Construct a mask-backed selection from a Boolean array.
+  ///
+  /// Mask nulls are treated as false (i.e. not selected).
+  static Result<std::shared_ptr<SelectionVector>> FromMask(
+      const Array& mask, MemoryPool* pool = default_memory_pool());
+
+  /// \brief Construct a ranges-backed selection from sorted non-overlapping ranges.
+  static Result<std::shared_ptr<SelectionVector>> FromRanges(
+      std::vector<SelectionRange> ranges, int64_t values_length,
+      MemoryPool* pool = default_memory_pool());
 
   /// \brief Number of selected row indices.
   int64_t length() const;
@@ -199,6 +223,14 @@ class ARROW_EXPORT SelectionVector {
   Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
       MemoryPool* pool = default_memory_pool()) const;
 
+  /// \brief Gather selected rows into a dense sequence of values.
+  Result<std::vector<Datum>> GatherValues(const ExecBatch& batch,
+                                         ExecContext* ctx) const;
+
+  /// \brief Scatter a dense result back into an output of length values_length.
+  Result<Datum> ScatterDenseResult(const Datum& dense_result, int64_t values_length,
+                                  ExecContext* ctx) const;
+
   /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
   ///
   /// \param[in] chunk_start Absolute row start (inclusive).
@@ -211,8 +243,14 @@ class ARROW_EXPORT SelectionVector {
                           int64_t selection_position, SelectionSpan* out) const;
 
  private:
-  std::shared_ptr<ArrayData> data_;
-  const uint64_t* indices_;
+  struct Impl;
+  struct IndicesImpl;
+  struct MaskImpl;
+  struct RangesImpl;
+
+  explicit SelectionVector(std::shared_ptr<Impl> impl);
+
+  std::shared_ptr<Impl> impl_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
