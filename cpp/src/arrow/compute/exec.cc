@@ -1193,38 +1193,47 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Status ApplySelectionMask(const SelectionSpan& selection, ArraySpan* out) {
-    if (out->length == 0) {
-      return Status::OK();
-    }
-    if (output_type_.type->layout().buffers.empty() ||
-        output_type_.type->layout().buffers[0].kind != DataTypeLayout::BITMAP) {
-      // Types without a top-level validity bitmap (e.g. unions) are not yet
-      // handled here.
-      return Status::OK();
-    }
-    const int64_t selected_count = SelectedCount(selection);
-    if (selected_count == out->length) {
-      return Status::OK();
-    }
-    uint8_t* out_bitmap = out->buffers[0].data;
-    DCHECK_NE(out_bitmap, nullptr);
+	  Status ApplySelectionMask(const SelectionSpan& selection, ArraySpan* out) {
+	    if (out->length == 0) {
+	      return Status::OK();
+	    }
+	    if (out->type->layout().buffers.empty() ||
+	        out->type->layout().buffers[0].kind != DataTypeLayout::BITMAP) {
+	      // Types without a top-level validity bitmap (e.g. unions) are not yet
+	      // handled here.
+	      return Status::OK();
+	    }
+	    const int64_t selected_count = SelectedCount(selection);
+	    const int64_t base = out->offset;
+	    const int64_t len = out->length;
 
-    const int64_t base = out->offset;
-    const int64_t len = out->length;
+	    if (selected_count == len) {
+	      // No rows are unselected in this span. Still, an OUTPUT_NOT_NULL kernel may rely on
+	      // the executor to ensure the preallocated validity is set to all-valid.
+	      if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
+	        if (uint8_t* out_bitmap = out->buffers[0].data) {
+	          bit_util::SetBitsTo(out_bitmap, base, len, true);
+	        }
+	        out->null_count = 0;
+	      }
+	      return Status::OK();
+	    }
 
-    if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
-      // The kernel promises all selected rows are valid; only the selection introduces
-      // nulls.
-      bit_util::SetBitsTo(out_bitmap, base, len, false);
-      VisitSelectionSpanInline(selection,
-                               [&](int64_t i) { bit_util::SetBit(out_bitmap, base + i); });
-      out->null_count = len - selected_count;
-      return Status::OK();
-    }
+	    uint8_t* out_bitmap = out->buffers[0].data;
+	    DCHECK_NE(out_bitmap, nullptr);
 
-    return std::visit(
-        overloaded{
+	    if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
+	      // The kernel promises all selected rows are valid; only the selection introduces
+	      // nulls.
+	      bit_util::SetBitsTo(out_bitmap, base, len, false);
+	      VisitSelectionSpanInline(selection,
+	                               [&](int64_t i) { bit_util::SetBit(out_bitmap, base + i); });
+	      out->null_count = len - selected_count;
+	      return Status::OK();
+	    }
+
+	    return std::visit(
+	        overloaded{
             [&](const ContiguousSpan& span) -> Status {
               if (span.start_offset > 0) {
                 bit_util::SetBitsTo(out_bitmap, base, span.start_offset, false);
@@ -1268,95 +1277,36 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
               out->null_count = kUnknownNullCount;
               return Status::OK();
             }},
-        selection);
-  }
+	        selection);
+	  }
 
-  Status ApplySelectionMask(const SelectionSpan& selection, ArrayData* out) {
-    if (out->length == 0) {
-      return Status::OK();
-    }
-    if (out->type->layout().buffers.empty() ||
-        out->type->layout().buffers[0].kind != DataTypeLayout::BITMAP) {
-      return Status::OK();
-    }
-    if (out->buffers.empty()) {
-      return Status::OK();
-    }
-    if (out->buffers[0] == nullptr) {
-      // A missing validity bitmap implies "all valid". Materialize an all-valid bitmap so
-      // we can mask it with the selection.
-      const int64_t bitmap_length = out->offset + out->length;
-      ARROW_ASSIGN_OR_RAISE(out->buffers[0],
-                            AllocateEmptyBitmap(bitmap_length, exec_context()->memory_pool()));
-      bit_util::SetBitsTo(out->buffers[0]->mutable_data(), /*start_offset=*/0,
-                          bitmap_length, true);
-      out->null_count = 0;
-    }
-
-    const int64_t selected_count = SelectedCount(selection);
-    if (selected_count == out->length) {
-      return Status::OK();
-    }
-
-    uint8_t* out_bitmap = out->buffers[0]->mutable_data();
-    const int64_t base = out->offset;
-    const int64_t len = out->length;
-
-    if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
-      bit_util::SetBitsTo(out_bitmap, base, len, false);
-      VisitSelectionSpanInline(selection,
-                               [&](int64_t i) { bit_util::SetBit(out_bitmap, base + i); });
-      out->null_count = len - selected_count;
-      return Status::OK();
-    }
-
-    return std::visit(
-        overloaded{
-            [&](const ContiguousSpan& span) -> Status {
-              if (span.start_offset > 0) {
-                bit_util::SetBitsTo(out_bitmap, base, span.start_offset, false);
-              }
-              const int64_t end = span.start_offset + span.length;
-              if (end < len) {
-                bit_util::SetBitsTo(out_bitmap, base + end, len - end, false);
-              }
-              out->null_count = kUnknownNullCount;
-              return Status::OK();
-            },
-            [&](const FilteredSpan& span) -> Status {
-              DCHECK_NE(span.bitmap, nullptr);
-              if (span.start_offset > 0) {
-                bit_util::SetBitsTo(out_bitmap, base, span.start_offset, false);
-              }
-              const int64_t end = span.start_offset + span.length;
-              if (end < len) {
-                bit_util::SetBitsTo(out_bitmap, base + end, len - end, false);
-              }
-              BitmapAnd(out_bitmap, base + span.start_offset, span.bitmap, span.bitmap_offset,
-                        span.length, base + span.start_offset, out_bitmap);
-              out->null_count = kUnknownNullCount;
-              return Status::OK();
-            },
-            [&](const DiscreteSpan& span) -> Status {
-              int64_t cursor = 0;
-              for (int64_t i = 0; i < span.length; ++i) {
-                const int64_t idx = span[i];
-                DCHECK_GE(idx, 0);
-                DCHECK_LT(idx, len);
-                if (idx > cursor) {
-                  bit_util::SetBitsTo(out_bitmap, base + cursor, idx - cursor, false);
-                }
-                cursor = idx + 1;
-              }
-              if (cursor < len) {
-                bit_util::SetBitsTo(out_bitmap, base + cursor, len - cursor, false);
-              }
-              out->null_count = kUnknownNullCount;
-              return Status::OK();
-            }},
-        selection);
-  }
-};
+	  Status ApplySelectionMask(const SelectionSpan& selection, ArrayData* out) {
+	    if (out->length == 0) {
+	      return Status::OK();
+	    }
+	    if (out->type->layout().buffers.empty() ||
+	        out->type->layout().buffers[0].kind != DataTypeLayout::BITMAP) {
+	      return Status::OK();
+	    }
+	    if (out->buffers.empty()) {
+	      return Status::OK();
+	    }
+	    if (out->buffers[0] == nullptr) {
+	      // A missing validity bitmap implies "all valid". Materialize an all-valid bitmap so
+	      // we can mask it with the selection.
+	      const int64_t bitmap_length = out->offset + out->length;
+	      ARROW_ASSIGN_OR_RAISE(out->buffers[0],
+	                            AllocateEmptyBitmap(bitmap_length, exec_context()->memory_pool()));
+	      bit_util::SetBitsTo(out->buffers[0]->mutable_data(), /*start_offset=*/0,
+	                          bitmap_length, true);
+	      out->null_count = 0;
+	    }
+	    ArraySpan out_span(*out);
+	    RETURN_NOT_OK(ApplySelectionMask(selection, &out_span));
+	    out->null_count = out_span.null_count;
+	    return Status::OK();
+	  }
+	};
 
 namespace {
 

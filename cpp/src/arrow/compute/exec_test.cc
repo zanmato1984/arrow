@@ -17,6 +17,7 @@
 
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -1216,6 +1217,22 @@ Status SelectiveExecCopyArraySpan(KernelContext* ctx, const ExecSpan& batch,
   return Status::OK();
 }
 
+Status SelectiveExecCopyOutputNotNullArraySpan(KernelContext* ctx, const ExecSpan& batch,
+                                               const SelectionSpan& selection,
+                                               ExecResult* out) {
+  DCHECK_EQ(1, batch.num_values());
+  int value_size = batch[0].type()->byte_width();
+  const ArraySpan& arg0 = batch[0].array;
+  ArraySpan* out_arr = out->array_span_mutable();
+  uint8_t* dst = out_arr->buffers[1].data + out_arr->offset * value_size;
+  const uint8_t* src = arg0.buffers[1].data + arg0.offset * value_size;
+  std::memset(dst, kNonSelectedByte, batch.length * value_size);
+  VisitSelectionSpanInline(selection, [&](int64_t i) {
+    std::memcpy(dst + i * value_size, src + i * value_size, value_size);
+  });
+  return Status::OK();
+}
+
 Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
   // Propagate nulls not used. Check that the out bitmap isn't the same already
   // as the input bitmap
@@ -1487,6 +1504,15 @@ class TestCallScalarFunction : public TestComputeInternals {
     kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
     ASSERT_OK(func2->AddKernel(kernel));
     ASSERT_OK(registry->AddFunction(func2));
+
+    auto func3 =
+        std::make_shared<ScalarFunction>("test_copy_output_not_null_selective", Arity::Unary(),
+                                         /*doc=*/FunctionDoc::Empty());
+    ScalarKernel kernel3({uint8()}, uint8(), ExecCopyArraySpan,
+                         SelectiveExecCopyOutputNotNullArraySpan);
+    kernel3.null_handling = NullHandling::OUTPUT_NOT_NULL;
+    ASSERT_OK(func3->AddKernel(kernel3));
+    ASSERT_OK(registry->AddFunction(func3));
   }
 
   void AddNoPreallocateFunctions() {
@@ -1875,6 +1901,43 @@ TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveSparse) {
       });
     }
   }
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, OutputNotNullSelectiveSparse) {
+  auto arr = GetUInt8Array(/*size=*/100, /*null_probability=*/0.2);
+  ASSERT_NE(arr->data()->buffers[0], nullptr);
+  const uint8_t* validity = arr->data()->buffers[0]->data();
+  const int64_t offset = arr->data()->offset;
+  std::vector<int64_t> valid_indices;
+  valid_indices.reserve(static_cast<size_t>(arr->length()));
+  for (int64_t i = 0; i < arr->length(); ++i) {
+    if (bit_util::GetBit(validity, offset + i)) {
+      valid_indices.push_back(i);
+    }
+  }
+  ASSERT_GE(valid_indices.size(), 3);
+  const int64_t idx0 = valid_indices.front();
+  const int64_t idx1 = valid_indices[valid_indices.size() / 2];
+  const int64_t idx2 = valid_indices.back();
+  ASSERT_LT(idx0, idx1);
+  ASSERT_LT(idx1, idx2);
+  std::stringstream selection_json;
+  selection_json << "[" << idx0 << ", " << idx1 << ", " << idx2 << "]";
+  auto selection = SelectionVectorFromJSON(selection_json.str());
+  SelectionSpan selection_span;
+  const int64_t consumed = selection->GetSpanForChunk(
+      /*chunk_start=*/0, static_cast<uint64_t>(arr->length()), /*selection_position=*/0,
+      &selection_span);
+  ASSERT_EQ(consumed, selection->length());
+
+  ASSERT_OK_AND_ASSIGN(auto test_copy,
+                       ExpressionFunctionCaller::Maker("test_copy_output_not_null_selective",
+                                                       {uint8()}));
+  ResetContexts();
+  DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
+    ASSERT_EQ(Datum::ARRAY, result.kind());
+    AssertArraysEqualSparseWithSelection(*arr, selection_span, *result.make_array());
+  });
 }
 
 TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveDense) {
