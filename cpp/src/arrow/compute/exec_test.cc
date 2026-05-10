@@ -1048,11 +1048,8 @@ void AssertArraysEqualSparseWithSelection(const Array& src,
         }
       },
       [&](int64_t i) {
-        // Non-selected values should be the valid special value in the output
-        ASSERT_TRUE(bit_util::GetBit(dst_validity, dst_offset + i));
-        for (int j = 0; j < value_size; ++j) {
-          ASSERT_EQ(dst_data[(dst_offset + i) * value_size + j], kNonSelectedByte);
-        }
+        // Non-selected values should be invalid (null) in the output.
+        ASSERT_FALSE(bit_util::GetBit(dst_validity, dst_offset + i));
       });
 }
 
@@ -1092,21 +1089,35 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
                                                       const Array& input,
                                                       const SelectionVector* selection,
                                                       const Datum& result) {
+  ARROW_UNUSED(exec_chunksize);
+  if (result.kind() == Datum::ARRAY) {
+    SelectionSpan selection_span;
+    const uint64_t chunk_end = static_cast<uint64_t>(input.length());
+    const int64_t consumed = selection->GetSpanForChunk(/*chunk_start=*/0, chunk_end,
+                                                        /*selection_position=*/0,
+                                                        &selection_span);
+    ASSERT_EQ(consumed, selection->length());
+    AssertArraysEqualSparseWithSelection(input, selection_span, *result.make_array());
+    return;
+  }
+
   ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
   const ChunkedArray& carr = *result.chunked_array();
-  ASSERT_EQ(bit_util::CeilDiv(input.length(), exec_chunksize), carr.num_chunks());
+  ASSERT_EQ(input.length(), carr.length());
   int64_t selection_position = 0;
+  int64_t input_offset = 0;
   for (int i = 0; i < carr.num_chunks(); ++i) {
-    const uint64_t chunk_start = static_cast<uint64_t>(exec_chunksize) * i;
-    const uint64_t chunk_end = static_cast<uint64_t>(exec_chunksize) * (i + 1);
+    const int64_t chunk_len = carr.chunk(i)->length();
+    const uint64_t chunk_start = static_cast<uint64_t>(input_offset);
+    const uint64_t chunk_end = static_cast<uint64_t>(input_offset + chunk_len);
     SelectionSpan selection_span;
     selection_position += selection->GetSpanForChunk(chunk_start, chunk_end, selection_position,
                                                      &selection_span);
-    AssertArraysEqualSparseWithSelection(
-        *input.Slice(exec_chunksize * i,
-                     std::min(exec_chunksize, input.length() - exec_chunksize * i)),
-        selection_span, *carr.chunk(i));
+    AssertArraysEqualSparseWithSelection(*input.Slice(input_offset, chunk_len), selection_span,
+                                         *carr.chunk(i));
+    input_offset += chunk_len;
   }
+  ASSERT_EQ(input_offset, input.length());
   ASSERT_EQ(selection_position, selection->length());
 }
 
