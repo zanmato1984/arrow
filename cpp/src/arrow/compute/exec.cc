@@ -1031,16 +1031,27 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       selection_ptr = &selection;
     }
     ExecResult output;
+    int64_t pending_empty_length = 0;
+
+    auto flush_pending_empty = [&]() -> Status {
+      if (pending_empty_length == 0) {
+        return Status::OK();
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          std::shared_ptr<Array> all_null,
+          MakeArrayOfNull(output_type_.GetSharedPtr(), pending_empty_length,
+                          exec_context()->memory_pool()));
+      pending_empty_length = 0;
+      return EmitResult(all_null->data(), listener);
+    };
     while (span_iterator_.Next(&input, selection_ptr)) {
       if (selection_ptr != nullptr && SelectedCount(*selection_ptr) == 0) {
-        // No rows are selected in this span; output must be all-null.
-        ARROW_ASSIGN_OR_RAISE(
-            std::shared_ptr<Array> all_null,
-            MakeArrayOfNull(output_type_.GetSharedPtr(), input.length,
-                            exec_context()->memory_pool()));
-        RETURN_NOT_OK(EmitResult(all_null->data(), listener));
+        // No rows are selected in this span; skip kernel execution entirely.
+        // Coalesce consecutive empty spans to reduce output chunk overhead.
+        pending_empty_length += input.length;
         continue;
       }
+      RETURN_NOT_OK(flush_pending_empty());
       ARROW_ASSIGN_OR_RAISE(output.value, PrepareOutput(input.length));
       DCHECK(output.is_array_data());
 
@@ -1065,6 +1076,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       // Emit a result for each chunk
       RETURN_NOT_OK(EmitResult(output.array_data(), listener));
     }
+    RETURN_NOT_OK(flush_pending_empty());
     return Status::OK();
   }
 
