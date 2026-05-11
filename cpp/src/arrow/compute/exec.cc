@@ -814,6 +814,37 @@ class KernelExecutorImpl : public KernelExecutor {
   std::vector<BufferPreallocation> data_preallocated_;
 };
 
+int64_t SelectedCount(const ContiguousSpan& span) { return span.length; }
+int64_t SelectedCount(const DiscreteSpan& span) { return span.length; }
+int64_t SelectedCount(const FilteredSpan& span) {
+  DCHECK_NE(span.bitmap, nullptr);
+  return ::arrow::internal::CountSetBits(span.bitmap, span.bitmap_offset, span.length);
+}
+int64_t SelectedCount(const SelectionSpan& selection) {
+  return std::visit([](const auto& span) { return SelectedCount(span); }, selection);
+}
+
+void SetSpanAllNull(ArraySpan* out) {
+  out->null_count = out->length;
+  if (!out->type->layout().buffers.empty() &&
+      out->type->layout().buffers[0].kind == DataTypeLayout::BITMAP &&
+      out->buffers[0].data != nullptr) {
+    bit_util::SetBitsTo(out->buffers[0].data, out->offset, out->length, false);
+  }
+}
+
+class SelectionSpanView {
+ public:
+  explicit SelectionSpanView(const SelectionSpan* selection) : selection_(selection) {}
+
+  bool present() const { return selection_ != nullptr; }
+
+  bool empty() const { return present() && SelectedCount(*selection_) == 0; }
+
+ private:
+  const SelectionSpan* selection_;
+};
+
 class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
  public:
   Status Execute(const ExecBatch& batch, ExecListener* listener) override {
@@ -965,14 +996,11 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       while (span_iterator_.Next(&input, selection_ptr)) {
         // Set absolute output span position and length
         output_span->SetSlice(result_offset, input.length);
-        if (selection_ptr != nullptr) {
-          const int64_t selected_count = SelectedCount(*selection_ptr);
-          if (selected_count == 0) {
-            // No rows are selected in this span; output must be all-null.
-            SetSpanAllNull(output_span);
-            result_offset = span_iterator_.position();
-            continue;
-          }
+        if (SelectionSpanView(selection_ptr).empty()) {
+          // No rows are selected in this span; output must be all-null.
+          SetSpanAllNull(output_span);
+          result_offset = span_iterator_.position();
+          continue;
         }
         RETURN_NOT_OK(ExecuteSingleSpan(input, selection_ptr, &output));
         result_offset = span_iterator_.position();
@@ -1045,7 +1073,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return EmitResult(all_null->data(), listener);
     };
     while (span_iterator_.Next(&input, selection_ptr)) {
-      if (selection_ptr != nullptr && SelectedCount(*selection_ptr) == 0) {
+      if (SelectionSpanView(selection_ptr).empty()) {
         // No rows are selected in this span; skip kernel execution entirely.
         // Coalesce consecutive empty spans to reduce output chunk overhead.
         pending_empty_length += input.length;
@@ -1174,29 +1202,10 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
 
   ExecSpanIterator span_iterator_;
 
-  static int64_t SelectedCount(const ContiguousSpan& span) { return span.length; }
-  static int64_t SelectedCount(const DiscreteSpan& span) { return span.length; }
-  static int64_t SelectedCount(const FilteredSpan& span) {
-    DCHECK_NE(span.bitmap, nullptr);
-    return ::arrow::internal::CountSetBits(span.bitmap, span.bitmap_offset, span.length);
-  }
-  static int64_t SelectedCount(const SelectionSpan& selection) {
-    return std::visit([](const auto& span) { return SelectedCount(span); }, selection);
-  }
-
-  static void SetSpanAllNull(ArraySpan* out) {
-    out->null_count = out->length;
-    if (!out->type->layout().buffers.empty() &&
-        out->type->layout().buffers[0].kind == DataTypeLayout::BITMAP &&
-        out->buffers[0].data != nullptr) {
-      bit_util::SetBitsTo(out->buffers[0].data, out->offset, out->length, false);
+  Status ApplySelectionMask(const SelectionSpan& selection, ArraySpan* out) {
+    if (out->length == 0) {
+      return Status::OK();
     }
-  }
-
-	  Status ApplySelectionMask(const SelectionSpan& selection, ArraySpan* out) {
-	    if (out->length == 0) {
-	      return Status::OK();
-	    }
 	    if (out->type->layout().buffers.empty() ||
 	        out->type->layout().buffers[0].kind != DataTypeLayout::BITMAP) {
 	      // Types without a top-level validity bitmap (e.g. unions) are not yet
