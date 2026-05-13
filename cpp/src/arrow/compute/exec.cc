@@ -1660,83 +1660,99 @@ const CpuInfo* ExecContext::cpu_info() const { return CpuInfo::GetInstance(); }
 // ----------------------------------------------------------------------
 // SelectionVector
 
-SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
-    : data_(std::move(data)) {
-  DCHECK_NE(data_, nullptr);
-  DCHECK_EQ(data_->type->id(), Type::UINT64);
-  indices_ = data_->GetValues<uint64_t>(1);
-}
+namespace {
 
-SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
+class IndexSelectionVector final : public SelectionVector {
+ public:
+  explicit IndexSelectionVector(std::shared_ptr<ArrayData> data) : data_(std::move(data)) {
+    DCHECK_NE(data_, nullptr);
+    DCHECK_EQ(data_->type->id(), Type::UINT64);
+    indices_ = data_->GetValues<uint64_t>(1);
+  }
 
-int64_t SelectionVector::length() const { return data_->length; }
+  int64_t length() const override { return data_->length; }
 
-Status SelectionVector::Validate(int64_t values_length) const {
-  if (data_ == nullptr) {
-    return Status::Invalid("SelectionVector not initialized");
-  }
-  ARROW_CHECK_NE(indices_, nullptr);
-  if (data_->type->id() != Type::UINT64) {
-    return Status::Invalid("SelectionVector must be of type uint64");
-  }
-  if (data_->GetNullCount() != 0) {
-    return Status::Invalid("SelectionVector cannot contain nulls");
-  }
-  for (int64_t i = 1; i < length(); ++i) {
-    if (indices_[i - 1] >= indices_[i]) {
-      return Status::Invalid("SelectionVector indices must be strictly increasing");
+  Status Validate(int64_t values_length) const override {
+    if (data_ == nullptr) {
+      return Status::Invalid("SelectionVector not initialized");
     }
-  }
-  if (values_length >= 0) {
-    const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
-    for (int64_t i = 0; i < length(); ++i) {
-      if (indices_[i] >= values_length_u64) {
-        return Status::Invalid("SelectionVector index ", indices_[i],
-                               " >= values length ", values_length);
+    ARROW_CHECK_NE(indices_, nullptr);
+    if (data_->type->id() != Type::UINT64) {
+      return Status::Invalid("SelectionVector indices must be of type uint64");
+    }
+    if (data_->GetNullCount() != 0) {
+      return Status::Invalid("SelectionVector indices cannot contain nulls");
+    }
+    for (int64_t i = 1; i < length(); ++i) {
+      if (indices_[i - 1] >= indices_[i]) {
+        return Status::Invalid("SelectionVector indices must be strictly increasing");
       }
     }
-  }
-  return Status::OK();
-}
-
-Result<std::shared_ptr<ArrayData>> SelectionVector::ToIndicesArrayData(
-    MemoryPool* pool) const {
-  (void)pool;
-  return data_;
-}
-
-int64_t SelectionVector::GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                                        int64_t selection_position,
-                                        SelectionSpan* out) const {
-  DCHECK_NE(out, nullptr);
-  DCHECK_LE(chunk_start, chunk_end);
-
-  const uint64_t* indices_begin = indices_ + selection_position;
-  const uint64_t* indices_end = indices_ + length();
-  DCHECK_LE(indices_begin, indices_end);
-
-  const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
-  const int64_t num_indices = indices_limit - indices_begin;
-
-  if (num_indices > 0) {
-    const uint64_t first = indices_begin[0];
-    const uint64_t last = indices_begin[num_indices - 1];
-    DCHECK_GE(first, chunk_start);
-    DCHECK_LT(last, chunk_end);
-
-    // If the discrete indices form a contiguous run, represent them as such.
-    // Since SelectionVector::Validate enforces strict increasing order, checking
-    // (last - first == num_indices - 1) is sufficient.
-    if (last - first == static_cast<uint64_t>(num_indices - 1)) {
-      *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
-    } else {
-      *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
+    if (values_length >= 0) {
+      const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
+      for (int64_t i = 0; i < length(); ++i) {
+        if (indices_[i] >= values_length_u64) {
+          return Status::Invalid("SelectionVector index ", indices_[i],
+                                 " >= values length ", values_length);
+        }
+      }
     }
-  } else {
-    *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+    return Status::OK();
   }
 
-  return num_indices;
+  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const override {
+    (void)pool;
+    return data_;
+  }
+
+  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+                          int64_t selection_position,
+                          SelectionSpan* out) const override {
+    DCHECK_NE(out, nullptr);
+    DCHECK_LE(chunk_start, chunk_end);
+
+    const uint64_t* indices_begin = indices_ + selection_position;
+    const uint64_t* indices_end = indices_ + length();
+    DCHECK_LE(indices_begin, indices_end);
+
+    const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
+    const int64_t num_indices = indices_limit - indices_begin;
+
+    if (num_indices > 0) {
+      const uint64_t first = indices_begin[0];
+      const uint64_t last = indices_begin[num_indices - 1];
+      DCHECK_GE(first, chunk_start);
+      DCHECK_LT(last, chunk_end);
+
+      // If the discrete indices form a contiguous run, represent them as such.
+      // Since Validate enforces strict increasing order, checking
+      // (last - first == num_indices - 1) is sufficient.
+      if (last - first == static_cast<uint64_t>(num_indices - 1)) {
+        *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
+      } else {
+        *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
+      }
+    } else {
+      *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+    }
+
+    return num_indices;
+  }
+
+ private:
+  std::shared_ptr<ArrayData> data_;
+  const uint64_t* indices_;
+};
+
+}  // namespace
+
+std::shared_ptr<SelectionVector> SelectionVector::MakeIndices(
+    std::shared_ptr<ArrayData> data) {
+  return std::make_shared<IndexSelectionVector>(std::move(data));
+}
+
+std::shared_ptr<SelectionVector> SelectionVector::MakeIndices(const Array& arr) {
+  return MakeIndices(arr.data());
 }
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,

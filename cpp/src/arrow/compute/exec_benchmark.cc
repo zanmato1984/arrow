@@ -150,14 +150,14 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorFromIndices(
       builder.AppendValues(indices.data(), static_cast<int64_t>(indices.size())));
   std::shared_ptr<Array> arr;
   ARROW_CHECK_OK(builder.Finish(&arr));
-  return std::make_shared<SelectionVector>(*arr);
+  return SelectionVector::MakeIndices(*arr);
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorPrefix(int64_t length) {
   auto res = gen::Step<uint64_t>()->Generate(length);
   ARROW_CHECK_OK(res.status());
   auto arr = res.ValueUnsafe();
-  return std::make_shared<SelectionVector>(*arr);
+  return SelectionVector::MakeIndices(*arr);
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorRandomSortedUnique(

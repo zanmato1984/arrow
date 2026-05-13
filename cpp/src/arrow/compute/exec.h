@@ -182,22 +182,26 @@ using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 /// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
 class ARROW_EXPORT SelectionVector {
  public:
-  explicit SelectionVector(std::shared_ptr<ArrayData> data);
+  virtual ~SelectionVector() = default;
 
-  explicit SelectionVector(const Array& arr);
+  /// \brief Create an index-backed selection vector from UInt64 ArrayData.
+  static std::shared_ptr<SelectionVector> MakeIndices(std::shared_ptr<ArrayData> data);
+
+  /// \brief Create an index-backed selection vector from a UInt64 Array.
+  static std::shared_ptr<SelectionVector> MakeIndices(const Array& arr);
 
   /// \brief Number of selected row indices.
-  int64_t length() const;
+  virtual int64_t length() const = 0;
 
   /// \brief Validate selection (e.g. increasing, non-null, in-bounds).
-  Status Validate(int64_t values_length = -1) const;
+  virtual Status Validate(int64_t values_length = -1) const = 0;
 
   /// \brief Materialize selection as a UInt64 indices ArrayData.
   ///
   /// For index-backed selections this is a cheap accessor. Other future
   /// representations may need to allocate or compute the indices.
-  Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
-      MemoryPool* pool = default_memory_pool()) const;
+  virtual Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
+      MemoryPool* pool = default_memory_pool()) const = 0;
 
   /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
   ///
@@ -207,12 +211,9 @@ class ARROW_EXPORT SelectionVector {
   /// in earlier chunks (rank).
   /// \param[out] out Selection span relative to chunk_start.
   /// \return Number of selected indices consumed from this chunk.
-  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
-                          int64_t selection_position, SelectionSpan* out) const;
-
- private:
-  std::shared_ptr<ArrayData> data_;
-  const uint64_t* indices_;
+  virtual int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+                                  int64_t selection_position,
+                                  SelectionSpan* out) const = 0;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
