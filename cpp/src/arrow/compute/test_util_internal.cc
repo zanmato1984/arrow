@@ -122,11 +122,11 @@ void ValidateOutput(const Datum& output) {
 }
 
 std::shared_ptr<SelectionVector> SelectionVectorFromJSON(const std::string& json) {
-  return SelectionVector::MakeIndices(*ArrayFromJSON(uint64(), json));
+  return SelectionVector::MakeIndices(*ArrayFromJSON(int32(), json));
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorTo(int64_t length) {
-  auto res = gen::Step<uint64_t>()->Generate(length);
+  auto res = gen::Step<int32_t>()->Generate(length);
   DCHECK_OK(res.status());
   auto arr = res.ValueUnsafe();
   return SelectionVector::MakeIndices(*arr);

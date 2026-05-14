@@ -153,9 +153,9 @@ struct ARROW_EXPORT FilteredSpan {
 /// slice (rows 8 and 9) should represent this as index 1 by setting
 /// `index_back_shift = 8`.
 struct ARROW_EXPORT DiscreteSpan {
-  const uint64_t* indices = NULLPTR;
+  const int32_t* indices = NULLPTR;
   int64_t length = 0;
-  uint64_t index_back_shift = 0;
+  int32_t index_back_shift = 0;
 
   int64_t operator[](int64_t i) const {
     return static_cast<int64_t>(indices[i] - index_back_shift);
@@ -170,7 +170,7 @@ using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 
 /// \brief Container for a deferred selection of rows over an ExecBatch.
 ///
-/// This is currently an index-backed selection (UInt64 indices). The public API
+/// This is currently an index-backed selection (Int32 indices). The public API
 /// avoids exposing the backing representation so that bitmap / run-based
 /// selections can be supported in the future without changing call sites.
 ///
@@ -184,10 +184,10 @@ class ARROW_EXPORT SelectionVector {
  public:
   virtual ~SelectionVector() = default;
 
-  /// \brief Create an index-backed selection vector from UInt64 ArrayData.
+  /// \brief Create an index-backed selection vector from Int32 ArrayData.
   static std::shared_ptr<SelectionVector> MakeIndices(std::shared_ptr<ArrayData> data);
 
-  /// \brief Create an index-backed selection vector from a UInt64 Array.
+  /// \brief Create an index-backed selection vector from an Int32 Array.
   static std::shared_ptr<SelectionVector> MakeIndices(const Array& arr);
 
   /// \brief Number of selected row indices.
@@ -196,7 +196,7 @@ class ARROW_EXPORT SelectionVector {
   /// \brief Validate selection (e.g. increasing, non-null, in-bounds).
   virtual Status Validate(int64_t values_length = -1) const = 0;
 
-  /// \brief Materialize selection as a UInt64 indices ArrayData.
+  /// \brief Materialize selection as an Int32 indices ArrayData.
   ///
   /// For index-backed selections this is a cheap accessor. Other future
   /// representations may need to allocate or compute the indices.

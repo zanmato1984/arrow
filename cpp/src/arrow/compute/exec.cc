@@ -945,8 +945,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
     Datum dense_result = WrapResults(input.values, dense_listener.values());
 
-    // Scatter only accepts signed indices, while our SelectionVector is UInt64.
-    // Cast once here rather than constraining SelectionVector to signed indices.
     Datum scatter_indices = take_indices;
     if (scatter_indices.type()->id() == Type::UINT64) {
       ARROW_ASSIGN_OR_RAISE(
@@ -1666,8 +1664,8 @@ class IndexSelectionVector final : public SelectionVector {
  public:
   explicit IndexSelectionVector(std::shared_ptr<ArrayData> data) : data_(std::move(data)) {
     DCHECK_NE(data_, nullptr);
-    DCHECK_EQ(data_->type->id(), Type::UINT64);
-    indices_ = data_->GetValues<uint64_t>(1);
+    DCHECK_EQ(data_->type->id(), Type::INT32);
+    indices_ = data_->GetValues<int32_t>(1);
   }
 
   int64_t length() const override { return data_->length; }
@@ -1677,8 +1675,8 @@ class IndexSelectionVector final : public SelectionVector {
       return Status::Invalid("SelectionVector not initialized");
     }
     ARROW_CHECK_NE(indices_, nullptr);
-    if (data_->type->id() != Type::UINT64) {
-      return Status::Invalid("SelectionVector indices must be of type uint64");
+    if (data_->type->id() != Type::INT32) {
+      return Status::Invalid("SelectionVector indices must be of type int32");
     }
     if (data_->GetNullCount() != 0) {
       return Status::Invalid("SelectionVector indices cannot contain nulls");
@@ -1688,10 +1686,14 @@ class IndexSelectionVector final : public SelectionVector {
         return Status::Invalid("SelectionVector indices must be strictly increasing");
       }
     }
+    for (int64_t i = 0; i < length(); ++i) {
+      if (indices_[i] < 0) {
+        return Status::Invalid("SelectionVector indices must be non-negative");
+      }
+    }
     if (values_length >= 0) {
-      const uint64_t values_length_u64 = static_cast<uint64_t>(values_length);
       for (int64_t i = 0; i < length(); ++i) {
-        if (indices_[i] >= values_length_u64) {
+        if (indices_[i] >= values_length) {
           return Status::Invalid("SelectionVector index ", indices_[i],
                                  " >= values length ", values_length);
         }
@@ -1711,29 +1713,33 @@ class IndexSelectionVector final : public SelectionVector {
     DCHECK_NE(out, nullptr);
     DCHECK_LE(chunk_start, chunk_end);
 
-    const uint64_t* indices_begin = indices_ + selection_position;
-    const uint64_t* indices_end = indices_ + length();
+    const int32_t* indices_begin = indices_ + selection_position;
+    const int32_t* indices_end = indices_ + length();
     DCHECK_LE(indices_begin, indices_end);
 
-    const uint64_t* indices_limit = std::lower_bound(indices_begin, indices_end, chunk_end);
+    const int32_t chunk_end_i32 = static_cast<int32_t>(chunk_end);
+    const int32_t* indices_limit =
+        std::lower_bound(indices_begin, indices_end, chunk_end_i32);
     const int64_t num_indices = indices_limit - indices_begin;
 
     if (num_indices > 0) {
-      const uint64_t first = indices_begin[0];
-      const uint64_t last = indices_begin[num_indices - 1];
-      DCHECK_GE(first, chunk_start);
-      DCHECK_LT(last, chunk_end);
+      const int32_t first = indices_begin[0];
+      const int32_t last = indices_begin[num_indices - 1];
+      DCHECK_GE(static_cast<uint64_t>(first), chunk_start);
+      DCHECK_LT(static_cast<uint64_t>(last), chunk_end);
 
       // If the discrete indices form a contiguous run, represent them as such.
       // Since Validate enforces strict increasing order, checking
       // (last - first == num_indices - 1) is sufficient.
-      if (last - first == static_cast<uint64_t>(num_indices - 1)) {
-        *out = ContiguousSpan{static_cast<int64_t>(first - chunk_start), num_indices};
+      if (last - first == static_cast<int32_t>(num_indices - 1)) {
+        *out = ContiguousSpan{static_cast<int64_t>(first) -
+                                  static_cast<int64_t>(chunk_start),
+                              num_indices};
       } else {
-        *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
+        *out = DiscreteSpan{indices_begin, num_indices, static_cast<int32_t>(chunk_start)};
       }
     } else {
-      *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
+      *out = DiscreteSpan{indices_begin, /*length=*/0, static_cast<int32_t>(chunk_start)};
     }
 
     return num_indices;
@@ -1741,7 +1747,7 @@ class IndexSelectionVector final : public SelectionVector {
 
  private:
   std::shared_ptr<ArrayData> data_;
-  const uint64_t* indices_;
+  const int32_t* indices_;
 };
 
 }  // namespace

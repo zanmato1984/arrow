@@ -153,7 +153,7 @@ TEST(SelectionVector, Basics) {
 
   ASSERT_EQ(sel_vector->length(), 2);
   ASSERT_OK_AND_ASSIGN(auto indices_data, sel_vector->ToIndicesArrayData());
-  const uint64_t* indices = indices_data->GetValues<uint64_t>(1);
+  const int32_t* indices = indices_data->GetValues<int32_t>(1);
   ASSERT_NE(indices, nullptr);
   ASSERT_EQ(indices[0], 0);
   ASSERT_EQ(indices[1], 42);
@@ -170,6 +170,10 @@ TEST(SelectionVector, Validate) {
   }
   {
     auto sel_vector = SelectionVectorFromJSON("[42, 0]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate());
+  }
+  {
+    auto sel_vector = SelectionVectorFromJSON("[-42, 0]");
     ASSERT_RAISES(Invalid, sel_vector->Validate());
   }
   {
@@ -191,8 +195,8 @@ TEST(SelectionVector, Validate) {
 }
 
 TEST(DiscreteSpan, Basics) {
-  auto indices = ArrayFromJSON(uint64(), "[0, 3, 7]");
-  const uint64_t* idx = indices->data()->GetValues<uint64_t>(1);
+  auto indices = ArrayFromJSON(int32(), "[0, 3, 7]");
+  const int32_t* idx = indices->data()->GetValues<int32_t>(1);
   DiscreteSpan sel_span{idx + 1, /*length=*/2, /*index_back_shift=*/1};
   ASSERT_EQ(sel_span[0], 2);
   ASSERT_EQ(sel_span[1], 6);
@@ -795,10 +799,10 @@ class TestExecSpanIterator : public TestComputeInternals {
                       const std::vector<int>& ex_selection_sizes) {
     SetupIterator(input, chunksize);
     std::shared_ptr<ArrayData> selection_indices;
-    const uint64_t* selection_indices_values = nullptr;
+    const int32_t* selection_indices_values = nullptr;
     if (input.selection_vector) {
       ASSERT_OK_AND_ASSIGN(selection_indices, input.selection_vector->ToIndicesArrayData());
-      selection_indices_values = selection_indices->GetValues<uint64_t>(1);
+      selection_indices_values = selection_indices->GetValues<int32_t>(1);
       ASSERT_NE(selection_indices_values, nullptr);
     }
     ExecSpan batch;

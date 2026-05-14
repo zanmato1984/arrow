@@ -143,8 +143,8 @@ std::shared_ptr<ChunkedArray> MakeChunkedInt32(int64_t num_rows, int64_t chunk_s
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorFromIndices(
-    const std::vector<uint64_t>& indices) {
-  UInt64Builder builder;
+    const std::vector<int32_t>& indices) {
+  Int32Builder builder;
   ARROW_CHECK_OK(builder.Reserve(static_cast<int64_t>(indices.size())));
   ARROW_CHECK_OK(
       builder.AppendValues(indices.data(), static_cast<int64_t>(indices.size())));
@@ -154,7 +154,7 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorFromIndices(
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorPrefix(int64_t length) {
-  auto res = gen::Step<uint64_t>()->Generate(length);
+  auto res = gen::Step<int32_t>()->Generate(length);
   ARROW_CHECK_OK(res.status());
   auto arr = res.ValueUnsafe();
   return SelectionVector::MakeIndices(*arr);
@@ -164,17 +164,17 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorRandomSortedUnique(
     int64_t length, int64_t selected_length, uint64_t seed = 0x4d595df4d0f33173ULL) {
   ARROW_CHECK_GE(length, 0);
   selected_length = std::max<int64_t>(0, std::min<int64_t>(selected_length, length));
-  std::vector<uint64_t> indices;
+  std::vector<int32_t> indices;
   indices.reserve(static_cast<size_t>(selected_length));
   if (selected_length == 0) {
     return MakeSelectionVectorFromIndices(indices);
   }
 
   std::mt19937_64 rng(seed);
-  std::uniform_int_distribution<uint64_t> dist(0, static_cast<uint64_t>(length - 1));
+  std::uniform_int_distribution<int32_t> dist(0, static_cast<int32_t>(length - 1));
   std::vector<uint8_t> seen(static_cast<size_t>(length), 0);
   while (static_cast<int64_t>(indices.size()) < selected_length) {
-    const uint64_t v = dist(rng);
+    const int32_t v = dist(rng);
     auto& flag = seen[static_cast<size_t>(v)];
     if (!flag) {
       flag = 1;
@@ -189,7 +189,7 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorOnePerChunk(const ChunkedArr
                                                                 int64_t selected_length) {
   const int64_t length = input.length();
   selected_length = std::max<int64_t>(0, std::min<int64_t>(selected_length, length));
-  std::vector<uint64_t> indices;
+  std::vector<int32_t> indices;
   indices.reserve(static_cast<size_t>(selected_length));
   if (selected_length == 0) {
     return MakeSelectionVectorFromIndices(indices);
@@ -237,7 +237,7 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorOnePerChunk(const ChunkedArr
     // Pick a deterministic position within the chunk (not always 0), to avoid
     // accidentally creating large contiguous runs across chunks when chunk_size is big.
     const int64_t local = static_cast<int64_t>(chunk_id % chunk_len);
-    indices.push_back(static_cast<uint64_t>(chunk_start + local));
+    indices.push_back(static_cast<int32_t>(chunk_start + local));
 
     // If we exhausted all chunks, fall back to random fill (still sorted/unique)
     // to reach selected_length.
@@ -252,13 +252,13 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorOnePerChunk(const ChunkedArr
     // Since we've already picked <= num_chunks indices, this is cheap for our sizes.
     std::sort(indices.begin(), indices.end());
     std::vector<uint8_t> seen(static_cast<size_t>(length), 0);
-    for (uint64_t v : indices) {
+    for (int32_t v : indices) {
       seen[static_cast<size_t>(v)] = 1;
     }
     std::mt19937_64 rng(0x9e3779b97f4a7c15ULL);
-    std::uniform_int_distribution<uint64_t> dist(0, static_cast<uint64_t>(length - 1));
+    std::uniform_int_distribution<int32_t> dist(0, static_cast<int32_t>(length - 1));
     while (static_cast<int64_t>(indices.size()) < selected_length) {
-      const uint64_t v = dist(rng);
+      const int32_t v = dist(rng);
       auto& flag = seen[static_cast<size_t>(v)];
       if (!flag) {
         flag = 1;
