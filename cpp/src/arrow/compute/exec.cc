@@ -833,17 +833,9 @@ void SetSpanAllNull(ArraySpan* out) {
   }
 }
 
-class SelectionSpanView {
- public:
-  explicit SelectionSpanView(const SelectionSpan* selection) : selection_(selection) {}
-
-  bool present() const { return selection_ != nullptr; }
-
-  bool empty() const { return present() && SelectedCount(*selection_) == 0; }
-
- private:
-  const SelectionSpan* selection_;
-};
+bool IsEmptySelection(const SelectionSpan* selection) {
+  return selection != nullptr && SelectedCount(*selection) == 0;
+}
 
 class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
  public:
@@ -976,7 +968,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       while (span_iterator_.Next(&input, selection_ptr)) {
         // Set absolute output span position and length
         output_span->SetSlice(result_offset, input.length);
-        if (SelectionSpanView(selection_ptr).empty()) {
+        if (IsEmptySelection(selection_ptr)) {
           // No rows are selected in this span; output must be all-null.
           SetSpanAllNull(output_span);
           result_offset = span_iterator_.position();
@@ -1053,7 +1045,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return EmitResult(all_null->data(), listener);
     };
     while (span_iterator_.Next(&input, selection_ptr)) {
-      if (SelectionSpanView(selection_ptr).empty()) {
+      if (IsEmptySelection(selection_ptr)) {
         // No rows are selected in this span; skip kernel execution entirely.
         // Coalesce consecutive empty spans to reduce output chunk overhead.
         pending_empty_length += input.length;
