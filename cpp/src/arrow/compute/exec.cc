@@ -922,21 +922,8 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
 
     ARROW_ASSIGN_OR_RAISE(
-        std::shared_ptr<ArrayData> take_indices_data,
-        batch.selection_vector->ToIndicesArrayData(exec_context()->memory_pool()));
-    Datum take_indices = Datum(std::move(take_indices_data));
-
-    std::vector<Datum> values(batch.num_values());
-    for (int i = 0; i < batch.num_values(); ++i) {
-      if (batch[i].is_scalar()) {
-        // XXX: Skip gather for scalars since it is not currently supported by Take.
-        values[i] = batch[i];
-      } else {
-        ARROW_ASSIGN_OR_RAISE(
-            values[i],
-            Take(batch[i], take_indices, TakeOptions{/*boundcheck=*/false}, exec_context()));
-      }
-    }
+        std::vector<Datum> values,
+        batch.selection_vector->MakeDenseValues(batch.values, exec_context()));
     ARROW_ASSIGN_OR_RAISE(
         ExecBatch input,
         ExecBatch::Make(std::move(values), batch.selection_vector->length()));
@@ -945,15 +932,10 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
     Datum dense_result = WrapResults(input.values, dense_listener.values());
 
-    Datum scatter_indices = take_indices;
-    if (scatter_indices.type()->id() == Type::UINT64) {
-      ARROW_ASSIGN_OR_RAISE(
-          scatter_indices,
-          Cast(scatter_indices, int64(), CastOptions::Safe(), exec_context()));
-    }
-    ARROW_ASSIGN_OR_RAISE(auto result,
-                          Scatter(dense_result, scatter_indices,
-                                  ScatterOptions{/*max_index=*/batch.length - 1}));
+    ARROW_ASSIGN_OR_RAISE(
+        auto result,
+        batch.selection_vector->ScatterDenseResult(dense_result, batch.length,
+                                                   exec_context()));
     return listener->OnResult(std::move(result));
   }
 
@@ -1705,6 +1687,34 @@ class IndexSelectionVector final : public SelectionVector {
   Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(MemoryPool* pool) const override {
     (void)pool;
     return data_;
+  }
+
+  Result<std::vector<Datum>> MakeDenseValues(const std::vector<Datum>& values,
+                                             ExecContext* ctx) const override {
+    ARROW_ASSIGN_OR_RAISE(std::shared_ptr<ArrayData> indices_data,
+                          ToIndicesArrayData(ctx->memory_pool()));
+    Datum indices(std::move(indices_data));
+
+    std::vector<Datum> dense_values(values.size());
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (values[i].is_scalar()) {
+        // XXX: Skip gather for scalars since it is not currently supported by Take.
+        dense_values[i] = values[i];
+      } else {
+        ARROW_ASSIGN_OR_RAISE(
+            dense_values[i],
+            Take(values[i], indices, TakeOptions{/*boundcheck=*/false}, ctx));
+      }
+    }
+    return dense_values;
+  }
+
+  Result<Datum> ScatterDenseResult(const Datum& dense_result, int64_t output_length,
+                                   ExecContext* ctx) const override {
+    ARROW_ASSIGN_OR_RAISE(std::shared_ptr<ArrayData> indices_data,
+                          ToIndicesArrayData(ctx->memory_pool()));
+    Datum indices(std::move(indices_data));
+    return Scatter(dense_result, indices, ScatterOptions{/*max_index=*/output_length - 1});
   }
 
   int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,

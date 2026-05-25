@@ -203,6 +203,19 @@ class ARROW_EXPORT SelectionVector {
   virtual Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
       MemoryPool* pool = default_memory_pool()) const = 0;
 
+  /// \brief Gather selected input values into a dense argument list.
+  ///
+  /// This is used as the dense fallback for kernels that don't support
+  /// selective execution. Different selection backends can choose different
+  /// compute APIs to produce the dense values.
+  virtual Result<std::vector<Datum>> MakeDenseValues(const std::vector<Datum>& values,
+                                                     ExecContext* ctx) const = 0;
+
+  /// \brief Scatter a dense fallback result back to the original value length.
+  virtual Result<Datum> ScatterDenseResult(const Datum& dense_result,
+                                           int64_t output_length,
+                                           ExecContext* ctx) const = 0;
+
   /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
   ///
   /// \param[in] chunk_start Absolute row start (inclusive).
