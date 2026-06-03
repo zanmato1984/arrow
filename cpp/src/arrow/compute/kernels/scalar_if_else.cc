@@ -2752,6 +2752,9 @@ struct ChooseFunction : ScalarFunction {
         *it = type;
       }
     }
+    if (HasDecimal(*types)) {
+      RETURN_NOT_OK(CastDecimalArgs(types->data() + 1, types->size() - 1));
+    }
     if (auto kernel = DispatchExactImpl(this, {types->front(), types->back()})) {
       return kernel;
     }
