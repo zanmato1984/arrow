@@ -966,9 +966,9 @@ TEST_F(TestIfElseKernel, ParameterizedTypes) {
   auto type0 = fixed_size_binary(4);
   auto type1 = fixed_size_binary(5);
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
-      ::testing::HasSubstr("All types must be compatible, expected: "
-                           "fixed_size_binary[4], but got: fixed_size_binary[5]"),
+      NotImplemented,
+      ::testing::HasSubstr("Function 'if_else' has no kernel matching input types "
+                           "(bool, fixed_size_binary[4], fixed_size_binary[5])"),
       CallFunction("if_else", {cond, ArrayFromJSON(type0, R"(["aaaa"])"),
                                ArrayFromJSON(type1, R"(["aaaaa"])")}));
 
@@ -977,27 +977,30 @@ TEST_F(TestIfElseKernel, ParameterizedTypes) {
   type0 = struct_({field("a", int32())});
   type1 = struct_({field("a", int64())});
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
-      ::testing::HasSubstr("All types must be compatible, expected: struct<a: int32>, "
-                           "but got: struct<a: int64>"),
+      NotImplemented,
+      ::testing::HasSubstr(
+          "Function 'if_else' has no kernel matching input types "
+          "(bool, struct<a: int32>, struct<a: int64>)"),
       CallFunction("if_else",
                    {cond, ArrayFromJSON(type0, "[[0]]"), ArrayFromJSON(type1, "[[0]]")}));
 
   type0 = dense_union({field("a", int32())});
   type1 = dense_union({field("a", int64())});
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
-      ::testing::HasSubstr("All types must be compatible, expected: dense_union<a: "
-                           "int32=0>, but got: dense_union<a: int64=0>"),
+      NotImplemented,
+      ::testing::HasSubstr(
+          "Function 'if_else' has no kernel matching input types "
+          "(bool, dense_union<a: int32=0>, dense_union<a: int64=0>)"),
       CallFunction("if_else", {cond, ArrayFromJSON(type0, "[[0, -1]]"),
                                ArrayFromJSON(type1, "[[0, -1]]")}));
 
   type0 = list(int16());
   type1 = list(int32());
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
-      ::testing::HasSubstr("All types must be compatible, expected: list<item: int16>, "
-                           "but got: list<item: int32>"),
+      NotImplemented,
+      ::testing::HasSubstr(
+          "Function 'if_else' has no kernel matching input types "
+          "(bool, list<item: int16>, list<item: int32>)"),
       CallFunction("if_else",
                    {cond, ArrayFromJSON(type0, "[[0]]"), ArrayFromJSON(type1, "[[0]]")}));
 
@@ -1011,19 +1014,21 @@ TEST_F(TestIfElseKernel, ParameterizedTypes) {
   type0 = timestamp(TimeUnit::SECOND);
   type1 = timestamp(TimeUnit::SECOND, "America/Phoenix");
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
-      ::testing::HasSubstr("All types must be compatible, expected: timestamp[s], "
-                           "but got: timestamp[s, tz=America/Phoenix]"),
+      NotImplemented,
+      ::testing::HasSubstr("Function 'if_else' has no kernel matching input types "
+                           "(bool, timestamp[s], "
+                           "timestamp[s, tz=America/Phoenix])"),
       CallFunction("if_else",
                    {cond, ArrayFromJSON(type0, "[0]"), ArrayFromJSON(type1, "[1]")}));
 
   type0 = timestamp(TimeUnit::SECOND, "America/New_York");
   type1 = timestamp(TimeUnit::SECOND, "America/Phoenix");
   EXPECT_RAISES_WITH_MESSAGE_THAT(
-      TypeError,
+      NotImplemented,
       ::testing::HasSubstr(
-          "All types must be compatible, expected: timestamp[s, tz=America/New_York], "
-          "but got: timestamp[s, tz=America/Phoenix]"),
+          "Function 'if_else' has no kernel matching input types "
+          "(bool, timestamp[s, tz=America/New_York], "
+          "timestamp[s, tz=America/Phoenix])"),
       CallFunction("if_else",
                    {cond, ArrayFromJSON(type0, "[0]"), ArrayFromJSON(type1, "[1]")}));
 
