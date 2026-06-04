@@ -515,6 +515,12 @@ TEST_F(TestIfElseKernel, IfElseDispatchBest) {
                     {boolean(), date64(), date64()});
   CheckDispatchBest(name, {boolean(), date32(), date32()},
                     {boolean(), date32(), date32()});
+
+  ASSERT_RAISES(NotImplemented,
+                function->DispatchExact(
+                    {boolean(), decimal128(3, 2), decimal128(4, 3)}));
+  CheckDispatchBest(name, {boolean(), decimal128(3, 2), decimal128(4, 3)},
+                    {boolean(), decimal128(4, 3), decimal128(4, 3)});
 }
 
 template <typename Type>

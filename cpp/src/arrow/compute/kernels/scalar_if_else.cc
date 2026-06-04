@@ -1242,6 +1242,18 @@ struct ResolveIfElseExec<NullType, AllocateMem> {
 struct IfElseFunction : ScalarFunction {
   using ScalarFunction::ScalarFunction;
 
+  static std::shared_ptr<MatchConstraint> DecimalMatchConstraint() {
+    static auto constraint =
+        MatchConstraint::Make([](const std::vector<TypeHolder>& types) -> bool {
+          DCHECK_EQ(types.size(), 3);
+          DCHECK_EQ(types[0].id(), Type::BOOL);
+          DCHECK(is_decimal(types[1].id()));
+          DCHECK(is_decimal(types[2].id()));
+          return types[1] == types[2];
+        });
+    return constraint;
+  }
+
   Result<const Kernel*> DispatchBest(std::vector<TypeHolder>* types) const override {
     RETURN_NOT_OK(CheckArity(types->size()));
 
@@ -1343,8 +1355,14 @@ void AddBinaryIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
 template <typename T>
 void AddFixedWidthIfElseKernel(const std::shared_ptr<IfElseFunction>& scalar_function) {
   auto type_id = T::type_id;
-  ScalarKernel kernel({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
+  std::shared_ptr<MatchConstraint> constraint = nullptr;
+  if (is_decimal(type_id)) {
+    constraint = IfElseFunction::DecimalMatchConstraint();
+  }
+  ScalarKernel kernel(
+      KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)}, LastType,
+                            /*is_varargs=*/false, std::move(constraint)),
+      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
   kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = MemAllocation::PREALLOCATE;
   kernel.can_write_into_slices = true;
