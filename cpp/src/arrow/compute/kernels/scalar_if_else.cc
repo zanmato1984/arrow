@@ -1243,12 +1243,8 @@ struct IfElseFunction : ScalarFunction {
   using ScalarFunction::ScalarFunction;
 
   static std::shared_ptr<MatchConstraint> ValueTypesMatchConstraint() {
-    static auto constraint =
-        MatchConstraint::Make([](const std::vector<TypeHolder>& types) -> bool {
-          DCHECK_EQ(types.size(), 3);
-          DCHECK_EQ(types[0].id(), Type::BOOL);
-          return types[1] == types[2];
-        });
+    static auto constraint = MatchConstraint::Make(
+        [](const std::vector<TypeHolder>& types) { return types[1] == types[2]; });
     return constraint;
   }
 
@@ -1343,13 +1339,10 @@ void AddBinaryIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
 template <typename T>
 void AddFixedWidthIfElseKernel(const std::shared_ptr<IfElseFunction>& scalar_function) {
   auto type_id = T::type_id;
-  std::shared_ptr<MatchConstraint> constraint = nullptr;
-  if (!TypeTraits<T>::is_parameter_free) {
-    constraint = IfElseFunction::ValueTypesMatchConstraint();
-  }
   ScalarKernel kernel(
       KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                            /*is_varargs=*/false, std::move(constraint)),
+                            /*is_varargs=*/false,
+                            IfElseFunction::ValueTypesMatchConstraint()),
       ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
   kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = MemAllocation::PREALLOCATE;
