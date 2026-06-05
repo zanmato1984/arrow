@@ -3651,6 +3651,8 @@ TEST(TestCoalesce, DispatchBest) {
                     {large_binary(), large_binary()});
   CheckDispatchBest("coalesce", {int32(), decimal128(3, 2)},
                     {decimal128(12, 2), decimal128(12, 2)});
+  CheckDispatchBest("coalesce", {decimal128(3, 2), decimal128(4, 3)},
+                    {decimal128(4, 3), decimal128(4, 3)});
   CheckDispatchBest("coalesce", {float32(), decimal128(3, 2)}, {float64(), float64()});
   CheckDispatchBest("coalesce", {decimal128(3, 2), decimal256(3, 2)},
                     {decimal256(3, 2), decimal256(3, 2)});
@@ -3910,6 +3912,8 @@ TEST(TestChooseKernel, DispatchBest) {
   // Other arguments promoted separately from index
   EXPECT_EQ((std::vector<TypeHolder>{int64(), int32(), int32()}),
             Check({int8(), int32(), uint8()}));
+  EXPECT_EQ((std::vector<TypeHolder>{int64(), decimal128(4, 3), decimal128(4, 3)}),
+            Check({int8(), decimal128(3, 2), decimal128(4, 3)}));
 }
 
 TEST(TestChooseKernel, Errors) {

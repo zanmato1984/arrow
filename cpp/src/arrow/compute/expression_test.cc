@@ -938,6 +938,45 @@ TEST(Expression, BindWithImplicitCastsForCaseWhenOnDecimal) {
                 /*bound_out=*/nullptr, *exciting_schema);
 }
 
+TEST(Expression, BindWithImplicitCastsForIfElseOnDecimal) {
+  auto schema = arrow::schema({field("cond", boolean()),
+                               field("dec128_3_2", decimal128(3, 2)),
+                               field("dec128_4_3", decimal128(4, 3))});
+
+  ExpectBindsTo(
+      call("if_else",
+           {field_ref("cond"), field_ref("dec128_3_2"), field_ref("dec128_4_3")}),
+      call("if_else",
+           {field_ref("cond"), cast(field_ref("dec128_3_2"), decimal128(4, 3)),
+            field_ref("dec128_4_3")}),
+      /*bound_out=*/nullptr, *schema);
+}
+
+TEST(Expression, BindWithImplicitCastsForCoalesceOnDecimal) {
+  auto schema = arrow::schema({field("dec128_3_2", decimal128(3, 2)),
+                               field("dec128_4_3", decimal128(4, 3))});
+
+  ExpectBindsTo(
+      call("coalesce", {field_ref("dec128_3_2"), field_ref("dec128_4_3")}),
+      call("coalesce", {cast(field_ref("dec128_3_2"), decimal128(4, 3)),
+                        field_ref("dec128_4_3")}),
+      /*bound_out=*/nullptr, *schema);
+}
+
+TEST(Expression, BindWithImplicitCastsForChooseOnDecimal) {
+  auto schema = arrow::schema({field("indices", int64()),
+                               field("dec128_3_2", decimal128(3, 2)),
+                               field("dec128_4_3", decimal128(4, 3))});
+
+  ExpectBindsTo(
+      call("choose",
+           {field_ref("indices"), field_ref("dec128_3_2"), field_ref("dec128_4_3")}),
+      call("choose",
+           {field_ref("indices"), cast(field_ref("dec128_3_2"), decimal128(4, 3)),
+            field_ref("dec128_4_3")}),
+      /*bound_out=*/nullptr, *schema);
+}
+
 TEST(Expression, BindNestedCall) {
   auto expr = add(field_ref("a"),
                   call("subtract", {call("multiply", {field_ref("b"), field_ref("c")}),
