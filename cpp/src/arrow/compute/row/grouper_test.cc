@@ -927,6 +927,15 @@ TEST(Grouper, StringKey) {
   }
 }
 
+TEST(Grouper, StringKeyPreservesFirstSeenGroupOrder) {
+  for (auto ty : {utf8(), large_utf8()}) {
+    ARROW_SCOPED_TRACE("key type = ", *ty);
+    TestGrouper g({ty});
+    g.ExpectConsume(R"([["k"], ["l"], ["m"], ["n"], ["o"]])", "[0, 1, 2, 3, 4]");
+    g.ExpectUniques(R"([["k"], ["l"], ["m"], ["n"], ["o"]])");
+  }
+}
+
 TEST(Grouper, StringViewKey) {
   // Mix inline (<=12 byte) and out-of-line view keys.
   for (auto ty : {utf8_view(), binary_view()}) {
