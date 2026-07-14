@@ -535,6 +535,7 @@ Status SwissTable::map_new_keys_helper(
   ARROW_DCHECK((reinterpret_cast<uint64_t>(inout_selection) & 1) == 0);
 
   uint32_t num_inserted_new = 0;
+  bool has_pending_match = false;
   uint32_t num_processed;
   for (num_processed = 0; num_processed < *inout_num_selected; ++num_processed) {
     // row id in original batch
@@ -542,22 +543,32 @@ Status SwissTable::map_new_keys_helper(
     bool match_found =
         find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
                               &inout_next_slot_ids[id], &out_group_ids[id]);
-    if (!match_found) {
-      // If we reach the empty slot we insert key for new group
-      //
-      out_group_ids[id] = num_inserted_ + num_inserted_new;
-      insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
-      this->hashes()[inout_next_slot_ids[id]] = hashes[id];
-      ::arrow::bit_util::ClearBit(match_bitvector, num_processed);
-      ++num_inserted_new;
+    if (match_found) {
+      has_pending_match = true;
+      continue;
+    }
 
-      // We need to break processing and have the caller of this function resize hash
-      // table if we reach the limit of the number of groups present.
-      //
-      if (num_inserted_ + num_inserted_new == num_groups_limit) {
-        ++num_processed;
-        break;
-      }
+    // Do not let later insertions overtake an earlier key whose stamp match still
+    // needs an equality comparison. If the pending match turns out to be a false
+    // positive, it must get its new group id before later input rows.
+    if (has_pending_match) {
+      break;
+    }
+
+    // If we reach the empty slot we insert key for new group
+    //
+    out_group_ids[id] = num_inserted_ + num_inserted_new;
+    insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
+    this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+    ::arrow::bit_util::ClearBit(match_bitvector, num_processed);
+    ++num_inserted_new;
+
+    // We need to break processing and have the caller of this function resize hash
+    // table if we reach the limit of the number of groups present.
+    //
+    if (num_inserted_ + num_inserted_new == num_groups_limit) {
+      ++num_processed;
+      break;
     }
   }
 
