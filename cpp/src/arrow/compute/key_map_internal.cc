@@ -530,6 +530,10 @@ Status SwissTable::map_new_keys_helper(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
   memset(match_bitvector, 0, num_bytes_for_bits);
+  auto committed_bitvector_buf = util::TempVectorHolder<uint8_t>(
+      temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
+  uint8_t* committed_bitvector = committed_bitvector_buf.mutable_data();
+  memset(committed_bitvector, 0, num_bytes_for_bits);
 
   // Check the alignment of the input selection vector
   ARROW_DCHECK((reinterpret_cast<uint64_t>(inout_selection) & 1) == 0);
@@ -537,19 +541,55 @@ Status SwissTable::map_new_keys_helper(
   auto id_to_pos_buffer =
       util::TempVectorHolder<uint16_t>(temp_stack, 1 << log_minibatch_);
   uint16_t* id_to_pos = id_to_pos_buffer.mutable_data();
+  auto append_ids_buffer =
+      util::TempVectorHolder<uint16_t>(temp_stack, *inout_num_selected);
+  uint16_t* append_ids = append_ids_buffer.mutable_data();
+  uint32_t num_pending_appends = 0;
 
-  uint32_t num_processed = *inout_num_selected;
-  for (uint32_t i = 0; i < num_processed; ++i) {
+  auto flush_appends = [&]() -> Status {
+    if (num_pending_appends == 0) {
+      return Status::OK();
+    }
+    RETURN_NOT_OK(append_impl(num_pending_appends, append_ids, callback_ctx));
+    num_inserted_ += num_pending_appends;
+    num_pending_appends = 0;
+    return Status::OK();
+  };
+
+  bool has_pending_match = false;
+  bool reached_capacity = false;
+  uint32_t num_processed = 0;
+  for (; num_processed < *inout_num_selected; ++num_processed) {
     // row id in original batch
-    int id = inout_selection[i];
-    id_to_pos[id] = static_cast<uint16_t>(i);
+    int id = inout_selection[num_processed];
+    id_to_pos[id] = static_cast<uint16_t>(num_processed);
     bool match_found =
         find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
                               &inout_next_slot_ids[id], &out_group_ids[id]);
     if (match_found) {
-      ::arrow::bit_util::SetBit(match_bitvector, i);
+      ::arrow::bit_util::SetBit(match_bitvector, num_processed);
+      has_pending_match = true;
+      continue;
+    }
+
+    // Before any unresolved stamp match, immediate insertion cannot overtake an
+    // earlier key. This keeps the common path close to the original single-pass insert
+    // behavior, while later rows still use ordered commit once a pending match appears.
+    if (!has_pending_match) {
+      out_group_ids[id] = num_inserted_ + num_pending_appends;
+      insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
+      this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+      append_ids[num_pending_appends++] = static_cast<uint16_t>(id);
+      ::arrow::bit_util::SetBit(committed_bitvector, num_processed);
+
+      if (num_inserted_ + num_pending_appends == num_groups_limit) {
+        ++num_processed;
+        reached_capacity = true;
+        break;
+      }
     }
   }
+  RETURN_NOT_OK(flush_appends());
 
   auto temp_ids_buffer =
       util::TempVectorHolder<uint16_t>(temp_stack, *inout_num_selected);
@@ -566,21 +606,6 @@ Status SwissTable::map_new_keys_helper(
     ::arrow::bit_util::ClearBit(match_bitvector, id_to_pos[temp_ids[i]]);
   }
 
-  auto append_ids_buffer =
-      util::TempVectorHolder<uint16_t>(temp_stack, *inout_num_selected);
-  uint16_t* append_ids = append_ids_buffer.mutable_data();
-  uint32_t num_pending_appends = 0;
-
-  auto flush_appends = [&]() -> Status {
-    if (num_pending_appends == 0) {
-      return Status::OK();
-    }
-    RETURN_NOT_OK(append_impl(num_pending_appends, append_ids, callback_ctx));
-    num_inserted_ += num_pending_appends;
-    num_pending_appends = 0;
-    return Status::OK();
-  };
-
   const int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
   const int num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
   auto slot_is_empty = [&](uint32_t slot_id) {
@@ -589,9 +614,9 @@ Status SwissTable::map_new_keys_helper(
   };
 
   uint32_t num_committed = 0;
-  bool reached_capacity = false;
   for (; num_committed < num_processed; ++num_committed) {
-    if (::arrow::bit_util::GetBit(match_bitvector, num_committed)) {
+    if (::arrow::bit_util::GetBit(match_bitvector, num_committed) ||
+        ::arrow::bit_util::GetBit(committed_bitvector, num_committed)) {
       continue;
     }
 
