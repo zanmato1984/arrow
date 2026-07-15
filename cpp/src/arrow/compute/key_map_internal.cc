@@ -508,8 +508,8 @@ void SwissTable::find(const int num_keys, const uint32_t* hashes,
 // call to follow a call to find() method, which would only pass on new keys that were
 // not present in the hash table.
 //
-// Run a single round of slot search - comparison or insert - filter unprocessed.
-// Update selection vector to reflect which items have been processed.
+// Probe selected keys, compare stamp matches, then commit new keys in input order.
+// Update selection vector to keep items that were not processed due to resize.
 // Ids in selection vector do not have to be sorted.
 //
 Status SwissTable::map_new_keys_helper(
@@ -529,46 +529,25 @@ Status SwissTable::map_new_keys_helper(
   auto match_bitvector_buf = util::TempVectorHolder<uint8_t>(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
-  memset(match_bitvector, 0xff, num_bytes_for_bits);
+  memset(match_bitvector, 0, num_bytes_for_bits);
 
   // Check the alignment of the input selection vector
   ARROW_DCHECK((reinterpret_cast<uint64_t>(inout_selection) & 1) == 0);
 
-  uint32_t num_inserted_new = 0;
-  bool has_pending_match = false;
-  uint32_t num_processed;
-  for (num_processed = 0; num_processed < *inout_num_selected; ++num_processed) {
+  auto id_to_pos_buffer =
+      util::TempVectorHolder<uint16_t>(temp_stack, 1 << log_minibatch_);
+  uint16_t* id_to_pos = id_to_pos_buffer.mutable_data();
+
+  uint32_t num_processed = *inout_num_selected;
+  for (uint32_t i = 0; i < num_processed; ++i) {
     // row id in original batch
-    int id = inout_selection[num_processed];
+    int id = inout_selection[i];
+    id_to_pos[id] = static_cast<uint16_t>(i);
     bool match_found =
         find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
                               &inout_next_slot_ids[id], &out_group_ids[id]);
     if (match_found) {
-      has_pending_match = true;
-      continue;
-    }
-
-    // Do not let later insertions overtake an earlier key whose stamp match still
-    // needs an equality comparison. If the pending match turns out to be a false
-    // positive, it must get its new group id before later input rows.
-    if (has_pending_match) {
-      break;
-    }
-
-    // If we reach the empty slot we insert key for new group
-    //
-    out_group_ids[id] = num_inserted_ + num_inserted_new;
-    insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
-    this->hashes()[inout_next_slot_ids[id]] = hashes[id];
-    ::arrow::bit_util::ClearBit(match_bitvector, num_processed);
-    ++num_inserted_new;
-
-    // We need to break processing and have the caller of this function resize hash
-    // table if we reach the limit of the number of groups present.
-    //
-    if (num_inserted_ + num_inserted_new == num_groups_limit) {
-      ++num_processed;
-      break;
+      ::arrow::bit_util::SetBit(match_bitvector, i);
     }
   }
 
@@ -577,30 +556,92 @@ Status SwissTable::map_new_keys_helper(
   uint16_t* temp_ids = temp_ids_buffer.mutable_data();
   int num_temp_ids = 0;
 
-  // Copy keys for newly inserted rows using callback
-  //
-  util::bit_util::bits_filter_indexes(0, hardware_flags_, num_processed, match_bitvector,
-                                      inout_selection, &num_temp_ids, temp_ids);
-  ARROW_DCHECK(static_cast<int>(num_inserted_new) == num_temp_ids);
-  RETURN_NOT_OK(append_impl(num_inserted_new, temp_ids, callback_ctx));
-  num_inserted_ += num_inserted_new;
-
-  // Evaluate comparisons and append ids of rows that failed it to the non-match set.
+  // Evaluate comparisons for rows with a matching stamp. Rows that fail comparison
+  // become new-key candidates and must be committed in the original input order.
   util::bit_util::bits_filter_indexes(1, hardware_flags_, num_processed, match_bitvector,
                                       inout_selection, &num_temp_ids, temp_ids);
   run_comparisons(num_temp_ids, temp_ids, nullptr, out_group_ids, &num_temp_ids, temp_ids,
                   equal_impl, callback_ctx);
+  for (int i = 0; i < num_temp_ids; ++i) {
+    ::arrow::bit_util::ClearBit(match_bitvector, id_to_pos[temp_ids[i]]);
+  }
 
-  if (num_temp_ids > 0) {
-    memcpy(inout_selection, temp_ids, sizeof(uint16_t) * num_temp_ids);
+  auto append_ids_buffer =
+      util::TempVectorHolder<uint16_t>(temp_stack, *inout_num_selected);
+  uint16_t* append_ids = append_ids_buffer.mutable_data();
+  uint32_t num_pending_appends = 0;
+
+  auto flush_appends = [&]() -> Status {
+    if (num_pending_appends == 0) {
+      return Status::OK();
+    }
+    RETURN_NOT_OK(append_impl(num_pending_appends, append_ids, callback_ctx));
+    num_inserted_ += num_pending_appends;
+    num_pending_appends = 0;
+    return Status::OK();
+  };
+
+  const int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+  const int num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
+  auto slot_is_empty = [&](uint32_t slot_id) {
+    const uint8_t* blockbase = block_data(slot_id >> kLogSlotsPerBlock, num_block_bytes);
+    return blockbase[kMaxLocalSlot - (slot_id & kLocalSlotMask)] == 0x80;
+  };
+
+  uint32_t num_committed = 0;
+  bool reached_capacity = false;
+  for (; num_committed < num_processed; ++num_committed) {
+    if (::arrow::bit_util::GetBit(match_bitvector, num_committed)) {
+      continue;
+    }
+
+    int id = inout_selection[num_committed];
+    for (;;) {
+      bool match_found = false;
+      if (!slot_is_empty(inout_next_slot_ids[id])) {
+        match_found =
+            find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
+                                  &inout_next_slot_ids[id], &out_group_ids[id]);
+      }
+      if (!match_found) {
+        // If we reach the empty slot we insert key for new group.
+        out_group_ids[id] = num_inserted_ + num_pending_appends;
+        insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
+        this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+        append_ids[num_pending_appends++] = static_cast<uint16_t>(id);
+
+        // We need to break processing and have the caller of this function resize hash
+        // table if we reach the limit of the number of groups present.
+        if (num_inserted_ + num_pending_appends == num_groups_limit) {
+          ++num_committed;
+          reached_capacity = true;
+        }
+        break;
+      }
+
+      // A match may point at a key inserted earlier in this commit pass. Make its row
+      // visible before running equality comparison.
+      RETURN_NOT_OK(flush_appends());
+      uint16_t temp_id = static_cast<uint16_t>(id);
+      int num_not_equal;
+      run_comparisons(1, &temp_id, nullptr, out_group_ids, &num_not_equal, &temp_id,
+                      equal_impl, callback_ctx);
+      if (num_not_equal == 0) {
+        break;
+      }
+    }
+
+    if (reached_capacity) {
+      break;
+    }
   }
-  // Append ids of any unprocessed entries if we aborted processing due to the need
-  // to resize.
-  if (num_processed < *inout_num_selected) {
-    memmove(inout_selection + num_temp_ids, inout_selection + num_processed,
-            sizeof(uint16_t) * (*inout_num_selected - num_processed));
+  RETURN_NOT_OK(flush_appends());
+
+  if (num_committed < *inout_num_selected) {
+    memmove(inout_selection, inout_selection + num_committed,
+            sizeof(uint16_t) * (*inout_num_selected - num_committed));
   }
-  *inout_num_selected = num_temp_ids + (*inout_num_selected - num_processed);
+  *inout_num_selected = *inout_num_selected - num_committed;
 
   *out_need_resize = (num_inserted_ == num_groups_limit);
   return Status::OK();
