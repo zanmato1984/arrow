@@ -927,22 +927,32 @@ TEST(Grouper, StringKey) {
   }
 }
 
+// 中文说明：这个测试专门覆盖 fast grouper 在字符串 key 上的 first-seen 顺序。
 TEST(Grouper, StringKeyPreservesFirstSeenGroupOrder) {
+  // 中文说明：utf8 和 large_utf8 都走字符串路径，都需要验证保序语义。
   for (auto ty : {utf8(), large_utf8()}) {
+    // 中文说明：失败时打印当前 key 类型，便于区分是哪条类型路径出问题。
     ARROW_SCOPED_TRACE("key type = ", *ty);
     {
+      // 中文说明：新建一个空 Grouper，验证纯新 key 的 group id 分配顺序。
       TestGrouper g({ty});
       // 中文说明：连续的新字符串 key 应该严格按第一次出现的顺序分配
       // group id，并且 uniques 也要保持同样的 first-seen 顺序。
+      // 中文说明：这一行期望 k/l/m/n/o 依次得到 0/1/2/3/4。
       g.ExpectConsume(R"([["k"], ["l"], ["m"], ["n"], ["o"]])", "[0, 1, 2, 3, 4]");
+      // 中文说明：这一行验证 uniques 的物理顺序也保持 k/l/m/n/o。
       g.ExpectUniques(R"([["k"], ["l"], ["m"], ["n"], ["o"]])");
     }
     {
+      // 中文说明：重新建一个空 Grouper，验证重复 key 和新 key 混合时仍然保序。
       TestGrouper g({ty});
       // 中文说明：重复 key 混在新 key 中时，重复项要回到第一次出现的
       // group id；后面的新 key 不能因为哈希探测顺序而提前出现在 uniques 里。
+      // 中文说明：第二个 k 应回到 group 0，最后一个 l 应回到 group 1。
       g.ExpectConsume(R"([["k"], ["l"], ["k"], ["m"], ["n"], ["o"], ["l"]])",
+                      // 中文说明：m/n/o 仍然按第一次出现顺序分到 2/3/4。
                       "[0, 1, 0, 2, 3, 4, 1]");
+      // 中文说明：重复项不应新增 unique，最终仍只保留 k/l/m/n/o。
       g.ExpectUniques(R"([["k"], ["l"], ["m"], ["n"], ["o"]])");
     }
   }

@@ -533,50 +533,78 @@ Status SwissTable::map_new_keys_helper(
   auto match_bitvector_buf = util::TempVectorHolder<uint8_t>(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
+  // 中文说明：初始化为 0，表示当前还没有任何行被标记为“候选 match”。
   memset(match_bitvector, 0, num_bytes_for_bits);
   // 中文说明：match_bitvector 标记“找到了候选槽，仍需 equal_impl 确认”的
   // 行；committed_bitvector 标记“已经按输入顺序分配过 group id”的行。
+  // 中文说明：为“已经提交过”的行申请一个 bitset，避免 ordered pass 重复处理。
   auto committed_bitvector_buf = util::TempVectorHolder<uint8_t>(
+      // 中文说明：这个 bitset 和 match_bitvector 覆盖同一批 selection 位置。
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
+  // 中文说明：拿到 committed bitset 的可写指针，后面按 position 标记。
   uint8_t* committed_bitvector = committed_bitvector_buf.mutable_data();
+  // 中文说明：初始时没有任何行被提交，所以全部清零。
   memset(committed_bitvector, 0, num_bytes_for_bits);
 
   // Check the alignment of the input selection vector
   ARROW_DCHECK((reinterpret_cast<uint64_t>(inout_selection) & 1) == 0);
 
+  // 中文说明：给每个原始 batch row id 记录它在当前 selection 里的位置。
   auto id_to_pos_buffer =
+      // 中文说明：row id 的最大范围由 minibatch 限制，和旧实现的临时数组一致。
       util::TempVectorHolder<uint16_t>(temp_stack, 1 << log_minibatch_);
+  // 中文说明：后面 equal_impl 返回 row id 后，需要用它反查 selection position。
   uint16_t* id_to_pos = id_to_pos_buffer.mutable_data();
+  // 中文说明：保存本轮准备追加到 rows_ 的 row id，便于批量 append。
   auto append_ids_buffer =
+      // 中文说明：最多只会追加当前 selection 里的这些行，所以容量取 selection 大小。
       util::TempVectorHolder<uint16_t>(temp_stack, *inout_num_selected);
+  // 中文说明：append_impl 需要的是 uint16_t row id 数组。
   uint16_t* append_ids = append_ids_buffer.mutable_data();
+  // 中文说明：记录 append_ids 里已经攒了多少个待追加 row。
   uint32_t num_pending_appends = 0;
 
   // 中文说明：新 key 先写入哈希表元数据，但真正把 row 内容追加到 rows_
   // 里可以批量做。只有当后续比较需要“看见”这些新 row 时，才 flush。
+  // 中文说明：定义一个局部 flush 函数，统一处理“批量追加并推进 num_inserted_”。
   auto flush_appends = [&]() -> Status {
+    // 中文说明：没有待追加 row 时直接返回，避免空 append。
     if (num_pending_appends == 0) {
+      // 中文说明：空 flush 是正常路径，返回 OK。
       return Status::OK();
     }
+    // 中文说明：把 pending row 真正复制到 rows_，让后续比较能读到 key 内容。
     RETURN_NOT_OK(append_impl(num_pending_appends, append_ids, callback_ctx));
+    // 中文说明：这些 row 已经成为正式 group，所以全局 inserted 计数前移。
     num_inserted_ += num_pending_appends;
+    // 中文说明：清空 pending 数量，后续可以复用 append_ids 缓冲。
     num_pending_appends = 0;
+    // 中文说明：flush 成功结束。
     return Status::OK();
   };
 
+  // 中文说明：一旦前面出现了待比较的候选 match，后面的新 key 就不能抢先提交。
   bool has_pending_match = false;
+  // 中文说明：记录是否因为达到 resize 阈值而提前停止本轮处理。
   bool reached_capacity = false;
+  // 中文说明：记录已经完成初始探测的 selection 前缀长度。
   uint32_t num_processed = 0;
+  // 中文说明：第一阶段顺序扫描 selection，先区分“候选 match”和“确定新 key”。
   for (; num_processed < *inout_num_selected; ++num_processed) {
     // row id in original batch
     int id = inout_selection[num_processed];
+    // 中文说明：记住 row id 到 selection 位置的映射，便于比较失败后清 match 位。
     id_to_pos[id] = static_cast<uint16_t>(num_processed);
     bool match_found =
         find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
                               &inout_next_slot_ids[id], &out_group_ids[id]);
+    // 中文说明：如果 stamp 命中，先标为候选 match，等 equal_impl 真正比较。
     if (match_found) {
+      // 中文说明：用 selection 位置标记，而不是用原始 row id 标记。
       ::arrow::bit_util::SetBit(match_bitvector, num_processed);
+      // 中文说明：后续新 key 必须等这个候选 match 判定完，不能越过它分配 group id。
       has_pending_match = true;
+      // 中文说明：候选 match 暂时不插入，继续扫描后面的 selection 项。
       continue;
     }
 
@@ -585,20 +613,31 @@ Status SwissTable::map_new_keys_helper(
     // behavior, while later rows still use ordered commit once a pending match appears.
     // 中文说明：在遇到第一个待比较的候选 match 之前，前面的 key 都已经确定
     // 没有被更早的 key 阻塞，所以可以沿用快路径直接插入。
+    // 中文说明：只有没有 pending match 时，当前新 key 才能立即提交。
     if (!has_pending_match) {
+      // 中文说明：group id 等于已有 group 数加上本批还没 flush 的 pending 个数。
       out_group_ids[id] = num_inserted_ + num_pending_appends;
+      // 中文说明：把这个新 group 写进哈希表空槽，后续同 batch 的重复 key 能找到它。
       insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
+      // 中文说明：保存完整 hash，供后续 probing / grow 时使用。
       this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+      // 中文说明：row 内容先记录到 pending append，等 flush 时批量复制到 rows_。
       append_ids[num_pending_appends++] = static_cast<uint16_t>(id);
+      // 中文说明：这个 selection 位置已经分配过 group id，ordered pass 需要跳过。
       ::arrow::bit_util::SetBit(committed_bitvector, num_processed);
 
+      // 中文说明：如果 pending append 后达到 resize 阈值，本轮到此为止。
       if (num_inserted_ + num_pending_appends == num_groups_limit) {
+        // 中文说明：当前行已经处理完，所以 num_processed 前移到下一项。
         ++num_processed;
+        // 中文说明：通知后面的逻辑和调用方，这次停止是因为容量上限。
         reached_capacity = true;
+        // 中文说明：跳出第一阶段扫描，剩余 selection 留给扩容后继续处理。
         break;
       }
     }
   }
+  // 中文说明：第一阶段直接插入的 row 要先落到 rows_，后续比较可能依赖它们。
   RETURN_NOT_OK(flush_appends());
 
   auto temp_ids_buffer =
@@ -614,47 +653,72 @@ Status SwissTable::map_new_keys_helper(
                                       inout_selection, &num_temp_ids, temp_ids);
   run_comparisons(num_temp_ids, temp_ids, nullptr, out_group_ids, &num_temp_ids, temp_ids,
                   equal_impl, callback_ctx);
+  // 中文说明：run_comparisons 返回的是“不相等”的 row id，这些要转成新 key 处理。
   for (int i = 0; i < num_temp_ids; ++i) {
+    // 中文说明：比较失败说明并非已有 key，清掉 match 位让 ordered pass 提交它。
     ::arrow::bit_util::ClearBit(match_bitvector, id_to_pos[temp_ids[i]]);
   }
 
+  // 中文说明：计算当前哈希表 block 中 group id 字段占多少 bit。
   const int num_groupid_bits = num_groupid_bits_from_log_blocks(log_blocks_);
+  // 中文说明：由 group id bit 数推导每个 block 的字节数，用于直接读控制字节。
   const int num_block_bytes = num_block_bytes_from_num_groupid_bits(num_groupid_bits);
+  // 中文说明：封装一个判断槽位是否为空的小函数，避免对空槽继续找 match。
   auto slot_is_empty = [&](uint32_t slot_id) {
+    // 中文说明：slot_id 先换算到 block 起始地址。
     const uint8_t* blockbase = block_data(slot_id >> kLogSlotsPerBlock, num_block_bytes);
+    // 中文说明：控制字节 0x80 表示 empty slot。
     return blockbase[kMaxLocalSlot - (slot_id & kLocalSlotMask)] == 0x80;
   };
 
+  // 中文说明：记录 ordered commit pass 已经推进到 selection 的哪个位置。
   uint32_t num_committed = 0;
   // 中文说明：从 selection 的第 0 个位置开始顺序提交，这就是保序的关键。
   // 已经确认匹配旧 key 的行跳过；未匹配的行才按当前位置分配新的 group id。
+  // 中文说明：第二阶段按 selection 物理顺序提交，防止后面的 key 提前拿 group id。
   for (; num_committed < num_processed; ++num_committed) {
+    // 中文说明：已确认匹配或第一阶段已提交的行，都不需要再次分配 group id。
     if (::arrow::bit_util::GetBit(match_bitvector, num_committed) ||
         ::arrow::bit_util::GetBit(committed_bitvector, num_committed)) {
+      // 中文说明：跳过当前位置，继续看下一个 first-seen 顺序位置。
       continue;
     }
 
+    // 中文说明：取出当前 selection 位置对应的原始 batch row id。
     int id = inout_selection[num_committed];
+    // 中文说明：当前 key 可能连续遇到多个 hash stamp 候选，需要循环确认。
     for (;;) {
+      // 中文说明：本轮循环先假设没有找到真正 match。
       bool match_found = false;
+      // 中文说明：如果当前槽已经是空槽，就不需要再调用 find_next_stamp_match。
       if (!slot_is_empty(inout_next_slot_ids[id])) {
+        // 中文说明：沿 probing 链继续找下一个 stamp 相同的候选槽。
         match_found =
             find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
                                   &inout_next_slot_ids[id], &out_group_ids[id]);
       }
+      // 中文说明：没有候选 match 时，当前 key 确认为新 group。
       if (!match_found) {
         // If we reach the empty slot we insert key for new group.
+        // 中文说明：严格在当前 selection 位置分配下一个 group id。
         out_group_ids[id] = num_inserted_ + num_pending_appends;
+        // 中文说明：把新 group 的 group id 写进当前空槽。
         insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
+        // 中文说明：保存 hash，保证这个新 key 后续可被查找和迁移。
         this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+        // 中文说明：row 内容进入 pending append，稍后批量复制到 rows_。
         append_ids[num_pending_appends++] = static_cast<uint16_t>(id);
 
         // We need to break processing and have the caller of this function resize hash
         // table if we reach the limit of the number of groups present.
+        // 中文说明：提交这个新 group 后如果容量满了，就停止本轮 ordered commit。
         if (num_inserted_ + num_pending_appends == num_groups_limit) {
+          // 中文说明：当前 selection 位置已经处理完成，剩余项从下一个位置开始保留。
           ++num_committed;
+          // 中文说明：标记达到容量上限，后面会让调用方扩容。
           reached_capacity = true;
         }
+        // 中文说明：当前 row 已经作为新 group 处理完，退出 inner probing 循环。
         break;
       }
 
@@ -662,28 +726,40 @@ Status SwissTable::map_new_keys_helper(
       // visible before running equality comparison.
       // 中文说明：如果当前 key 撞到了本轮刚插入的 key，必须先 flush，
       // 否则 rows_ 里还没有可供 equal_impl 比较的内容。
+      // 中文说明：把 pending row 写入 rows_，确保 equal_impl 能比较真实 key。
       RETURN_NOT_OK(flush_appends());
+      // 中文说明：run_comparisons 接口接收 selection 数组，这里构造单元素数组。
       uint16_t temp_id = static_cast<uint16_t>(id);
+      // 中文说明：接收比较失败的数量；0 表示当前 key 找到了等价 group。
       int num_not_equal;
+      // 中文说明：只比较当前一个 row 和刚找到的候选 group。
       run_comparisons(1, &temp_id, nullptr, out_group_ids, &num_not_equal, &temp_id,
                       equal_impl, callback_ctx);
+      // 中文说明：比较相等时，group id 已经在 out_group_ids[id] 中，当前 row 完成。
       if (num_not_equal == 0) {
+        // 中文说明：退出 inner 循环，外层继续处理下一个 selection 位置。
         break;
       }
     }
 
+    // 中文说明：容量满时不能继续提交更多 group，要回到调用方扩容。
     if (reached_capacity) {
+      // 中文说明：停止 ordered commit pass，保留剩余 selection。
       break;
     }
   }
+  // 中文说明：把 ordered pass 最后攒下的 pending row 全部写入 rows_。
   RETURN_NOT_OK(flush_appends());
 
   // 中文说明：如果因为容量限制中断，本轮没处理完的 selection 要搬到前面。
   // 调用方扩容后会继续处理这些剩余 key。
+  // 中文说明：只有没有完全处理完 selection 时，才需要压缩剩余项。
   if (num_committed < *inout_num_selected) {
+    // 中文说明：把未处理的 selection 前移到数组开头，供下一轮继续使用。
     memmove(inout_selection, inout_selection + num_committed,
             sizeof(uint16_t) * (*inout_num_selected - num_committed));
   }
+  // 中文说明：更新 selection 长度，只留下尚未处理的 key 数量。
   *inout_num_selected = *inout_num_selected - num_committed;
 
   *out_need_resize = (num_inserted_ == num_groups_limit);
