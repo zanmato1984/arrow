@@ -512,6 +512,10 @@ void SwissTable::find(const int num_keys, const uint32_t* hashes,
 // Update selection vector to keep items that were not processed due to resize.
 // Ids in selection vector do not have to be sorted.
 //
+// 中文说明：这里最核心的问题是“group id 的分配顺序”必须跟输入中第一次
+// 看到 key 的顺序一致。探测哈希表时，后面的 key 可能先遇到空槽；如果马上
+// 写入，就可能越过前面仍在等待相等性比较的 key，导致 uniques 顺序被打乱。
+//
 Status SwissTable::map_new_keys_helper(
     const uint32_t* hashes, uint32_t* inout_num_selected, uint16_t* inout_selection,
     bool* out_need_resize, uint32_t* out_group_ids, uint32_t* inout_next_slot_ids,
@@ -530,6 +534,8 @@ Status SwissTable::map_new_keys_helper(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* match_bitvector = match_bitvector_buf.mutable_data();
   memset(match_bitvector, 0, num_bytes_for_bits);
+  // 中文说明：match_bitvector 标记“找到了候选槽，仍需 equal_impl 确认”的
+  // 行；committed_bitvector 标记“已经按输入顺序分配过 group id”的行。
   auto committed_bitvector_buf = util::TempVectorHolder<uint8_t>(
       temp_stack, static_cast<uint32_t>(num_bytes_for_bits));
   uint8_t* committed_bitvector = committed_bitvector_buf.mutable_data();
@@ -546,6 +552,8 @@ Status SwissTable::map_new_keys_helper(
   uint16_t* append_ids = append_ids_buffer.mutable_data();
   uint32_t num_pending_appends = 0;
 
+  // 中文说明：新 key 先写入哈希表元数据，但真正把 row 内容追加到 rows_
+  // 里可以批量做。只有当后续比较需要“看见”这些新 row 时，才 flush。
   auto flush_appends = [&]() -> Status {
     if (num_pending_appends == 0) {
       return Status::OK();
@@ -575,6 +583,8 @@ Status SwissTable::map_new_keys_helper(
     // Before any unresolved stamp match, immediate insertion cannot overtake an
     // earlier key. This keeps the common path close to the original single-pass insert
     // behavior, while later rows still use ordered commit once a pending match appears.
+    // 中文说明：在遇到第一个待比较的候选 match 之前，前面的 key 都已经确定
+    // 没有被更早的 key 阻塞，所以可以沿用快路径直接插入。
     if (!has_pending_match) {
       out_group_ids[id] = num_inserted_ + num_pending_appends;
       insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
@@ -598,6 +608,8 @@ Status SwissTable::map_new_keys_helper(
 
   // Evaluate comparisons for rows with a matching stamp. Rows that fail comparison
   // become new-key candidates and must be committed in the original input order.
+  // 中文说明：stamp 命中只代表 hash 层面可能相同。equal_impl 比较失败的行
+  // 仍然是新 key，需要清掉 match 位，交给下面的 ordered commit pass。
   util::bit_util::bits_filter_indexes(1, hardware_flags_, num_processed, match_bitvector,
                                       inout_selection, &num_temp_ids, temp_ids);
   run_comparisons(num_temp_ids, temp_ids, nullptr, out_group_ids, &num_temp_ids, temp_ids,
@@ -614,6 +626,8 @@ Status SwissTable::map_new_keys_helper(
   };
 
   uint32_t num_committed = 0;
+  // 中文说明：从 selection 的第 0 个位置开始顺序提交，这就是保序的关键。
+  // 已经确认匹配旧 key 的行跳过；未匹配的行才按当前位置分配新的 group id。
   for (; num_committed < num_processed; ++num_committed) {
     if (::arrow::bit_util::GetBit(match_bitvector, num_committed) ||
         ::arrow::bit_util::GetBit(committed_bitvector, num_committed)) {
@@ -646,6 +660,8 @@ Status SwissTable::map_new_keys_helper(
 
       // A match may point at a key inserted earlier in this commit pass. Make its row
       // visible before running equality comparison.
+      // 中文说明：如果当前 key 撞到了本轮刚插入的 key，必须先 flush，
+      // 否则 rows_ 里还没有可供 equal_impl 比较的内容。
       RETURN_NOT_OK(flush_appends());
       uint16_t temp_id = static_cast<uint16_t>(id);
       int num_not_equal;
@@ -662,6 +678,8 @@ Status SwissTable::map_new_keys_helper(
   }
   RETURN_NOT_OK(flush_appends());
 
+  // 中文说明：如果因为容量限制中断，本轮没处理完的 selection 要搬到前面。
+  // 调用方扩容后会继续处理这些剩余 key。
   if (num_committed < *inout_num_selected) {
     memmove(inout_selection, inout_selection + num_committed,
             sizeof(uint16_t) * (*inout_num_selected - num_committed));

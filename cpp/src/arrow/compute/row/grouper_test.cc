@@ -932,11 +932,15 @@ TEST(Grouper, StringKeyPreservesFirstSeenGroupOrder) {
     ARROW_SCOPED_TRACE("key type = ", *ty);
     {
       TestGrouper g({ty});
+      // 中文说明：连续的新字符串 key 应该严格按第一次出现的顺序分配
+      // group id，并且 uniques 也要保持同样的 first-seen 顺序。
       g.ExpectConsume(R"([["k"], ["l"], ["m"], ["n"], ["o"]])", "[0, 1, 2, 3, 4]");
       g.ExpectUniques(R"([["k"], ["l"], ["m"], ["n"], ["o"]])");
     }
     {
       TestGrouper g({ty});
+      // 中文说明：重复 key 混在新 key 中时，重复项要回到第一次出现的
+      // group id；后面的新 key 不能因为哈希探测顺序而提前出现在 uniques 里。
       g.ExpectConsume(R"([["k"], ["l"], ["k"], ["m"], ["n"], ["o"], ["l"]])",
                       "[0, 1, 0, 2, 3, 4, 1]");
       g.ExpectUniques(R"([["k"], ["l"], ["m"], ["n"], ["o"]])");
