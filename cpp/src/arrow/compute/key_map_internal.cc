@@ -586,12 +586,8 @@ Status SwissTable::map_new_keys_helper(
         // 中文说明：当前 selection 项已经完成判定，前缀长度前移一位。
         ++num_processed;
 
-        // 中文说明：如果这个新 group 让表达到 resize 阈值，本轮到此停止。
-        if (num_inserted_ + num_pending_appends == num_groups_limit) {
-          // 中文说明：跳出当前 key 的 probing 循环，外层会保留剩余 selection。
-          break;
-        }
         // 中文说明：当前 key 已作为新 group 处理完，继续下一个 selection 项。
+        // 是否触发 resize 由外层统一检查，避免这里重复分支。
         break;
       }
 
