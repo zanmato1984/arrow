@@ -27,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "arrow/array/data.h"
@@ -122,67 +123,110 @@ class ARROW_EXPORT ExecContext {
 // TODO: Consider standardizing on uint16 selection vectors and only use them
 // when we can ensure that each value is 64K length or smaller
 
-/// \brief Container for an array of value selection indices that were
-/// materialized from a filter.
+/// \brief A selection span representing a contiguous run of selected rows.
+///
+/// Offsets are relative to the current ExecSpan.
+struct ARROW_EXPORT ContiguousSpan {
+  int64_t start_offset = 0;
+  int64_t length = 0;
+};
+
+/// \brief A selection span representing a bitmap over a contiguous range.
+///
+/// Offsets are relative to the current ExecSpan. The bitmap is interpreted as a
+/// bit-packed array where bit i corresponds to row (start_offset + i).
+struct ARROW_EXPORT FilteredSpan {
+  int64_t start_offset = 0;
+  int64_t length = 0;
+  const uint8_t* bitmap = NULLPTR;
+  int64_t bitmap_offset = 0;
+};
+
+/// \brief A selection span representing a discrete set of sorted row indices.
+///
+/// Offsets are relative to the current ExecSpan.
+///
+/// When derived from a SelectionVector (whose indices are absolute row ids in the
+/// underlying ExecBatch), the `index_back_shift` is subtracted to make the indices
+/// relative to the current ExecSpan slice. For example, if an ExecBatch of 10 rows
+/// is executed per 8 rows and the selection contains row 9, then the second ExecSpan
+/// slice (rows 8 and 9) should represent this as index 1 by setting
+/// `index_back_shift = 8`.
+struct ARROW_EXPORT DiscreteSpan {
+  const int32_t* indices = NULLPTR;
+  int64_t length = 0;
+  int64_t index_back_shift = 0;
+
+  int64_t operator[](int64_t i) const {
+    return static_cast<int64_t>(indices[i]) - index_back_shift;
+  }
+};
+
+/// \brief A selection span for selective execution.
+///
+/// Kernels should handle all alternatives (e.g. using std::visit or
+/// compute::detail::VisitSelectionSpanInline).
+using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
+
+/// \brief Container for a deferred selection of rows over an ExecBatch.
+///
+/// This is currently an index-backed selection (Int32 indices). The public API
+/// avoids exposing the backing representation so that bitmap / run-based
+/// selections can be supported in the future without changing call sites.
 ///
 /// Columnar query engines (see e.g. [1]) have found that rather than
-/// materializing filtered data, the filter can instead be converted to an
-/// array of the "on" indices and then "fusing" these indices in operator
-/// implementations. This is especially relevant for aggregations but also
-/// applies to scalar operations.
+/// materializing filtered data, the filter can instead be converted to a
+/// selection and then "fused" in operator implementations. This is especially
+/// relevant for aggregations but also applies to scalar operations.
 ///
 /// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
 class ARROW_EXPORT SelectionVector {
  public:
-  explicit SelectionVector(std::shared_ptr<ArrayData> data);
+  virtual ~SelectionVector() = default;
 
-  explicit SelectionVector(const Array& arr);
+  /// \brief Create an index-backed selection vector from Int32 ArrayData.
+  static std::shared_ptr<SelectionVector> MakeIndices(std::shared_ptr<ArrayData> data);
 
-  std::shared_ptr<ArrayData> data() const { return data_; }
-  const int32_t* indices() const { return indices_; }
-  int64_t length() const;
+  /// \brief Create an index-backed selection vector from an Int32 Array.
+  static std::shared_ptr<SelectionVector> MakeIndices(const Array& arr);
 
-  Status Validate(int64_t values_length = -1) const;
+  /// \brief Number of selected row indices.
+  virtual int64_t length() const = 0;
 
- private:
-  std::shared_ptr<ArrayData> data_;
-  const int32_t* indices_;
-};
+  /// \brief Validate selection (e.g. increasing, non-null, in-bounds).
+  virtual Status Validate(int64_t values_length = -1) const = 0;
 
-/// \brief A span of a SelectionVector's indices. Can represent a slice of the
-/// underlying indices.
-///
-/// Note that as an indirection of indices to the data in an ExecBatch, when sliced
-/// along with the batch, the indices themselves need to be back-shifted to be relative to
-/// the batch slice (ExecSpan). For example, consider an ExecBatch of 10 rows with a
-/// SelectionVector [0, 1, 9] is to be executed per-8-rows. The first slice of the batch
-/// will have row 0 to row 7 of the original batch with selection slice [0, 1]. The second
-/// slice of the batch will have row 8 and row 9 of the original batch however they are
-/// referred to as row 0 and row 1 by the kernel. Therefore the second selection slice
-/// should be [9 - 8] = [1]. This is done by setting index_back_shift to 8 for the second
-/// selection slice.
-class ARROW_EXPORT SelectionVectorSpan {
- public:
-  explicit SelectionVectorSpan(const int32_t* indices = NULLPTR, int64_t length = 0,
-                               int64_t offset = 0, int32_t index_back_shift = 0)
-      : indices_(indices),
-        length_(length),
-        offset_(offset),
-        index_back_shift_(index_back_shift) {}
+  /// \brief Materialize selection as an Int32 indices ArrayData.
+  ///
+  /// For index-backed selections this is a cheap accessor. Other future
+  /// representations may need to allocate or compute the indices.
+  virtual Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
+      MemoryPool* pool = default_memory_pool()) const = 0;
 
-  void SetSlice(int64_t offset, int64_t length, int32_t index_back_shift = 0);
+  /// \brief Gather selected input values into a dense argument list.
+  ///
+  /// This is used as the dense fallback for kernels that don't support
+  /// selective execution. Different selection backends can choose different
+  /// compute APIs to produce the dense values.
+  virtual Result<std::vector<Datum>> MakeDenseValues(const std::vector<Datum>& values,
+                                                     ExecContext* ctx) const = 0;
 
-  int32_t operator[](int64_t i) const {
-    return indices_[i + offset_] - index_back_shift_;
-  }
+  /// \brief Scatter a dense fallback result back to the original value length.
+  virtual Result<Datum> ScatterDenseResult(const Datum& dense_result,
+                                           int64_t output_length,
+                                           ExecContext* ctx) const = 0;
 
-  int64_t length() const { return length_; }
-
- private:
-  const int32_t* indices_;
-  int64_t length_;
-  int64_t offset_;
-  int32_t index_back_shift_;
+  /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
+  ///
+  /// \param[in] chunk_start Absolute row start (inclusive).
+  /// \param[in] chunk_end Absolute row end (exclusive).
+  /// \param[in] selection_position Number of selected indices already consumed
+  /// in earlier chunks (rank).
+  /// \param[out] out Selection span relative to chunk_start.
+  /// \return Number of selected indices consumed from this chunk.
+  virtual int64_t GetSpanForChunk(int64_t chunk_start, int64_t chunk_end,
+                                  int64_t selection_position,
+                                  SelectionSpan* out) const = 0;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
@@ -238,9 +282,7 @@ struct ARROW_EXPORT ExecBatch {
 
   /// The semantic length of the ExecBatch. When the values are all scalars,
   /// the length should be set to 1 for non-aggregate kernels, otherwise the
-  /// length is taken from the array values, except when there is a selection
-  /// vector. When there is a selection vector set, the length of the batch is
-  /// the length of the selection. Aggregate kernels can have an ExecBatch
+  /// length is taken from the array values. Aggregate kernels can have an ExecBatch
   /// formed by projecting just the partition columns from a batch in which
   /// case, it would have scalar rows with length greater than 1.
   ///
@@ -251,8 +293,9 @@ struct ARROW_EXPORT ExecBatch {
   /// A deferred filter represented as an array of indices into the values.
   ///
   /// For example, the filter [true, true, false, true] would be represented as
-  /// the selection vector [0, 1, 3]. When the selection vector is set,
-  /// ExecBatch::length is equal to the length of this array.
+  /// the selection vector [0, 1, 3]. When the selection vector is set, the indices
+  /// refer to row positions in the underlying values (and may be smaller than the
+  /// underlying length).
   std::shared_ptr<SelectionVector> selection_vector;
 
   /// \brief index of this batch in a sorted stream of batches
