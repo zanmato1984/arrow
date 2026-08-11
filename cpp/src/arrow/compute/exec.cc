@@ -477,9 +477,8 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
   // Then the selection span
   if (selection_vector_) {
     DCHECK_NE(selection_span, nullptr);
-    const uint64_t chunk_start = static_cast<uint64_t>(position_);
-    const uint64_t chunk_end =
-        static_cast<uint64_t>(position_) + static_cast<uint64_t>(iteration_size);
+    const int64_t chunk_start = position_;
+    const int64_t chunk_end = position_ + iteration_size;
 
     const int64_t consumed = selection_vector_->GetSpanForChunk(
         chunk_start, chunk_end, selection_position_, selection_span);
@@ -892,12 +891,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return EmitResult(result->data(), listener);
     }
 
-    if (batch.selection_vector && !kernel_->selective_exec) {
-      // If the batch contains a selection vector but the kernel does not support
-      // selective execution, we need to execute the batch in a "dense" manner.
-      return ExecuteSelectiveDense(batch, listener);
-    }
-
     return ExecuteBatch(batch, listener);
   }
 
@@ -938,39 +931,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     } else {
       return ExecuteNonSpans(listener);
     }
-  }
-
-  // Execute a single batch with a selection vector "densely" for a kernel that doesn't
-  // support selective execution. "Densely" here means that we first gather the rows
-  // indicated by the selection vector into a contiguous ExecBatch, execute that, and
-  // then scatter the result back to the original row positions in the output.
-  Status ExecuteSelectiveDense(const ExecBatch& batch, ExecListener* listener) {
-    DCHECK(batch.selection_vector && !kernel_->selective_exec);
-
-    if (CheckIfAllScalar(batch)) {
-      // For all-scalar batch, we can skip the gather/scatter steps as if there is no
-      // selection vector - the result is a scalar anyway.
-      ExecBatch input = batch;
-      input.selection_vector = nullptr;
-      return ExecuteBatch(input, listener);
-    }
-
-    ARROW_ASSIGN_OR_RAISE(
-        std::vector<Datum> values,
-        batch.selection_vector->MakeDenseValues(batch.values, exec_context()));
-    ARROW_ASSIGN_OR_RAISE(
-        ExecBatch input,
-        ExecBatch::Make(std::move(values), batch.selection_vector->length()));
-
-    DatumAccumulator dense_listener;
-    RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
-    Datum dense_result = WrapResults(input.values, dense_listener.values());
-
-    ARROW_ASSIGN_OR_RAISE(
-        auto result,
-        batch.selection_vector->ScatterDenseResult(dense_result, batch.length,
-                                                   exec_context()));
-    return listener->OnResult(std::move(result));
   }
 
   Status EmitResult(std::shared_ptr<ArrayData> out, ExecListener* listener) {
@@ -1569,7 +1529,7 @@ void PropagateNullsSpans(const ExecSpan& batch, ArraySpan* out) {
 }
 
 std::unique_ptr<KernelExecutor> KernelExecutor::MakeScalar() {
-  return std::make_unique<detail::ScalarExecutor>();
+  return MakeDenseSelectionExecutor(std::make_unique<detail::ScalarExecutor>());
 }
 
 std::unique_ptr<KernelExecutor> KernelExecutor::MakeVector() {
@@ -1708,26 +1668,27 @@ class IndexSelectionVector final : public SelectionVector {
     return Scatter(dense_result, indices, ScatterOptions{/*max_index=*/output_length - 1});
   }
 
-  int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+  int64_t GetSpanForChunk(int64_t chunk_start, int64_t chunk_end,
                           int64_t selection_position,
                           SelectionSpan* out) const override {
     DCHECK_NE(out, nullptr);
+    DCHECK_GE(chunk_start, 0);
     DCHECK_LE(chunk_start, chunk_end);
 
     const int32_t* indices_begin = indices_ + selection_position;
     const int32_t* indices_end = indices_ + length();
     DCHECK_LE(indices_begin, indices_end);
 
-    const int32_t chunk_end_i32 = static_cast<int32_t>(chunk_end);
-    const int32_t* indices_limit =
-        std::lower_bound(indices_begin, indices_end, chunk_end_i32);
+    const int32_t* indices_limit = std::lower_bound(
+        indices_begin, indices_end, chunk_end,
+        [](int32_t index, int64_t end) { return static_cast<int64_t>(index) < end; });
     const int64_t num_indices = indices_limit - indices_begin;
 
     if (num_indices > 0) {
       const int32_t first = indices_begin[0];
       const int32_t last = indices_begin[num_indices - 1];
-      DCHECK_GE(static_cast<uint64_t>(first), chunk_start);
-      DCHECK_LT(static_cast<uint64_t>(last), chunk_end);
+      DCHECK_GE(static_cast<int64_t>(first), chunk_start);
+      DCHECK_LT(static_cast<int64_t>(last), chunk_end);
 
       // If the discrete indices form a contiguous run, represent them as such.
       // Since Validate enforces strict increasing order, checking
@@ -1737,10 +1698,10 @@ class IndexSelectionVector final : public SelectionVector {
                                   static_cast<int64_t>(chunk_start),
                               num_indices};
       } else {
-        *out = DiscreteSpan{indices_begin, num_indices, static_cast<int32_t>(chunk_start)};
+        *out = DiscreteSpan{indices_begin, num_indices, chunk_start};
       }
     } else {
-      *out = DiscreteSpan{indices_begin, /*length=*/0, static_cast<int32_t>(chunk_start)};
+      *out = DiscreteSpan{indices_begin, /*length=*/0, chunk_start};
     }
 
     return num_indices;

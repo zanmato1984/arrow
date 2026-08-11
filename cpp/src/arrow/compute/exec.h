@@ -155,10 +155,10 @@ struct ARROW_EXPORT FilteredSpan {
 struct ARROW_EXPORT DiscreteSpan {
   const int32_t* indices = NULLPTR;
   int64_t length = 0;
-  int32_t index_back_shift = 0;
+  int64_t index_back_shift = 0;
 
   int64_t operator[](int64_t i) const {
-    return static_cast<int64_t>(indices[i] - index_back_shift);
+    return static_cast<int64_t>(indices[i]) - index_back_shift;
   }
 };
 
@@ -224,7 +224,7 @@ class ARROW_EXPORT SelectionVector {
   /// in earlier chunks (rank).
   /// \param[out] out Selection span relative to chunk_start.
   /// \return Number of selected indices consumed from this chunk.
-  virtual int64_t GetSpanForChunk(uint64_t chunk_start, uint64_t chunk_end,
+  virtual int64_t GetSpanForChunk(int64_t chunk_start, int64_t chunk_end,
                                   int64_t selection_position,
                                   SelectionSpan* out) const = 0;
 };

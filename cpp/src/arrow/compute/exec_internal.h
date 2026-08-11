@@ -156,6 +156,14 @@ class ARROW_EXPORT KernelExecutor {
   static std::unique_ptr<KernelExecutor> MakeScalarAggregate();
 };
 
+/// \brief Wrap a scalar kernel executor with dense selection fallback.
+///
+/// Batches without a selection, and selections handled natively by the kernel, are
+/// delegated unchanged. For kernels without selective execution, selected inputs are
+/// gathered before delegation and the dense result is scattered back afterwards.
+std::unique_ptr<KernelExecutor> MakeDenseSelectionExecutor(
+    std::unique_ptr<KernelExecutor> executor);
+
 ARROW_EXPORT
 int64_t InferBatchLength(const std::vector<Datum>& values, bool* all_same);
 

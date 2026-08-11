@@ -194,6 +194,22 @@ TEST(SelectionVector, Validate) {
   }
 }
 
+TEST(SelectionVector, GetSpanForChunkAtInt32Limit) {
+  auto selection =
+      SelectionVectorFromJSON("[" + std::to_string(std::numeric_limits<int32_t>::max()) +
+                              "]");
+  SelectionSpan span;
+  const int64_t chunk_end =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+
+  ASSERT_EQ(1, selection->GetSpanForChunk(/*chunk_start=*/0, chunk_end,
+                                          /*selection_position=*/0, &span));
+  const auto* contiguous = std::get_if<ContiguousSpan>(&span);
+  ASSERT_NE(contiguous, nullptr);
+  ASSERT_EQ(std::numeric_limits<int32_t>::max(), contiguous->start_offset);
+  ASSERT_EQ(1, contiguous->length);
+}
+
 TEST(DiscreteSpan, Basics) {
   auto indices = ArrayFromJSON(int32(), "[0, 3, 7]");
   const int32_t* idx = indices->data()->GetValues<int32_t>(1);
