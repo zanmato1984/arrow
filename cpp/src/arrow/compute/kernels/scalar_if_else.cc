@@ -1286,6 +1286,15 @@ struct IfElseFunction : ScalarFunction {
 
     return arrow::compute::detail::NoMatchingKernel(this, *types);
   }
+
+  static std::shared_ptr<MatchConstraint> ValueTypesMatchConstraint() {
+    static auto constraint =
+        MatchConstraint::Make([](const std::vector<TypeHolder>& types) -> bool {
+          DCHECK_EQ(types.size(), 3);
+          return types[1] == types[2];
+        });
+    return constraint;
+  }
 };
 
 void AddNullIfElseKernel(const std::shared_ptr<IfElseFunction>& scalar_function) {
@@ -1315,6 +1324,8 @@ void AddPrimitiveIfElseKernels(const std::shared_ptr<ScalarFunction>& scalar_fun
     } else {
       sig = KernelSignature::Make({boolean(), type, type}, type);
     }
+    sig = KernelSignature::Make(sig->in_types(), sig->out_type(), sig->is_varargs(),
+                                IfElseFunction::ValueTypesMatchConstraint());
     ScalarKernel kernel(std::move(sig), exec);
     kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
     kernel.mem_allocation = MemAllocation::PREALLOCATE;
@@ -1332,7 +1343,10 @@ void AddBinaryIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
                                                     /*AllocateMem=*/std::true_type>(
             *type);
     // cond array needs to be boolean always
-    ScalarKernel kernel({boolean(), type, type}, type, exec);
+    ScalarKernel kernel(
+        KernelSignature::Make({boolean(), type, type}, type, /*is_varargs=*/false,
+                              IfElseFunction::ValueTypesMatchConstraint()),
+        exec);
     kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
     kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
     kernel.can_write_into_slices = false;
@@ -1344,8 +1358,11 @@ void AddBinaryIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
 template <typename T>
 void AddFixedWidthIfElseKernel(const std::shared_ptr<IfElseFunction>& scalar_function) {
   auto type_id = T::type_id;
-  ScalarKernel kernel({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
+  ScalarKernel kernel(
+      KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)}, LastType,
+                            /*is_varargs=*/false,
+                            IfElseFunction::ValueTypesMatchConstraint()),
+      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
   kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = MemAllocation::PREALLOCATE;
   kernel.can_write_into_slices = true;
@@ -1358,8 +1375,11 @@ void AddNestedIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
        {Type::LIST, Type::LARGE_LIST, Type::LIST_VIEW, Type::LARGE_LIST_VIEW,
         Type::FIXED_SIZE_LIST, Type::MAP, Type::STRUCT, Type::DENSE_UNION,
         Type::SPARSE_UNION, Type::DICTIONARY}) {
-    ScalarKernel kernel({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                        NestedIfElseExec::Exec);
+    ScalarKernel kernel(
+        KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)},
+                              LastType, /*is_varargs=*/false,
+                              IfElseFunction::ValueTypesMatchConstraint()),
+        NestedIfElseExec::Exec);
     kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
     kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
     kernel.can_write_into_slices = false;

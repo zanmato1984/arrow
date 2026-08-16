@@ -500,6 +500,8 @@ TEST_F(TestIfElseKernel, IfElseDispatchBest) {
                     {boolean(), float32(), float32()});
   CheckDispatchBest(name, {boolean(), float64(), int32()},
                     {boolean(), float64(), float64()});
+  CheckDispatchBest(name, {boolean(), decimal128(3, 2), decimal128(4, 3)},
+                    {boolean(), decimal128(4, 3), decimal128(4, 3)});
 
   CheckDispatchBest(name, {null(), uint8(), int8()}, {boolean(), int16(), int16()});
 
@@ -515,6 +517,21 @@ TEST_F(TestIfElseKernel, IfElseDispatchBest) {
                     {boolean(), date64(), date64()});
   CheckDispatchBest(name, {boolean(), date32(), date32()},
                     {boolean(), date32(), date32()});
+}
+
+TEST_F(TestIfElseKernel, IfElseDispatchExact) {
+  CheckDispatchExact("if_else", {boolean(), decimal128(3, 2), decimal128(3, 2)});
+  CheckDispatchExactFails("if_else",
+                          {boolean(), decimal128(3, 2), decimal128(4, 3)});
+  CheckDispatchExactFails(
+      "if_else",
+      {boolean(), timestamp(TimeUnit::SECOND), timestamp(TimeUnit::SECOND, "UTC")});
+  CheckDispatchExactFails("if_else",
+                          {boolean(), fixed_size_binary(3), fixed_size_binary(4)});
+  CheckDispatchExactFails("if_else", {boolean(), list(int32()), list(int64())});
+  CheckDispatchExactFails("if_else",
+                          {boolean(), dictionary(int8(), int32()),
+                           dictionary(int8(), int64())});
 }
 
 template <typename Type>

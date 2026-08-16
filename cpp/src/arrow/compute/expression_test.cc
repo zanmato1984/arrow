@@ -938,6 +938,28 @@ TEST(Expression, BindWithImplicitCastsForCaseWhenOnDecimal) {
                 /*bound_out=*/nullptr, *exciting_schema);
 }
 
+TEST(Expression, BindWithImplicitCastsForIfElseOnDecimal) {
+  auto exciting_schema = schema({field("cond", boolean()),
+                                 field("dec128_3_2", decimal128(3, 2)),
+                                 field("dec128_4_3", decimal128(4, 3)),
+                                 field("dec256_3_2", decimal256(3, 2))});
+
+  ExpectBindsTo(
+      call("if_else",
+           {field_ref("cond"), field_ref("dec128_3_2"), field_ref("dec128_4_3")}),
+      call("if_else",
+           {field_ref("cond"), cast(field_ref("dec128_3_2"), decimal128(4, 3)),
+            field_ref("dec128_4_3")}),
+      /*bound_out=*/nullptr, *exciting_schema);
+  ExpectBindsTo(
+      call("if_else",
+           {field_ref("cond"), field_ref("dec128_3_2"), field_ref("dec256_3_2")}),
+      call("if_else",
+           {field_ref("cond"), cast(field_ref("dec128_3_2"), decimal256(3, 2)),
+            field_ref("dec256_3_2")}),
+      /*bound_out=*/nullptr, *exciting_schema);
+}
+
 TEST(Expression, BindNestedCall) {
   auto expr = add(field_ref("a"),
                   call("subtract", {call("multiply", {field_ref("b"), field_ref("c")}),
