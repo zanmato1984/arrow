@@ -2727,10 +2727,27 @@ struct ChooseFunction : ScalarFunction {
         *it = type;
       }
     }
+    if (HasDecimal(*types)) {
+      RETURN_NOT_OK(CastDecimalArgs(types->data() + 1, types->size() - 1));
+    }
     if (auto kernel = DispatchExactImpl(this, {types->front(), types->back()})) {
       return kernel;
     }
     return arrow::compute::detail::NoMatchingKernel(this, *types);
+  }
+
+  static std::shared_ptr<MatchConstraint> DecimalMatchConstraint() {
+    static auto constraint =
+        MatchConstraint::Make([](const std::vector<TypeHolder>& types) -> bool {
+          DCHECK_GE(types.size(), 2);
+          DCHECK(std::all_of(types.begin() + 1, types.end(), [](const TypeHolder& type) {
+            return is_decimal(type.id());
+          }));
+          return std::all_of(
+              types.begin() + 2, types.end(),
+              [&types](const TypeHolder& type) { return type == types[1]; });
+        });
+    return constraint;
   }
 };
 
@@ -2831,9 +2848,10 @@ void AddNestedCoalesceKernels(const std::shared_ptr<ScalarFunction>& scalar_func
 }
 
 void AddChooseKernel(const std::shared_ptr<ScalarFunction>& scalar_function,
-                     detail::GetTypeId get_id, ArrayKernelExec exec) {
+                     detail::GetTypeId get_id, ArrayKernelExec exec,
+                     std::shared_ptr<MatchConstraint> constraint = nullptr) {
   ScalarKernel kernel(KernelSignature::Make({Type::INT64, InputType(get_id.id)}, LastType,
-                                            /*is_varargs=*/true),
+                                            /*is_varargs=*/true, std::move(constraint)),
                       exec);
   kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = MemAllocation::PREALLOCATE;
@@ -2956,8 +2974,10 @@ void RegisterScalarIfElse(FunctionRegistry* registry) {
     AddPrimitiveChooseKernels(func, {boolean(), null(), float16()});
     AddChooseKernel(func, Type::FIXED_SIZE_BINARY,
                     ChooseFunctor<FixedSizeBinaryType>::Exec);
-    AddChooseKernel(func, Type::DECIMAL128, ChooseFunctor<FixedSizeBinaryType>::Exec);
-    AddChooseKernel(func, Type::DECIMAL256, ChooseFunctor<FixedSizeBinaryType>::Exec);
+    AddChooseKernel(func, Type::DECIMAL128, ChooseFunctor<FixedSizeBinaryType>::Exec,
+                    ChooseFunction::DecimalMatchConstraint());
+    AddChooseKernel(func, Type::DECIMAL256, ChooseFunctor<FixedSizeBinaryType>::Exec,
+                    ChooseFunction::DecimalMatchConstraint());
     for (const auto& ty : BaseBinaryTypes()) {
       AddChooseKernel(func, ty, GenerateTypeAgnosticVarBinaryBase<ChooseFunctor>(ty));
     }

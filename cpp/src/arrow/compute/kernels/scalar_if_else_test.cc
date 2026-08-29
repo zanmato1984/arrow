@@ -3951,6 +3951,8 @@ TEST(TestChooseKernel, DispatchBest) {
   // Other arguments promoted separately from index
   EXPECT_EQ((std::vector<TypeHolder>{int64(), int32(), int32()}),
             Check({int8(), int32(), uint8()}));
+  EXPECT_EQ((std::vector<TypeHolder>{int64(), decimal128(4, 3), decimal128(4, 3)}),
+            Check({int8(), decimal128(3, 2), decimal128(4, 3)}));
 }
 
 TEST(TestChooseKernel, Errors) {
