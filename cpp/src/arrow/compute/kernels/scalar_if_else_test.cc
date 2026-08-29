@@ -3895,6 +3895,12 @@ TEST(TestChoose, Decimal) {
     CheckScalar("choose", {ScalarFromJSON(int64(), "0"), scalar_null, values2},
                 *MakeArrayOfNull(type, 5));
   }
+
+  auto indices = ArrayFromJSON(int64(), "[0, 1, null]");
+  auto lhs = ArrayFromJSON(decimal128(3, 2), R"(["1.23", "2.34", "3.45"])");
+  auto rhs = ArrayFromJSON(decimal128(4, 3), R"(["4.567", "5.678", "6.789"])");
+  CheckScalar("choose", {indices, lhs, rhs},
+              ArrayFromJSON(decimal128(4, 3), R"(["1.230", "5.678", null])"));
 }
 
 TEST(TestChoose, FixedSizeBinary) {
@@ -3951,6 +3957,8 @@ TEST(TestChooseKernel, DispatchBest) {
   // Other arguments promoted separately from index
   EXPECT_EQ((std::vector<TypeHolder>{int64(), int32(), int32()}),
             Check({int8(), int32(), uint8()}));
+  EXPECT_EQ((std::vector<TypeHolder>{int64(), decimal128(4, 3), decimal128(4, 3)}),
+            Check({int8(), decimal128(3, 2), decimal128(4, 3)}));
 }
 
 TEST(TestChooseKernel, Errors) {
