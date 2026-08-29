@@ -1243,12 +1243,16 @@ struct ResolveIfElseExec<NullType, AllocateMem> {
 struct IfElseFunction : ScalarFunction {
   using ScalarFunction::ScalarFunction;
 
+  static std::shared_ptr<MatchConstraint> ValueTypesMatchConstraint() {
+    static auto constraint = MatchConstraint::Make(
+        [](const std::vector<TypeHolder>& types) { return types[1] == types[2]; });
+    return constraint;
+  }
+
   Result<const Kernel*> DispatchBest(std::vector<TypeHolder>* types) const override {
     RETURN_NOT_OK(CheckArity(types->size()));
 
     using arrow::compute::detail::DispatchExactImpl;
-    // Do not DispatchExact here because it'll let through something like (bool,
-    // timestamp[s], timestamp[s, "UTC"])
 
     // if 0th type is null, replace with bool
     if (types->at(0).id() == Type::NA) {
@@ -1260,15 +1264,7 @@ struct IfElseFunction : ScalarFunction {
     constexpr size_t num_args = 2;
 
     internal::ReplaceNullWithOtherType(left_arg, num_args);
-
-    // If both are identical dictionary types, dispatch to the dictionary kernel
-    // TODO(ARROW-14105): apply implicit casts to dictionary types too
-    TypeHolder* right_arg = &(*types)[2];
-    if (is_dictionary(left_arg->id()) && left_arg->type->Equals(*right_arg->type)) {
-      auto kernel = DispatchExactImpl(this, *types);
-      DCHECK(kernel);
-      return kernel;
-    }
+    if (auto kernel = DispatchExactImpl(this, *types)) return kernel;
 
     internal::EnsureDictionaryDecoded(left_arg, num_args);
 
@@ -1311,7 +1307,7 @@ void AddPrimitiveIfElseKernels(const std::shared_ptr<ScalarFunction>& scalar_fun
       auto unit = checked_cast<const TimestampType&>(*type).unit();
       sig = KernelSignature::Make(
           {boolean(), match::TimestampTypeUnit(unit), match::TimestampTypeUnit(unit)},
-          LastType);
+          LastType, /*is_varargs=*/false, IfElseFunction::ValueTypesMatchConstraint());
     } else {
       sig = KernelSignature::Make({boolean(), type, type}, type);
     }
@@ -1344,8 +1340,11 @@ void AddBinaryIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
 template <typename T>
 void AddFixedWidthIfElseKernel(const std::shared_ptr<IfElseFunction>& scalar_function) {
   auto type_id = T::type_id;
-  ScalarKernel kernel({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
+  ScalarKernel kernel(
+      KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)}, LastType,
+                            /*is_varargs=*/false,
+                            IfElseFunction::ValueTypesMatchConstraint()),
+      ResolveIfElseExec<T, /*AllocateMem=*/std::false_type>::Exec);
   kernel.null_handling = NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = MemAllocation::PREALLOCATE;
   kernel.can_write_into_slices = true;
@@ -1358,8 +1357,11 @@ void AddNestedIfElseKernels(const std::shared_ptr<IfElseFunction>& scalar_functi
        {Type::LIST, Type::LARGE_LIST, Type::LIST_VIEW, Type::LARGE_LIST_VIEW,
         Type::FIXED_SIZE_LIST, Type::MAP, Type::STRUCT, Type::DENSE_UNION,
         Type::SPARSE_UNION, Type::DICTIONARY}) {
-    ScalarKernel kernel({boolean(), InputType(type_id), InputType(type_id)}, LastType,
-                        NestedIfElseExec::Exec);
+    ScalarKernel kernel(
+        KernelSignature::Make({boolean(), InputType(type_id), InputType(type_id)}, LastType,
+                              /*is_varargs=*/false,
+                              IfElseFunction::ValueTypesMatchConstraint()),
+        NestedIfElseExec::Exec);
     kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
     kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
     kernel.can_write_into_slices = false;
