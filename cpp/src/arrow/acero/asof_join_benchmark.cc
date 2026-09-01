@@ -27,9 +27,11 @@
 #include "arrow/acero/test_util_internal.h"
 #include "arrow/array/array_primitive.h"
 #include "arrow/array/builder_binary.h"
+#include "arrow/memory_pool.h"
 #include "arrow/table.h"
 #include "arrow/testing/future_util.h"
 #include "arrow/util/byte_size.h"
+#include "arrow/util/thread_pool.h"
 
 namespace arrow {
 namespace acero {
@@ -121,6 +123,7 @@ static void TableJoinOverhead(benchmark::State& state,
     right_input_tables.push_back(std::move(right_table_stats));
   }
 
+  ProxyMemoryPool memory_pool(default_memory_pool());
   for (auto _ : state) {
     state.PauseTiming();
     std::vector<Declaration::Input> input_nodes = {Declaration(
@@ -134,7 +137,12 @@ static void TableJoinOverhead(benchmark::State& state,
     }
     Declaration join_node{factory_name, {input_nodes}, options};
     state.ResumeTiming();
-    ASSERT_OK(DeclarationToStatus(std::move(join_node), use_threads));
+    ASSERT_OK(DeclarationToStatus(std::move(join_node), use_threads, &memory_pool));
+  }
+  if (use_threads) {
+    // Keep the per-case proxy alive until all work queued on the global executor has
+    // released its allocations.
+    ::arrow::internal::GetCpuThreadPool()->WaitForIdle();
   }
 
   state.counters["rows_per_second"] = benchmark::Counter(
@@ -147,7 +155,7 @@ static void TableJoinOverhead(benchmark::State& state,
                          benchmark::Counter::kIsRate);
 
   state.counters["maximum_peak_memory"] =
-      benchmark::Counter(static_cast<double>(default_memory_pool()->max_memory()));
+      benchmark::Counter(static_cast<double>(memory_pool.max_memory()));
 }
 
 AsofJoinNodeOptions GetRepeatedOptions(size_t repeat, FieldRef on_key,
@@ -208,23 +216,26 @@ void SetArgs(benchmark::internal::Benchmark* bench) {
   int default_num_tables = 1;
   int default_batch_size = 4000;
 
-  for (int freq : {200, 400, 1000}) {
+  bench->Args({default_freq, default_cols, default_ids, default_batch_size,
+               default_num_tables, default_freq, default_cols, default_ids});
+
+  for (int freq : {200, 1000}) {
     bench->Args({freq, default_cols, default_ids, default_batch_size, default_num_tables,
                  freq, default_cols, default_ids});
   }
-  for (int cols : {10, 20, 100}) {
+  for (int cols : {10, 100}) {
     bench->Args({default_freq, cols, default_ids, default_batch_size, default_num_tables,
                  default_freq, cols, default_ids});
   }
-  for (int ids : {100, 500, 1000}) {
+  for (int ids : {100, 1000}) {
     bench->Args({default_freq, default_cols, ids, default_batch_size, default_num_tables,
                  default_freq, default_cols, ids});
   }
-  for (int num_tables : {1, 10, 50}) {
+  for (int num_tables : {10, 50}) {
     bench->Args({default_freq, default_cols, default_ids, default_batch_size, num_tables,
                  default_freq, default_cols, default_ids});
   }
-  for (int batch_size : {1000, 4000, 32000}) {
+  for (int batch_size : {1000, 32000}) {
     bench->Args({default_freq, default_cols, default_ids, batch_size, default_num_tables,
                  default_freq, default_cols, default_ids});
   }
