@@ -341,10 +341,10 @@ TEST(MatchConstraint, DecimalsHaveSameScale) {
                            decimal128(precision, scale + 1)}));
 }
 
-TEST(MatchConstraint, DecimalsHaveSameType) {
-  auto c = DecimalsHaveSameType();
+TEST(MatchConstraint, TypesHaveSameType) {
+  auto c = TypesHaveSameType();
   constexpr int32_t precision = 12, scale = 2;
-  ASSERT_TRUE(c->Matches({decimal128(precision, scale)}));
+  ASSERT_TRUE(c->Matches({int8()}));
   ASSERT_TRUE(c->Matches({decimal128(precision, scale), decimal128(precision, scale),
                           decimal128(precision, scale)}));
   ASSERT_FALSE(
@@ -352,6 +352,10 @@ TEST(MatchConstraint, DecimalsHaveSameType) {
   ASSERT_FALSE(
       c->Matches({decimal128(precision, scale), decimal128(precision, scale + 1)}));
   ASSERT_FALSE(c->Matches({decimal128(precision, scale), decimal256(precision, scale)}));
+
+  auto skip_first = TypesHaveSameType(/*first_type_index=*/1);
+  ASSERT_TRUE(skip_first->Matches({boolean(), utf8(), utf8()}));
+  ASSERT_FALSE(skip_first->Matches({boolean(), utf8(), binary()}));
 }
 
 // ----------------------------------------------------------------------
