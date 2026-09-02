@@ -341,6 +341,19 @@ TEST(MatchConstraint, DecimalsHaveSameScale) {
                            decimal128(precision, scale + 1)}));
 }
 
+TEST(MatchConstraint, DecimalsHaveSameType) {
+  auto c = DecimalsHaveSameType();
+  constexpr int32_t precision = 12, scale = 2;
+  ASSERT_TRUE(c->Matches({decimal128(precision, scale)}));
+  ASSERT_TRUE(c->Matches({decimal128(precision, scale), decimal128(precision, scale),
+                          decimal128(precision, scale)}));
+  ASSERT_FALSE(
+      c->Matches({decimal128(precision, scale), decimal128(precision + 1, scale)}));
+  ASSERT_FALSE(
+      c->Matches({decimal128(precision, scale), decimal128(precision, scale + 1)}));
+  ASSERT_FALSE(c->Matches({decimal128(precision, scale), decimal256(precision, scale)}));
+}
+
 // ----------------------------------------------------------------------
 // KernelSignature
 

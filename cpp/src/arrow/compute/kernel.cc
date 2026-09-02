@@ -519,6 +519,21 @@ std::shared_ptr<MatchConstraint> DecimalsHaveSameScale() {
   return instance;
 }
 
+std::shared_ptr<MatchConstraint> DecimalsHaveSameType() {
+  class DecimalsHaveSameTypeConstraint : public MatchConstraint {
+   public:
+    bool Matches(const std::vector<TypeHolder>& types) const override {
+      DCHECK_GE(types.size(), 1);
+      DCHECK(std::all_of(types.begin(), types.end(),
+                         [](const TypeHolder& type) { return is_decimal(type.id()); }));
+      return std::all_of(types.begin() + 1, types.end(),
+                         [&types](const TypeHolder& type) { return type == types[0]; });
+    }
+  };
+  static auto instance = std::make_shared<DecimalsHaveSameTypeConstraint>();
+  return instance;
+}
+
 // ----------------------------------------------------------------------
 // KernelSignature
 
