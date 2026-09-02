@@ -2900,7 +2900,7 @@ void RegisterScalarIfElse(FunctionRegistry* registry) {
   {
     auto func = std::make_shared<CaseWhenFunction>(
         "case_when", Arity::VarArgs(/*min_args=*/2), case_when_doc);
-    auto all_value_types_match = TypesHaveSameType(/*first_type_index=*/1);
+    auto all_value_types_match = AllTypesAreIdenticalFrom(/*first_type_index=*/1);
     AddPrimitiveCaseWhenKernels(func, NumericTypes(), all_value_types_match);
     AddPrimitiveCaseWhenKernels(func, TemporalTypes(), all_value_types_match);
     AddPrimitiveCaseWhenKernels(func, IntervalTypes(), all_value_types_match);
@@ -2928,9 +2928,9 @@ void RegisterScalarIfElse(FunctionRegistry* registry) {
     AddCoalesceKernel(func, Type::FIXED_SIZE_BINARY,
                       CoalesceFunctor<FixedSizeBinaryType>::Exec);
     AddCoalesceKernel(func, Type::DECIMAL128, CoalesceFunctor<FixedSizeBinaryType>::Exec,
-                      TypesHaveSameType());
+                      AllTypesAreIdentical());
     AddCoalesceKernel(func, Type::DECIMAL256, CoalesceFunctor<FixedSizeBinaryType>::Exec,
-                      TypesHaveSameType());
+                      AllTypesAreIdentical());
     for (const auto& ty : BaseBinaryTypes()) {
       AddCoalesceKernel(func, ty, GenerateTypeAgnosticVarBinaryBase<CoalesceFunctor>(ty));
     }

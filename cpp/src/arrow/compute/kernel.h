@@ -365,9 +365,12 @@ class ARROW_EXPORT MatchConstraint {
 /// \brief Constraint that all input types are decimal types and have the same scale.
 ARROW_EXPORT std::shared_ptr<MatchConstraint> DecimalsHaveSameScale();
 
-/// \brief Constraint that all input types at and after first_type_index are the same.
-ARROW_EXPORT std::shared_ptr<MatchConstraint> TypesHaveSameType(
-    size_t first_type_index = 0);
+/// \brief Constraint that all input types are identical.
+ARROW_EXPORT std::shared_ptr<MatchConstraint> AllTypesAreIdentical();
+
+/// \brief Constraint that all input types starting at first_type_index are identical.
+ARROW_EXPORT std::shared_ptr<MatchConstraint> AllTypesAreIdenticalFrom(
+    size_t first_type_index);
 
 /// \brief Holds the input types, optional match constraint and output type of the kernel.
 ///
