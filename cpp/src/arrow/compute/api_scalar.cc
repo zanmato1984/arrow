@@ -901,6 +901,11 @@ SCALAR_EAGER_UNARY(USWeek, "us_week")
 SCALAR_EAGER_UNARY(USYear, "us_year")
 SCALAR_EAGER_UNARY(Year, "year")
 
+Result<Datum> MakeDate(const Datum& year, const Datum& month, const Datum& day,
+                       ExecContext* ctx) {
+  return CallFunction("make_date", {year, month, day}, ctx);
+}
+
 Result<Datum> AssumeTimezone(const Datum& arg, AssumeTimezoneOptions options,
                              ExecContext* ctx) {
   return CallFunction("assume_timezone", {arg}, &options, ctx);

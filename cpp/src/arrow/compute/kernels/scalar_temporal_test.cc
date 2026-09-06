@@ -631,6 +631,36 @@ TEST_F(ScalarTemporalTest, TestTemporalComponentExtractionWithDifferentUnits) {
   }
 }
 
+TEST_F(ScalarTemporalTest, TestMakeDate) {
+  auto years = ArrayFromJSON(int64(), year);
+  auto months = ArrayFromJSON(int64(), month);
+  auto days = ArrayFromJSON(int64(), day);
+  auto expected = ArrayFromJSON(date32(), date32s);
+
+  ASSERT_OK_AND_ASSIGN(auto actual, CallFunction("make_date", {years, months, days}));
+  AssertDatumsEqual(expected, actual);
+
+  ASSERT_OK_AND_ASSIGN(
+      auto from_wrapper,
+      MakeDate(ScalarFromJSON(int64(), "2024"), ArrayFromJSON(int8(), "[1, 2, null]"),
+               ScalarFromJSON(int16(), "1")));
+  AssertDatumsEqual(ArrayFromJSON(date32(), "[19723, 19754, null]"), from_wrapper);
+
+  ASSERT_OK_AND_ASSIGN(
+      auto null_scalar,
+      CallFunction("make_date",
+                   {ScalarFromJSON(int64(), "null"),
+                    ArrayFromJSON(int64(), "[1, 2, 3]"),
+                    ScalarFromJSON(int64(), "1")}));
+  AssertDatumsEqual(ArrayFromJSON(date32(), "[null, null, null]"), null_scalar);
+
+  EXPECT_RAISES_WITH_MESSAGE_THAT(
+      Invalid, ::testing::HasSubstr("Invalid date components"),
+      CallFunction("make_date",
+                   {ArrayFromJSON(int64(), "[2021]"), ArrayFromJSON(int64(), "[2]"),
+                    ArrayFromJSON(int64(), "[29]")}));
+}
+
 TEST_F(ScalarTemporalTest, TestOutsideNanosecondRange) {
   const char* times = R"(["1677-09-20T00:00:59.123456", "2262-04-13T23:23:23.999999"])";
   auto unit = timestamp(TimeUnit::MICRO);
