@@ -68,6 +68,7 @@ arrow_components = {
             'compute/api_vector.cc',
             'compute/cast.cc',
             'compute/exec.cc',
+            'compute/exec_selection.cc',
             'compute/expression.cc',
             'compute/function.cc',
             'compute/function_internal.cc',
