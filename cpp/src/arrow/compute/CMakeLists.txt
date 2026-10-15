@@ -189,3 +189,5 @@ add_arrow_compute_benchmark(function_benchmark)
 add_subdirectory(kernels)
 
 add_subdirectory(row)
+
+add_subdirectory(special)
