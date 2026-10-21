@@ -38,6 +38,7 @@
 #include "arrow/util/bitmap_ops.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/cpu_info.h"
+#include "arrow/util/io_util.h"
 #include "arrow/util/logging_internal.h"
 #include "arrow/util/task_group.h"
 
@@ -771,6 +772,20 @@ struct GrouperFastImpl : public Grouper {
       Hashing32::HashMultiColumn(encoder_.batch_all_cols(), &encode_ctx_,
                                  minibatch_hashes_.data());
 
+      // Upstream operators may emit keys partitioned by the same Hashing32 bits
+      // that SwissTable uses to choose a starting block. Mix with a per-instance
+      // seed so those runs do not concentrate insertions in a small part of our
+      // growing table. XOR alone would only move the concentrated range.
+      for (uint32_t i = 0; i < batch_size_next; ++i) {
+        uint32_t hash = minibatch_hashes_[i] ^ hash_seed_;
+        hash ^= hash >> 16;
+        hash *= 0x7feb352dU;
+        hash ^= hash >> 15;
+        hash *= 0x846ca68bU;
+        hash ^= hash >> 16;
+        minibatch_hashes_[i] = hash;
+      }
+
       // Map
       auto match_bitvector =
           util::TempVectorHolder<uint8_t>(&temp_stack_, (batch_size_next + 7) / 8);
@@ -946,6 +961,10 @@ struct GrouperFastImpl : public Grouper {
   ExecContext* ctx_;
   arrow::util::TempVectorStack temp_stack_;
   LightContext encode_ctx_;
+
+  // All operations on this table must use the same placement hash. Keep the
+  // seed for this instance's lifetime, including across Reset().
+  const uint32_t hash_seed_ = static_cast<uint32_t>(::arrow::internal::GetRandomSeed());
 
   std::vector<TypeHolder> key_types_;
   std::vector<KeyColumnMetadata> col_metadata_;
