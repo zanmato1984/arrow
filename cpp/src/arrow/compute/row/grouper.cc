@@ -635,7 +635,9 @@ struct GrouperFastImpl : public Grouper {
       return impl_ptr->rows_.AppendSelectionFrom(impl_ptr->rows_minibatch_, num_keys,
                                                  nullptr);
     };
-    RETURN_NOT_OK(impl->map_.init(impl->encode_ctx_.hardware_flags, ctx->memory_pool()));
+    RETURN_NOT_OK(impl->map_.init(impl->encode_ctx_.hardware_flags, ctx->memory_pool(),
+                                  /*log_blocks=*/0, /*no_hash_array=*/false,
+                                  impl->hash_seed_));
     impl->cols_.resize(num_columns);
     impl->minibatch_hashes_.resize(impl->minibatch_size_max_ +
                                    kPaddingForSIMD / sizeof(uint32_t));
@@ -648,7 +650,8 @@ struct GrouperFastImpl : public Grouper {
     rows_.Clean();
     rows_minibatch_.Clean();
     map_.cleanup();
-    RETURN_NOT_OK(map_.init(encode_ctx_.hardware_flags, ctx_->memory_pool()));
+    RETURN_NOT_OK(map_.init(encode_ctx_.hardware_flags, ctx_->memory_pool(),
+                            /*log_blocks=*/0, /*no_hash_array=*/false, hash_seed_));
     // TODO: It is now assumed that the dictionaries_ are identical to the first batch
     // throughout the grouper's lifespan so no resetting is needed. But if we want to
     // support different dictionaries for different batches, we need to reset the
@@ -771,20 +774,6 @@ struct GrouperFastImpl : public Grouper {
       // Compute hash
       Hashing32::HashMultiColumn(encoder_.batch_all_cols(), &encode_ctx_,
                                  minibatch_hashes_.data());
-
-      // Upstream operators may emit keys partitioned by the same Hashing32 bits
-      // that SwissTable uses to choose a starting block. Mix with a per-instance
-      // seed so those runs do not concentrate insertions in a small part of our
-      // growing table. XOR alone would only move the concentrated range.
-      for (uint32_t i = 0; i < batch_size_next; ++i) {
-        uint32_t hash = minibatch_hashes_[i] ^ hash_seed_;
-        hash ^= hash >> 16;
-        hash *= 0x7feb352dU;
-        hash ^= hash >> 15;
-        hash *= 0x846ca68bU;
-        hash ^= hash >> 16;
-        minibatch_hashes_[i] = hash;
-      }
 
       // Map
       auto match_bitvector =

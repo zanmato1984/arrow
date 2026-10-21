@@ -19,6 +19,7 @@
 
 #include <cassert>
 #include <functional>
+#include <optional>
 
 #include "arrow/compute/util.h"
 #include "arrow/compute/util_internal.h"
@@ -26,6 +27,7 @@
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/type_fwd.h"
+#include "arrow/util/simd.h"
 
 namespace arrow {
 namespace compute {
@@ -52,8 +54,12 @@ class ARROW_COMPUTE_EXPORT SwissTable {
   using AppendImpl =
       std::function<Status(int num_keys, const uint16_t* selection, void* callback_ctx)>;
 
+  // With a seed, public lookup/insertion methods still accept the caller's original
+  // hashes; the table mixes them internally for placement. No seed preserves the
+  // original placement. Seed zero enables mixing too, and is not the default mode.
   Status init(int64_t hardware_flags, MemoryPool* pool, int log_blocks = 0,
-              bool no_hash_array = false);
+              bool no_hash_array = false,
+              std::optional<uint32_t> hash_seed = std::nullopt);
 
   void cleanup();
 
@@ -76,12 +82,15 @@ class ARROW_COMPUTE_EXPORT SwissTable {
 
   int64_t hardware_flags() const { return hardware_flags_; }
 
+  std::optional<uint32_t> hash_seed() const { return hash_seed_; }
+
   MemoryPool* pool() const { return pool_; }
 
   int log_blocks() const { return log_blocks_; }
 
   void num_inserted(uint32_t i) { num_inserted_ = i; }
 
+  // Stored placement hashes, already mixed when a seed is enabled.
   uint32_t* hashes() const {
     return reinterpret_cast<uint32_t*>(hashes_->mutable_data());
   }
@@ -102,6 +111,7 @@ class ARROW_COMPUTE_EXPORT SwissTable {
     return group_id;
   }
 
+  // Low-level merge helper: hash must already be a placement hash.
   inline void insert_into_empty_slot(uint32_t global_slot_id, uint32_t hash,
                                      uint32_t group_id);
 
@@ -143,6 +153,18 @@ class ARROW_COMPUTE_EXPORT SwissTable {
   static constexpr int bits_hash_ = 32;
 
  private:
+  // Keep all input hash readers, including SIMD and scalar tails, consistent.
+  uint32_t placement_hash(uint32_t hash) const {
+    if (!hash_seed_) return hash;
+    hash ^= *hash_seed_;
+    hash ^= hash >> 16;
+    hash *= 0x7feb352dU;
+    hash ^= hash >> 15;
+    hash *= 0x846ca68bU;
+    hash ^= hash >> 16;
+    return hash;
+  }
+
   static const uint8_t* block_data(const uint8_t* blocks, uint32_t block_id,
                                    int num_block_bytes) {
     return blocks + static_cast<int64_t>(block_id) * num_block_bytes;
@@ -220,6 +242,8 @@ class ARROW_COMPUTE_EXPORT SwissTable {
   void early_filter_imp(const int num_keys, const uint32_t* hashes,
                         uint8_t* out_match_bitvector, uint8_t* out_local_slots) const;
 #if defined(ARROW_HAVE_RUNTIME_AVX2) && defined(ARROW_HAVE_RUNTIME_BMI2)
+  inline __m256i placement_hash_avx2(__m256i hash) const;
+
   // The functions below use BMI2 instructions, be careful before calling!
   int early_filter_imp_avx2_x8(const int num_hashes, const uint32_t* hashes,
                                uint8_t* out_match_bitvector,
@@ -284,6 +308,7 @@ class ARROW_COMPUTE_EXPORT SwissTable {
   // Padding bytes added at the end of buffers for ease of SIMD access
   static constexpr int padding_ = 64;
 
+  std::optional<uint32_t> hash_seed_;
   int log_minibatch_;
   // Base 2 log of the number of blocks
   int log_blocks_ = 0;
