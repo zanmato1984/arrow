@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include "arrow/array.h"
+#include "arrow/array/builder_primitive.h"
 #include "arrow/array/util.h"
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/cast.h"
@@ -28,6 +29,7 @@
 #include "arrow/compute/row/grouper.h"
 #include "arrow/compute/row/grouper_internal.h"
 #include "arrow/compute/test_util_internal.h"
+#include "arrow/scalar.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/matchers.h"
 #include "arrow/testing/random.h"
@@ -924,6 +926,83 @@ TEST(Grouper, StringKey) {
       g.ExpectPopulate(R"([["be"], [null]])");
       g.ExpectLookup(R"([["be"], [null], ["da"]])", "[1, 2, null]");
     }
+  }
+}
+
+TEST(Grouper, LARGE_MEMORY_TEST(BatchOver2GB)) {
+  // large_utf8 selects GrouperImpl. Repeated scalar keys keep the input and
+  // unique-key storage small, while the encoded batch exceeds 2GB.
+  constexpr int64_t kBatchLength = 32768;
+  const auto value = std::make_shared<LargeStringScalar>(std::string(65536, 'x'));
+  const ExecBatch batch({value}, kBatchLength);
+  ASSERT_OK_AND_ASSIGN(auto grouper, Grouper::Make({large_utf8()}));
+  ASSERT_OK_AND_ASSIGN(auto expected, MakeArrayFromScalar(UInt32Scalar{0}, kBatchLength));
+
+  ASSERT_OK_AND_ASSIGN(auto groups, grouper->Consume(ExecSpan(batch)));
+  AssertArraysEqual(*expected, *groups.make_array());
+  ASSERT_EQ(grouper->num_groups(), 1);
+
+  ASSERT_OK(grouper->Populate(ExecSpan(batch)));
+  ASSERT_OK_AND_ASSIGN(auto found, grouper->Lookup(ExecSpan(batch)));
+  AssertArraysEqual(*expected, *found.make_array());
+  ASSERT_EQ(grouper->num_groups(), 1);
+
+  ASSERT_OK_AND_ASSIGN(auto uniques, grouper->GetUniques());
+  ASSERT_OK_AND_ASSIGN(auto expected_unique, MakeArrayFromScalar(*value, 1));
+  AssertArraysEqual(*expected_unique, *uniques[0].make_array());
+}
+
+TEST(Grouper, LARGE_MEMORY_TEST(UniqueKeysOver2GB)) {
+  // Each batch fits in 32-bit offsets, but distinct composite keys accumulate
+  // more than 2GB in GrouperImpl's persistent unique-key buffer.
+  constexpr int32_t kBatchLength = 1024;
+  constexpr int32_t kNumBatches = 32;
+  constexpr int32_t kNumGroups = kBatchLength * kNumBatches;
+  constexpr int64_t kValueLength = 65536;
+  const auto value = std::make_shared<LargeBinaryScalar>(std::string(kValueLength, 'x'));
+  ASSERT_OK_AND_ASSIGN(auto grouper, Grouper::Make({int32(), large_binary()}));
+
+  for (int32_t batch_index = 0; batch_index < kNumBatches; ++batch_index) {
+    SCOPED_TRACE(batch_index);
+    Int32Builder builder;
+    const int32_t first_id = batch_index * kBatchLength;
+    for (int32_t i = 0; i < kBatchLength; ++i) {
+      ASSERT_OK(builder.Append(first_id + i));
+    }
+    ASSERT_OK_AND_ASSIGN(auto ids, builder.Finish());
+    const ExecBatch batch({ids, value}, kBatchLength);
+    if (batch_index < kNumBatches / 2) {
+      ASSERT_OK(grouper->Populate(ExecSpan(batch)));
+    } else {
+      ASSERT_OK_AND_ASSIGN(auto groups, grouper->Consume(ExecSpan(batch)));
+      auto group_array = groups.make_array();
+      const auto& group_ids = checked_cast<const UInt32Array&>(*group_array);
+      for (int32_t i = 0; i < kBatchLength; ++i) {
+        ASSERT_EQ(group_ids.Value(i), first_id + i);
+      }
+    }
+  }
+  ASSERT_EQ(grouper->num_groups(), kNumGroups);
+
+  const ExecBatch query({ArrayFromJSON(int32(), "[32767, 0, -1]"), value}, 3);
+  ASSERT_OK_AND_ASSIGN(auto found, grouper->Lookup(ExecSpan(query)));
+  AssertArraysEqual(*ArrayFromJSON(uint32(), "[32767, 0, null]"), *found.make_array());
+  ASSERT_EQ(grouper->num_groups(), kNumGroups);
+
+  ASSERT_OK_AND_ASSIGN(auto uniques, grouper->GetUniques());
+  ASSERT_EQ(uniques.length, kNumGroups);
+  auto unique_ids = uniques[0].make_array();
+  auto unique_values = uniques[1].make_array();
+  ASSERT_OK(unique_ids->ValidateFull());
+  ASSERT_OK(unique_values->ValidateFull());
+  const auto& ids = checked_cast<const Int32Array&>(*unique_ids);
+  const auto& values = checked_cast<const LargeBinaryArray&>(*unique_values);
+  ASSERT_EQ(values.value_data()->size(), kValueLength * kNumGroups);
+  for (int32_t i = 0; i < kNumGroups; ++i) {
+    ASSERT_EQ(ids.Value(i), i);
+  }
+  for (int32_t i : {0, kNumGroups / 2, kNumGroups - 1}) {
+    ASSERT_EQ(values.GetView(i), std::string_view(*value->value));
   }
 }
 
