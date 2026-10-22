@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
 #include "arrow/acero/hash_join.h"
 #include "arrow/acero/swiss_join_internal.h"
 #include "arrow/acero/util.h"
@@ -2773,11 +2774,24 @@ class SwissJoin : public HashJoinImpl {
         temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
     auto selection_buf = arrow::util::TempVectorHolder<uint16_t>(
         temp_stack, arrow::util::MiniBatch::kMiniBatchLength);
-    for (int64_t mini_batch_start = start_row; mini_batch_start < end_row;) {
+    const int64_t scan_unit = arrow::util::MiniBatch::kMiniBatchLength;
+    const int64_t num_scan_units = bit_util::CeilDiv(hash_table_.num_rows(), scan_unit);
+    // Interleave distant scan units so downstream hash-based operators do not receive
+    // long runs from the same hash-prefix range. Keep each unit's reads contiguous.
+    // Start near the golden-ratio fraction of the unit count, then choose a coprime
+    // stride: multiplication modulo num_scan_units must visit every unit exactly once.
+    int64_t stride = std::max<int64_t>(1, num_scan_units * 40503 / 65536);
+    while (std::gcd(stride, num_scan_units) != 1) {
+      ++stride;
+    }
+    for (int64_t logical_start = start_row; logical_start < end_row;
+         logical_start += scan_unit) {
+      const int64_t mini_batch_start =
+          ((logical_start / scan_unit * stride) % num_scan_units) * scan_unit;
       // Compute the size of the next mini-batch
       //
       int64_t mini_batch_size_next =
-          std::min(end_row - mini_batch_start,
+          std::min(hash_table_.num_rows() - mini_batch_start,
                    static_cast<int64_t>(arrow::util::MiniBatch::kMiniBatchLength));
 
       // Get the list of key and payload ids from this mini-batch to output.
@@ -2824,7 +2838,6 @@ class SwissJoin : public HashJoinImpl {
           break;
         }
       }
-      mini_batch_start += mini_batch_size_next;
     }
 
     return Status::OK();
