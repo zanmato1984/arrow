@@ -127,6 +127,40 @@ void TestInversePermutation(const std::vector<std::string>& indices_chunked_str,
 
 }  // namespace
 
+TEST(InversePermutation, InvalidInputType) {
+  // The integer matcher must not accept non-integers of the same width.
+  for (const auto& type : {boolean(), float32(), float64(), utf8()}) {
+    ARROW_SCOPED_TRACE(type->ToString());
+    ASSERT_RAISES(NotImplemented, InversePermutation(ArrayFromJSON(type, "[null]")));
+  }
+}
+
+TEST(InversePermutation, DenseValidityBitmapBoundaries) {
+  for (int64_t length : {7, 8, 9, 63, 64, 65}) {
+    for (int64_t missing : {int64_t{0}, int64_t{1}, int64_t{2}, int64_t{3}, int64_t{4},
+                            int64_t{5}, int64_t{6}, int64_t{7}, length - 1}) {
+      if (missing >= length) continue;
+      ARROW_SCOPED_TRACE("Length: " + std::to_string(length) +
+                         ", missing destination: " + std::to_string(missing));
+      std::string indices = "[";
+      std::string expected = "[";
+      for (int64_t i = 0; i < length; ++i) {
+        if (i != 0) expected += ",";
+        if (i == missing) {
+          expected += "null";
+        } else {
+          if (indices.size() > 1) indices += ",";
+          indices += std::to_string(i);
+          expected += std::to_string(i < missing ? i : i - 1);
+        }
+      }
+      indices += "]";
+      expected += "]";
+      TestInversePermutation({indices}, /*max_index=*/length - 1, expected);
+    }
+  }
+}
+
 TEST(InversePermutation, InvalidOutputType) {
   {
     ARROW_SCOPED_TRACE("Output type float");

@@ -23,8 +23,10 @@
 #include "arrow/compute/kernels/codegen_internal.h"
 #include "arrow/compute/registry.h"
 #include "arrow/compute/registry_internal.h"
+#include "arrow/util/bitmap_generate.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging_internal.h"
+#include "arrow/util/macros.h"
 
 namespace arrow::compute::internal {
 
@@ -63,11 +65,50 @@ Result<TypeHolder> ResolveInversePermutationOutputType(
   return TypeHolder(std::move(output_type));
 }
 
-// Share the execution loops for signed and unsigned integers of the same width.
+// Share the input implementation for signed and unsigned integers of the same width.
 // The logical types still determine bounds checking and the output array type.
 template <typename Type>
 using UnsignedIntegerType =
     typename CTypeTraits<std::make_unsigned_t<typename Type::c_type>>::ArrowType;
+
+// This pass depends only on the output width, not the index type or input shape.
+// Keep it separate from the indexed writes, and generate whole bitmap bytes
+// instead of clearing one bit at a time for every missing destination.
+template <typename OutputCType>
+ARROW_NOINLINE Status InversePermutationValidity(KernelContext* ctx,
+                                                 const OutputCType* data,
+                                                 int64_t input_length,
+                                                 int64_t output_length,
+                                                 std::shared_ptr<Buffer>* validity_buf) {
+  if (output_length == 0) {
+    return Status::OK();
+  }
+  const auto invalid = static_cast<OutputCType>(input_length);
+  int64_t offset = 0;
+  while (offset < output_length && data[offset] != invalid) {
+    ++offset;
+  }
+  if (offset == output_length) {
+    return Status::OK();
+  }
+  ARROW_ASSIGN_OR_RAISE(*validity_buf, ctx->Allocate(output_length));
+  auto* validity = (*validity_buf)->mutable_data();
+  std::memset(validity, 0xff, (*validity_buf)->capacity());
+  const auto* first_invalid = data + offset;
+  ::arrow::internal::GenerateBitsUnrolled(validity, offset, output_length - offset,
+                                          [&]() { return *first_invalid++ != invalid; });
+  return Status::OK();
+}
+
+template <typename IndexCType>
+ARROW_NOINLINE Status InversePermutationIndexError(IndexCType index,
+                                                   bool indices_are_signed) {
+  using SignedIndexCType = std::make_signed_t<IndexCType>;
+  return Status::IndexError("Index out of bounds: ",
+                            indices_are_signed
+                                ? std::to_string(static_cast<SignedIndexCType>(index))
+                                : std::to_string(index));
+}
 
 template <typename ExecType>
 struct InversePermutationImpl {
@@ -95,8 +136,9 @@ struct InversePermutationImpl {
 
   template <typename Type>
   enable_if_t<is_integer_type<Type>::value, Status> Visit(const Type& output_type) {
-    using OutputType = UnsignedIntegerType<Type>;
-    using OutputCType = typename OutputType::c_type;
+    // Keep output execution specialized so the loops remain inlineable. Sharing
+    // output signedness can cause aggressive outlining and regress throughput.
+    using OutputCType = typename Type::c_type;
 
     RETURN_NOT_OK(CheckInput(output_type));
 
@@ -113,11 +155,11 @@ struct InversePermutationImpl {
     if (LikelyManyNulls()) {
       RETURN_NOT_OK(AllocateValidityBufAndFill(false));
       RETURN_NOT_OK(AllocateDataBufAndZero(output_type));
-      return Execute<OutputType, true>();
+      return Execute<Type, true>();
     } else {
       RETURN_NOT_OK(
           AllocateDataBufAndFill(output_type, static_cast<OutputCType>(input_length_)));
-      return Execute<OutputType, false>();
+      return Execute<Type, false>();
     }
   }
 
@@ -225,14 +267,12 @@ struct InversePermutationImpl {
                   output_length_,
                   uint64_t{std::numeric_limits<SignedIndexCType>::max()} + 1)
             : static_cast<uint64_t>(output_length_);
+    const bool indices_are_signed = indices_are_signed_;
     RETURN_NOT_OK(ExecType::VisitIndices(
         indices_,
-        [&](IndexCType index) {
+        [=, &inverse](IndexCType index) {
           if (ARROW_PREDICT_FALSE(static_cast<uint64_t>(index) >= index_limit)) {
-            return Status::IndexError(
-                "Index out of bounds: ",
-                indices_are_signed_ ? std::to_string(static_cast<SignedIndexCType>(index))
-                                    : std::to_string(index));
+            return InversePermutationIndexError(index, indices_are_signed);
           }
           data[index] = static_cast<OutputCType>(inverse);
           // If many nulls, set validity to true for valid values.
@@ -251,15 +291,10 @@ struct InversePermutationImpl {
     // to false if the value is "impossible". The validity buffer is on demand allocated
     // and initialized all-true when the first "impossible" value is seen.
     if constexpr (!likely_many_nulls) {
-      for (int64_t i = 0; i < output_length_; ++i) {
-        if (data[i] == static_cast<OutputCType>(input_length_)) {
-          if (ARROW_PREDICT_FALSE(!validity_buf_)) {
-            RETURN_NOT_OK(AllocateValidityBufAndFill(true));
-            validity = validity_buf_->mutable_data_as<uint8_t>();
-          }
-          bit_util::SetBitTo(validity, i, false);
-        }
-      }
+      using UnsignedOutputCType = std::make_unsigned_t<OutputCType>;
+      RETURN_NOT_OK(
+          InversePermutationValidity(ctx_, data_buf_->data_as<UnsignedOutputCType>(),
+                                     input_length_, output_length_, &validity_buf_));
     }
 
     return Status::OK();
@@ -275,6 +310,16 @@ struct InversePermutation {
   template <typename ValidFunc, typename NullFunc>
   static Status VisitIndices(const ArraySpan& span, ValidFunc&& valid_func,
                              NullFunc&& null_func) {
+    // Avoid per-block validity dispatch when every input index is valid.
+    if (!span.MayHaveNulls()) {
+      if (span.length != 0) {
+        const auto* indices = span.GetValues<typename IndexType::c_type>(1);
+        for (int64_t i = 0; i < span.length; ++i) {
+          RETURN_NOT_OK(valid_func(indices[i]));
+        }
+      }
+      return Status::OK();
+    }
     return VisitArraySpanInline<IndexType>(span, std::forward<ValidFunc>(valid_func),
                                            std::forward<NullFunc>(null_func));
   }
@@ -299,10 +344,11 @@ struct InversePermutationChunked {
   template <typename ValidFunc, typename NullFunc>
   static Status VisitIndices(const std::shared_ptr<ChunkedArray>& chunked_array,
                              ValidFunc&& valid_func, NullFunc&& null_func) {
+    using ArrayExec = InversePermutation<Ignored, Type>;
     for (const auto& chunk : chunked_array->chunks()) {
       ArraySpan span(*chunk->data());
-      RETURN_NOT_OK(VisitArraySpanInline<IndexType>(
-          span, std::forward<ValidFunc>(valid_func), std::forward<NullFunc>(null_func)));
+      RETURN_NOT_OK(ArrayExec::VisitIndices(span, std::forward<ValidFunc>(valid_func),
+                                            std::forward<NullFunc>(null_func)));
     }
     return Status::OK();
   }
@@ -332,23 +378,25 @@ void RegisterVectorInversePermutation(FunctionRegistry* registry) {
                                                    inverse_permutation_doc,
                                                    GetDefaultInversePermutationOptions());
 
-  auto add_kernel = [&function](Type::type type_id) {
-    VectorKernel kernel;
-    kernel.signature =
-        KernelSignature::Make({InputType(match::SameTypeId(type_id))},
-                              OutputType(ResolveInversePermutationOutputType));
-    kernel.init = InversePermutationState::Init;
-    kernel.exec =
-        GenerateInteger<UnsignedInversePermutation, void, ArrayKernelExec>(type_id);
-    kernel.exec_chunked = GenerateInteger<UnsignedInversePermutationChunked, void,
-                                          VectorKernel::ChunkedExec>(type_id);
-    kernel.can_execute_chunkwise = false;
-    kernel.output_chunked = false;
-    DCHECK_OK(function->AddKernel(std::move(kernel)));
+  // Exact dispatch scans every kernel. Match integers once, then select the
+  // shared physical implementation without increasing per-call matching costs.
+  VectorKernel kernel;
+  kernel.signature = KernelSignature::Make(
+      {InputType(match::Integer())}, OutputType(ResolveInversePermutationOutputType));
+  kernel.init = InversePermutationState::Init;
+  kernel.exec = [](KernelContext* ctx, const ExecSpan& span, ExecResult* result) {
+    const auto exec = GenerateInteger<UnsignedInversePermutation, void, ArrayKernelExec>(
+        span[0].type()->id());
+    return exec(ctx, span, result);
   };
-  for (const auto& t : IntTypes()) {
-    add_kernel(t->id());
-  }
+  kernel.exec_chunked = [](KernelContext* ctx, const ExecBatch& batch, Datum* result) {
+    const auto exec = GenerateInteger<UnsignedInversePermutationChunked, void,
+                                      VectorKernel::ChunkedExec>(batch[0].type()->id());
+    return exec(ctx, batch, result);
+  };
+  kernel.can_execute_chunkwise = false;
+  kernel.output_chunked = false;
+  DCHECK_OK(function->AddKernel(std::move(kernel)));
 
   DCHECK_OK(registry->AddFunction(std::move(function)));
 }
