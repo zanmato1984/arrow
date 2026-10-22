@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.#include "arrow/compute/api_vector.h"
 
+#include <algorithm>
+#include <type_traits>
+
 #include "arrow/compute/api_vector.h"
 #include "arrow/compute/function.h"
 #include "arrow/compute/kernels/codegen_internal.h"
@@ -44,8 +47,7 @@ const InversePermutationOptions* GetDefaultInversePermutationOptions() {
 using InversePermutationState = OptionsWrapper<InversePermutationOptions>;
 
 /// Resolve the output type of inverse_permutation. The output type is specified in the
-/// options, and if null, set it to the input type. The output type must be signed
-/// integer.
+/// options, and if null, set it to the input type. The output type must be integer.
 Result<TypeHolder> ResolveInversePermutationOutputType(
     KernelContext* ctx, const std::vector<TypeHolder>& input_types) {
   DCHECK_EQ(input_types.size(), 1);
@@ -53,14 +55,19 @@ Result<TypeHolder> ResolveInversePermutationOutputType(
 
   std::shared_ptr<DataType> output_type =
       InversePermutationState::Get(ctx).output_type.value_or(input_types[0].owned_type);
-  if (!is_signed_integer(output_type->id())) {
-    return Status::TypeError(
-        "Output type of inverse_permutation must be signed integer, got " +
-        output_type->ToString());
+  if (!is_integer(output_type->id())) {
+    return Status::TypeError("Output type of inverse_permutation must be integer, got " +
+                             output_type->ToString());
   }
 
   return TypeHolder(std::move(output_type));
 }
+
+// Share the execution loops for signed and unsigned integers of the same width.
+// The logical types still determine bounds checking and the output array type.
+template <typename Type>
+using UnsignedIntegerType =
+    typename CTypeTraits<std::make_unsigned_t<typename Type::c_type>>::ArrowType;
 
 template <typename ExecType>
 struct InversePermutationImpl {
@@ -78,7 +85,8 @@ struct InversePermutationImpl {
     int64_t output_length = options.max_index < 0 ? input_length : options.max_index + 1;
     std::shared_ptr<DataType> output_type = options.output_type.value_or(input_type);
 
-    ThisType impl(ctx, indices, input_length, output_length);
+    ThisType impl(ctx, indices, input_length, output_length,
+                  is_signed_integer(input_type->id()));
     RETURN_NOT_OK(VisitTypeInline(*output_type, &impl));
 
     return ArrayData::Make(std::move(output_type), output_length,
@@ -87,7 +95,8 @@ struct InversePermutationImpl {
 
   template <typename Type>
   enable_if_t<is_integer_type<Type>::value, Status> Visit(const Type& output_type) {
-    using OutputCType = typename Type::c_type;
+    using OutputType = UnsignedIntegerType<Type>;
+    using OutputCType = typename OutputType::c_type;
 
     RETURN_NOT_OK(CheckInput(output_type));
 
@@ -104,11 +113,11 @@ struct InversePermutationImpl {
     if (LikelyManyNulls()) {
       RETURN_NOT_OK(AllocateValidityBufAndFill(false));
       RETURN_NOT_OK(AllocateDataBufAndZero(output_type));
-      return Execute<Type, true>();
+      return Execute<OutputType, true>();
     } else {
       RETURN_NOT_OK(
           AllocateDataBufAndFill(output_type, static_cast<OutputCType>(input_length_)));
-      return Execute<Type, false>();
+      return Execute<OutputType, false>();
     }
   }
 
@@ -122,22 +131,26 @@ struct InversePermutationImpl {
   const ShapeType& indices_;
   const int64_t input_length_;
   const int64_t output_length_;
+  const bool indices_are_signed_;
 
   std::shared_ptr<Buffer> validity_buf_;
   std::shared_ptr<Buffer> data_buf_;
 
   InversePermutationImpl(KernelContext* ctx, const ShapeType& indices,
-                         int64_t input_length, int64_t output_length)
+                         int64_t input_length, int64_t output_length,
+                         bool indices_are_signed)
       : ctx_(ctx),
         indices_(indices),
         input_length_(input_length),
-        output_length_(output_length) {}
+        output_length_(output_length),
+        indices_are_signed_(indices_are_signed) {}
 
   template <typename Type>
   Status CheckInput(const Type& output_type) {
     using OutputCType = typename Type::c_type;
 
-    if (static_cast<int64_t>(std::numeric_limits<OutputCType>::max()) < input_length_) {
+    if (static_cast<uint64_t>(std::numeric_limits<OutputCType>::max()) <
+        static_cast<uint64_t>(input_length_)) {
       return Status::Invalid(
           "Output type " + output_type.ToString() +
           " of inverse_permutation is insufficient to store indices of length " +
@@ -203,12 +216,23 @@ struct InversePermutationImpl {
     DCHECK_NE(data_buf_, nullptr);
     OutputCType* data = data_buf_->mutable_data_as<OutputCType>();
     int64_t inverse = 0;
+    using SignedIndexCType = std::make_signed_t<IndexCType>;
+    // Negative signed indices have their high bit set when read as unsigned. They
+    // must be rejected even when their unsigned representation fits output_length_.
+    const uint64_t index_limit =
+        indices_are_signed_
+            ? std::min<uint64_t>(
+                  output_length_,
+                  uint64_t{std::numeric_limits<SignedIndexCType>::max()} + 1)
+            : static_cast<uint64_t>(output_length_);
     RETURN_NOT_OK(ExecType::VisitIndices(
         indices_,
         [&](IndexCType index) {
-          if (ARROW_PREDICT_FALSE(index < 0 ||
-                                  static_cast<int64_t>(index) >= output_length_)) {
-            return Status::IndexError("Index out of bounds: ", std::to_string(index));
+          if (ARROW_PREDICT_FALSE(static_cast<uint64_t>(index) >= index_limit)) {
+            return Status::IndexError(
+                "Index out of bounds: ",
+                indices_are_signed_ ? std::to_string(static_cast<SignedIndexCType>(index))
+                                    : std::to_string(index));
           }
           data[index] = static_cast<OutputCType>(inverse);
           // If many nulls, set validity to true for valid values.
@@ -296,6 +320,13 @@ struct InversePermutationChunked {
   }
 };
 
+template <typename Ignored, typename Type>
+using UnsignedInversePermutation = InversePermutation<Ignored, UnsignedIntegerType<Type>>;
+
+template <typename Ignored, typename Type>
+using UnsignedInversePermutationChunked =
+    InversePermutationChunked<Ignored, UnsignedIntegerType<Type>>;
+
 void RegisterVectorInversePermutation(FunctionRegistry* registry) {
   auto function = std::make_shared<VectorFunction>("inverse_permutation", Arity::Unary(),
                                                    inverse_permutation_doc,
@@ -307,15 +338,15 @@ void RegisterVectorInversePermutation(FunctionRegistry* registry) {
         KernelSignature::Make({InputType(match::SameTypeId(type_id))},
                               OutputType(ResolveInversePermutationOutputType));
     kernel.init = InversePermutationState::Init;
-    kernel.exec = GenerateInteger<InversePermutation, void, ArrayKernelExec>(type_id);
-    kernel.exec_chunked =
-        GenerateInteger<InversePermutationChunked, void, VectorKernel::ChunkedExec>(
-            type_id);
+    kernel.exec =
+        GenerateInteger<UnsignedInversePermutation, void, ArrayKernelExec>(type_id);
+    kernel.exec_chunked = GenerateInteger<UnsignedInversePermutationChunked, void,
+                                          VectorKernel::ChunkedExec>(type_id);
     kernel.can_execute_chunkwise = false;
     kernel.output_chunked = false;
     DCHECK_OK(function->AddKernel(std::move(kernel)));
   };
-  for (const auto& t : SignedIntTypes()) {
+  for (const auto& t : IntTypes()) {
     add_kernel(t->id());
   }
 
@@ -363,8 +394,8 @@ class ScatterMetaFunction : public MetaFunction {
           "Input and indices of scatter must have the same length, got " +
           std::to_string(values.length()) + " and " + std::to_string(indices.length()));
     }
-    if (!is_signed_integer(indices.type()->id())) {
-      return Status::TypeError("Indices of scatter must be of signed integer type, got ",
+    if (!is_integer(indices.type()->id())) {
+      return Status::TypeError("Indices of scatter must be of integer type, got ",
                                indices.type()->ToString());
     }
     // Internally invoke Take(values, InversePermutation(indices)) to implement scatter.
@@ -377,7 +408,7 @@ class ScatterMetaFunction : public MetaFunction {
     // [b, g, d, c, e, null, null]  if max_index = 6.
     InversePermutationOptions inverse_permutation_options{
         scatter_options->max_index,
-        // Use the smallest possible uint type to store inverse permutation.
+        // Use the smallest possible signed integer type to store inverse permutation.
         InferSmallestInversePermutationType(values.length())};
     ARROW_ASSIGN_OR_RAISE(auto inverse_permutation,
                           CallFunction("inverse_permutation", {indices},
