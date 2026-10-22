@@ -17,7 +17,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "arrow/compute/key_map_internal.h"
@@ -32,6 +35,150 @@ namespace arrow {
 using internal::CpuInfo;
 
 namespace compute {
+
+namespace {
+
+void CheckPlacementSeed(SwissTable* table, std::optional<uint32_t> seed,
+                        int64_t hardware_flags, bool collide,
+                        std::vector<uint32_t>* stored_hashes) {
+  const uint32_t num_keys = collide ? 257 : 70001;
+  auto original_hash = [collide](uint32_t key) {
+    return collide ? 0U : key * 2654435761U;
+  };
+  table->cleanup();
+  ASSERT_OK(table->init(hardware_flags, default_memory_pool(), /*log_blocks=*/0,
+                        /*no_hash_array=*/false, seed));
+  ASSERT_EQ(table->hash_seed(), seed);
+  util::TempVectorStack stack;
+  ASSERT_OK(stack.Init(default_memory_pool(), 64 * table->minibatch_size()));
+  std::vector<uint32_t> current_keys, group_keys;
+  std::vector<uint32_t> expected_ids(num_keys);
+  SwissTable::EqualImpl equal = [&](int count, const uint16_t* selection,
+                                    const uint32_t* ids, uint32_t* num_mismatch,
+                                    uint16_t* mismatch, void*) {
+    *num_mismatch = 0;
+    for (int i = 0; i < count; ++i) {
+      uint16_t row = selection ? selection[i] : static_cast<uint16_t>(i);
+      if (ids[row] >= group_keys.size() || current_keys[row] != group_keys[ids[row]]) {
+        mismatch[(*num_mismatch)++] = row;
+      }
+    }
+  };
+  SwissTable::AppendImpl append = [&](int count, const uint16_t* selection, void*) {
+    for (int i = 0; i < count; ++i) group_keys.push_back(current_keys[selection[i]]);
+    return Status::OK();
+  };
+  auto process = [&](bool insert) {
+    int count = static_cast<int>(current_keys.size());
+    std::vector<uint32_t> hashes(count), ids(count);
+    std::vector<uint8_t> match((count + 7) / 8 + 64), slots(count + 64);
+    for (int i = 0; i < count; ++i) hashes[i] = original_hash(current_keys[i]);
+    const auto original = hashes;
+    table->early_filter(count, hashes.data(), match.data(), slots.data());
+    table->find(count, hashes.data(), match.data(), slots.data(), ids.data(), &stack,
+                equal, nullptr);
+    if (insert) {
+      std::vector<uint16_t> selection;
+      for (int i = 0; i < count; ++i) {
+        if (!bit_util::GetBit(match.data(), i)) selection.push_back(i);
+      }
+      ASSERT_OK(table->map_new_keys(static_cast<uint32_t>(selection.size()),
+                                    selection.data(), hashes.data(), ids.data(), &stack,
+                                    equal, append, nullptr));
+    }
+    ASSERT_EQ(hashes, original);  // The table never rewrites the caller's hashes.
+    for (int i = 0; i < count; ++i) {
+      auto key = current_keys[i];
+      if (insert || key < num_keys) {
+        if (!insert) ASSERT_TRUE(bit_util::GetBit(match.data(), i));
+        ASSERT_LT(ids[i], group_keys.size());
+        ASSERT_EQ(group_keys[ids[i]], key);
+        if (insert)
+          expected_ids[key] = ids[i];
+        else
+          ASSERT_EQ(ids[i], expected_ids[key]);
+      } else {
+        ASSERT_FALSE(bit_util::GetBit(match.data(), i));
+      }
+    }
+  };
+  // Cover both AVX2 batch sizes, scalar tails and growth through all group-id
+  // widths, including growth while a sparse selection still needs inserting.
+  constexpr std::array<int, 11> sizes = {1, 7, 8, 9, 31, 32, 33, 127, 511, 1023, 1024};
+  uint32_t offset = 0;
+  for (int batch = 0; offset < num_keys; ++batch) {
+    const uint32_t capacity = sizes[batch % sizes.size()];
+    const bool include_existing = offset > 0 && capacity > 1;
+    auto count = std::min<uint32_t>(capacity - include_existing, num_keys - offset);
+    current_keys.resize(count + include_existing);
+    uint32_t next = offset;
+    for (size_t i = 0; i < current_keys.size(); ++i) {
+      current_keys[i] = include_existing && i == count / 2 ? 0 : next++;
+    }
+    process(true);
+    offset += count;
+  }
+  ASSERT_EQ(table->num_inserted(), num_keys);
+  for (offset = 0; offset < num_keys; offset += 1023) {
+    auto count = std::min<uint32_t>(1023, num_keys - offset);
+    current_keys.resize(count);
+    for (uint32_t i = 0; i < count; ++i) current_keys[i] = num_keys - 1 - offset - i;
+    process(false);
+  }
+  current_keys = {0, num_keys, 0, num_keys + 1, num_keys - 1};
+  process(false);  // Repeated existing keys mixed with absent keys.
+  current_keys = {0, 1, 0, 1};
+  process(true);
+  ASSERT_EQ(table->num_inserted(), num_keys);
+
+  stored_hashes->assign(num_keys, 0);
+  int bits = SwissTable::num_groupid_bits_from_log_blocks(table->log_blocks());
+  int bytes = SwissTable::num_block_bytes_from_num_groupid_bits(bits);
+  for (uint32_t b = 0; b < (1U << table->log_blocks()); ++b) {
+    const uint8_t* block = table->block_data(b, bytes);
+    for (int slot = 0; slot < SwissTable::kSlotsPerBlock; ++slot) {
+      if (block[7 - slot] & 0x80) break;
+      auto id = SwissTable::extract_group_id(
+          block, slot, bits, SwissTable::group_id_mask_from_num_groupid_bits(bits));
+      ASSERT_LT(id, group_keys.size());
+      (*stored_hashes)[group_keys[id]] =
+          table->hashes()[SwissTable::global_slot_id(b, slot)];
+      if (!seed) {
+        ASSERT_EQ((*stored_hashes)[group_keys[id]], original_hash(group_keys[id]));
+      }
+    }
+  }
+}
+
+}  // namespace
+
+TEST(SwissTable, PlacementSeedsAndGrowth) {
+  for (int64_t flags : GetSupportedHardwareFlags({CpuInfo::AVX2})) {
+    SwissTable table;
+    std::vector<uint32_t> original, zero, one, again;
+    CheckPlacementSeed(&table, std::nullopt, flags, false, &original);
+    CheckPlacementSeed(&table, 0, flags, false, &zero);
+    CheckPlacementSeed(&table, 1, flags, false, &one);
+    ASSERT_NE(original, zero);
+    ASSERT_NE(zero, one);
+    CheckPlacementSeed(&table, 0xffffffffU, flags, false, &again);
+    ASSERT_NE(one, again);
+    CheckPlacementSeed(&table, 0, flags, false, &again);
+    ASSERT_EQ(zero, again);  // Reinitializing with the same seed is reproducible.
+    CheckPlacementSeed(&table, std::nullopt, flags, false, &again);
+    ASSERT_EQ(original, again);  // Reinitializing without a seed restores the default.
+  }
+}
+
+TEST(SwissTable, PlacementSeedWithFullHashCollisions) {
+  for (int64_t flags : GetSupportedHardwareFlags({CpuInfo::AVX2})) {
+    SwissTable table;
+    std::vector<uint32_t> stored;
+    for (auto seed : {0U, 1U, 0xffffffffU}) {
+      CheckPlacementSeed(&table, seed, flags, true, &stored);
+    }
+  }
+}
 
 // With 32-bit group ids a block takes 40 bytes, so the byte offsets of the blocks from
 // id ceil(2^32 / 40) on do not fit in 32 bits.

@@ -592,6 +592,14 @@ Status SwissTableMerge::PrepareForMerge(SwissTable* target,
                                         MemoryPool* pool) {
   ARROW_DCHECK(!sources.empty());
 
+  // This algorithm assumes partitions of the original hash. Seeded placement
+  // changes their ranges and cannot use this partition-preserving merge.
+  for (const auto* source : sources) {
+    if (source->hash_seed()) {
+      return Status::Invalid("Partition merging does not support seeded SwissTables");
+    }
+  }
+
   // Each source should correspond to a range of hashes.
   // A row belongs to a source with index determined by K highest bits of hash.
   // That means that the number of sources must be a power of 2.

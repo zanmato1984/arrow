@@ -114,7 +114,7 @@ void SwissTable::extract_group_ids_imp(const int num_keys, const uint16_t* selec
 
     for (int i = 0; i < num_keys; ++i) {
       uint32_t id = use_selection ? selection[i] : i;
-      uint32_t hash = hashes[id];
+      uint32_t hash = placement_hash(hashes[id]);
       uint32_t block_id = block_id_from_hash(hash, log_blocks_);
       const T* slots_base = reinterpret_cast<const T*>(
           block_data(block_id, num_block_bytes) + bytes_status_in_block_);
@@ -188,7 +188,7 @@ void SwissTable::init_slot_ids(const int num_keys, const uint16_t* selection,
   } else {
     for (int i = 0; i < num_keys; ++i) {
       uint16_t id = selection[i];
-      uint32_t hash = hashes[id];
+      uint32_t hash = placement_hash(hashes[id]);
       uint32_t iblock = block_id_from_hash(hash, log_blocks_);
       uint32_t match = ::arrow::bit_util::GetBit(match_bitvector, id) ? 1 : 0;
       uint32_t slot_id = global_slot_id(iblock, local_slots[id] + match);
@@ -213,7 +213,7 @@ void SwissTable::init_slot_ids_for_new_keys(uint32_t num_ids, const uint16_t* id
   } else {
     for (uint32_t i = 0; i < num_ids; ++i) {
       int id = ids[i];
-      uint32_t hash = hashes[id];
+      uint32_t hash = placement_hash(hashes[id]);
       uint32_t iblock = block_id_from_hash(hash, log_blocks_);
       uint64_t block;
       for (;;) {
@@ -247,7 +247,7 @@ void SwissTable::early_filter_imp(const int num_keys, const uint32_t* hashes,
   for (int i = 0; i < num_keys; ++i) {
     // Extract from hash: block index and stamp
     //
-    uint32_t hash = hashes[i];
+    uint32_t hash = placement_hash(hashes[i]);
     uint32_t iblock = hash >> bits_shift_for_block_and_stamp_;
     uint32_t stamp = iblock & stamp_mask;
     iblock >>= bits_shift_for_block_;
@@ -486,8 +486,8 @@ void SwissTable::find(const int num_keys, const uint32_t* hashes,
     for (int i = 0; i < num_ids_last_iteration; ++i) {
       int id = ids[i];
       uint32_t next_slot_id;
-      bool match_found = find_next_stamp_match(hashes[id], slot_ids[id], &next_slot_id,
-                                               &(out_group_ids[id]));
+      bool match_found = find_next_stamp_match(placement_hash(hashes[id]), slot_ids[id],
+                                               &next_slot_id, &(out_group_ids[id]));
       slot_ids[id] = next_slot_id;
       // If next match was not found then clear match bit in a bit vector
       if (!match_found) {
@@ -539,15 +539,15 @@ Status SwissTable::map_new_keys_helper(
   for (num_processed = 0; num_processed < *inout_num_selected; ++num_processed) {
     // row id in original batch
     int id = inout_selection[num_processed];
-    bool match_found =
-        find_next_stamp_match(hashes[id], inout_next_slot_ids[id],
-                              &inout_next_slot_ids[id], &out_group_ids[id]);
+    uint32_t hash = placement_hash(hashes[id]);
+    bool match_found = find_next_stamp_match(
+        hash, inout_next_slot_ids[id], &inout_next_slot_ids[id], &out_group_ids[id]);
     if (!match_found) {
       // If we reach the empty slot we insert key for new group
       //
       out_group_ids[id] = num_inserted_ + num_inserted_new;
-      insert_into_empty_slot(inout_next_slot_ids[id], hashes[id], out_group_ids[id]);
-      this->hashes()[inout_next_slot_ids[id]] = hashes[id];
+      insert_into_empty_slot(inout_next_slot_ids[id], hash, out_group_ids[id]);
+      this->hashes()[inout_next_slot_ids[id]] = hash;
       ::arrow::bit_util::ClearBit(match_bitvector, num_processed);
       ++num_inserted_new;
 
@@ -639,7 +639,7 @@ Status SwissTable::map_new_keys(uint32_t num_ids, uint16_t* ids, const uint32_t*
       for (uint32_t i = 0; i < num_ids; ++i) {
         // First slot in the new starting block
         const int16_t id = ids[i];
-        uint32_t block_id = block_id_from_hash(hashes[id], log_blocks_);
+        uint32_t block_id = block_id_from_hash(placement_hash(hashes[id]), log_blocks_);
         slot_ids[id] = global_slot_id(block_id, /*local_slot_id=*/0);
       }
     }
@@ -771,7 +771,8 @@ Status SwissTable::grow_double() {
 }
 
 Status SwissTable::init(int64_t hardware_flags, MemoryPool* pool, int log_blocks,
-                        bool no_hash_array) {
+                        bool no_hash_array, std::optional<uint32_t> hash_seed) {
+  hash_seed_ = hash_seed;
   hardware_flags_ = hardware_flags;
   pool_ = pool;
   log_minibatch_ = util::MiniBatch::kLogMiniBatchLength;
@@ -808,6 +809,7 @@ Status SwissTable::init(int64_t hardware_flags, MemoryPool* pool, int log_blocks
 }
 
 void SwissTable::cleanup() {
+  hash_seed_.reset();
   if (blocks_) {
     blocks_ = nullptr;
   }

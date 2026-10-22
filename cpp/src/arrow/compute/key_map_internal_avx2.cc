@@ -25,6 +25,16 @@ namespace compute {
 // This is more or less translation of equivalent scalar code, adjusted for a
 // different instruction set (e.g. missing leading zero count instruction).
 //
+inline __m256i SwissTable::placement_hash_avx2(__m256i hash) const {
+  if (!hash_seed_) return hash;
+  hash = _mm256_xor_si256(hash, _mm256_set1_epi32(*hash_seed_));
+  hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+  hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0x7feb352dU));
+  hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 15));
+  hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0x846ca68bU));
+  return _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+}
+
 // Returns the number of hashes actually processed, which may be less than
 // requested due to alignment required by SIMD.
 //
@@ -45,7 +55,7 @@ int SwissTable::early_filter_imp_avx2_x8(const int num_hashes, const uint32_t* h
 
     // Calculate block index and hash stamp for a byte in a block
     //
-    __m256i vhash = _mm256_loadu_si256(vhash_ptr + i);
+    __m256i vhash = placement_hash_avx2(_mm256_loadu_si256(vhash_ptr + i));
     __m256i vblock_id = _mm256_srli_epi32(vhash, bits_shift_for_block_and_stamp_);
     __m256i vstamp = _mm256_and_si256(vblock_id, vstamp_mask);
     vblock_id = _mm256_srli_epi32(vblock_id, bits_shift_for_block_);
@@ -287,14 +297,14 @@ int SwissTable::early_filter_imp_avx2_x32(const int num_hashes, const uint32_t* 
   const int block_id_mask = (1 << log_blocks_) - 1;
 
   for (int i = 0; i < num_hashes / unroll; ++i) {
-    __m256i vhash0 =
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 0);
-    __m256i vhash1 =
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 1);
-    __m256i vhash2 =
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 2);
-    __m256i vhash3 =
-        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 3);
+    __m256i vhash0 = placement_hash_avx2(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 0));
+    __m256i vhash1 = placement_hash_avx2(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 1));
+    __m256i vhash2 = placement_hash_avx2(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 2));
+    __m256i vhash3 = placement_hash_avx2(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + 4 * i + 3));
 
     // We will get input in byte lanes in the order: [0, 8, 16, 24, 1, 9, 17, 25, 2, 10,
     // 18, 26, ...]
@@ -392,7 +402,8 @@ int SwissTable::extract_group_ids_avx2(const int num_keys, const uint32_t* hashe
         reinterpret_cast<const int*>(blocks_->data() + bytes_status_in_block_);
 
     for (int i = 0; i < num_keys / unroll; ++i) {
-      __m256i hash = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + i);
+      __m256i hash = placement_hash_avx2(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(hashes) + i));
       __m256i block_id =
           _mm256_srlv_epi32(hash, _mm256_set1_epi32(bits_hash_ - log_blocks_));
 
