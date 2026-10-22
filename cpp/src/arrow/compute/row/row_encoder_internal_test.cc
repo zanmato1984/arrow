@@ -22,6 +22,7 @@
 
 #include "arrow/array.h"
 #include "arrow/array/validate.h"
+#include "arrow/buffer.h"
 #include "arrow/scalar.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/type.h"
@@ -35,7 +36,7 @@ TEST(TestKeyEncoder, BooleanScalar) {
     BooleanKeyEncoder key_encoder;
     SCOPED_TRACE("scalar " + scalar.ToString());
     constexpr int64_t kBatchLength = 10;
-    std::array<int32_t, kBatchLength> lengths{};
+    std::array<int64_t, kBatchLength> lengths{};
     key_encoder.AddLength(ExecValue{&scalar}, kBatchLength, lengths.data());
     // Check that the lengths are all 2.
     constexpr int32_t kPayloadWidth =
@@ -72,10 +73,10 @@ TEST(TestKeyEncoder, BooleanScalar) {
 Result<std::shared_ptr<ArrayData>> RoundTripThroughKeyEncoder(KeyEncoder* encoder,
                                                               const ExecValue& value,
                                                               int32_t length) {
-  std::vector<int32_t> lengths(length, 0);
+  std::vector<int64_t> lengths(length, 0);
   encoder->AddLength(value, length, lengths.data());
 
-  std::vector<int32_t> offsets(length + 1, 0);
+  std::vector<int64_t> offsets(length + 1, 0);
   for (int32_t i = 0; i < length; ++i) {
     offsets[i + 1] = offsets[i] + lengths[i];
   }
@@ -133,6 +134,49 @@ TEST(TestKeyEncoder, BinaryViewScalar) {
       AssertArraysEqual(*expected, *MakeArray(decoded), /*verbose=*/true);
     }
   }
+}
+
+TEST(TestKeyEncoder, LARGE_MEMORY_TEST(ValueLengthOver2GB)) {
+  constexpr int64_t kLength = (int64_t{1} << 31) + 13;
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> bytes, AllocateBuffer(kLength));
+  LargeBinaryScalar scalar(bytes);
+  VarLengthKeyEncoder<LargeBinaryType> encoder(large_binary());
+  int64_t length = 0;
+  encoder.AddLength(ExecValue(&scalar), 1, &length);
+  ASSERT_EQ(length, kLength + 9);
+
+  // Length calculation must not narrow either scalar or array values, nor the
+  // combined length of multiple columns in a single encoded row.
+  auto offsets = Buffer::FromVector<int64_t>({0, kLength});
+  auto array = ArrayData::Make(large_binary(), 1, {nullptr, offsets, bytes}, 0);
+  encoder.AddLength(ExecValue(*array), 1, &length);
+  ASSERT_EQ(length, 2 * (kLength + 9));
+}
+
+TEST(TestRowEncoder, LARGE_MEMORY_TEST(AppendOver2GB)) {
+  ExecContext ctx;
+  RowEncoder encoder;
+  encoder.Init({large_utf8()}, &ctx);
+  const auto scalar = std::make_shared<LargeStringScalar>(std::string(65536, 'x'));
+  const ExecBatch batch({scalar}, 16385);
+  ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(batch)));
+  ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(batch)));
+  ASSERT_EQ(encoder.num_rows(), 32770);
+
+  // Read rows on both sides of the signed 32-bit offset boundary, including
+  // the special all-null row, without decoding the entire large buffer.
+  const int32_t row_ids[] = {0, 16384, 32768, 32769, RowEncoder::kRowIdForNulls()};
+  ASSERT_OK_AND_ASSIGN(auto decoded, encoder.Decode(5, row_ids));
+  ASSERT_OK_AND_ASSIGN(auto expected, MakeArrayFromScalar(*scalar, 4));
+  ASSERT_OK_AND_ASSIGN(auto nulls, MakeArrayOfNull(large_utf8(), 1));
+  AssertArraysEqual(*expected, *decoded[0].make_array()->Slice(0, 4));
+  AssertArraysEqual(*nulls, *decoded[0].make_array()->Slice(4));
+  ASSERT_EQ(encoder.encoded_row(0), encoder.encoded_row(32769));
+
+  encoder.Clear();
+  ASSERT_EQ(encoder.num_rows(), 0);
+  ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(ExecBatch({scalar}, 1))));
+  ASSERT_EQ(encoder.num_rows(), 1);
 }
 
 }  // namespace arrow::compute::internal
