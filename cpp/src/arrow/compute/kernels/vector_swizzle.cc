@@ -150,7 +150,7 @@ struct InversePermutationImpl {
     // note that the range of inverse_permutation is [0, input_length)) for the subsequent
     // processing to detect validity.
     if (LikelyManyNulls()) {
-      RETURN_NOT_OK(AllocateValidityBuf());
+      RETURN_NOT_OK(AllocateValidityBufAndFill(false));
       RETURN_NOT_OK(AllocateDataBufAndZero(output_type));
       return Execute<Type, true>();
     } else {
@@ -201,11 +201,12 @@ struct InversePermutationImpl {
 
   bool LikelyManyNulls() { return output_length_ > 2 * input_length_; }
 
-  Status AllocateValidityBuf() {
+  Status AllocateValidityBufAndFill(bool valid) {
     DCHECK_EQ(validity_buf_, nullptr);
 
-    ARROW_ASSIGN_OR_RAISE(validity_buf_,
-                          AllocateEmptyBitmap(output_length_, ctx_->memory_pool()));
+    ARROW_ASSIGN_OR_RAISE(validity_buf_, ctx_->Allocate(output_length_));
+    auto validity = validity_buf_->mutable_data_as<uint8_t>();
+    std::memset(validity, valid ? 0xff : 0, validity_buf_->capacity());
 
     return Status::OK();
   }
