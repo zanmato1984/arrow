@@ -137,45 +137,63 @@ TEST(TestKeyEncoder, BinaryViewScalar) {
 }
 
 TEST(TestKeyEncoder, LARGE_MEMORY_TEST(ValueLengthOver2GB)) {
-  constexpr int64_t kLength = (int64_t{1} << 31) + 13;
-  ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> bytes, AllocateBuffer(kLength));
+  constexpr int64_t kValueLength = (int64_t{1} << 31) + 13;
+  constexpr int64_t kEncodedValueOverhead = sizeof(uint8_t) + sizeof(int64_t);
+  // A single value exceeds the signed 32-bit length limit. Only its length is
+  // inspected, so the buffer need not be initialized or copied by this test.
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> bytes, AllocateBuffer(kValueLength));
   LargeBinaryScalar scalar(bytes);
   VarLengthKeyEncoder<LargeBinaryType> encoder(large_binary());
   int64_t length = 0;
-  encoder.AddLength(ExecValue(&scalar), 1, &length);
-  ASSERT_EQ(length, kLength + 9);
+  encoder.AddLength(ExecValue(&scalar), /*batch_length=*/1, &length);
+  // The encoded value includes a null byte and an int64_t length prefix.
+  ASSERT_EQ(length, kValueLength + kEncodedValueOverhead);
 
   // Length calculation must not narrow either scalar or array values, nor the
   // combined length of multiple columns in a single encoded row.
-  auto offsets = Buffer::FromVector<int64_t>({0, kLength});
-  auto array = ArrayData::Make(large_binary(), 1, {nullptr, offsets, bytes}, 0);
-  encoder.AddLength(ExecValue(*array), 1, &length);
-  ASSERT_EQ(length, 2 * (kLength + 9));
+  // Reuse the same buffer through the array path and add to the existing length
+  // rather than resetting it, as when encoding a second column in the same row.
+  auto offsets = Buffer::FromVector<int64_t>({0, kValueLength});
+  auto array = ArrayData::Make(large_binary(), /*length=*/1, {nullptr, offsets, bytes},
+                               /*null_count=*/0);
+  encoder.AddLength(ExecValue(*array), /*batch_length=*/1, &length);
+  ASSERT_EQ(length, 2 * (kValueLength + kEncodedValueOverhead));
 }
 
 TEST(TestRowEncoder, LARGE_MEMORY_TEST(AppendOver2GB)) {
+  constexpr int64_t kValueLength = 64 * 1024;
+  constexpr int32_t kBatchLength = 16385;
+  constexpr int32_t kNumBatches = 2;
+  constexpr int32_t kNumRows = kBatchLength * kNumBatches;
+  constexpr int32_t kNumDecodedValues = 4;
   ExecContext ctx;
   RowEncoder encoder;
   encoder.Init({large_utf8()}, &ctx);
-  const auto scalar = std::make_shared<LargeStringScalar>(std::string(65536, 'x'));
-  const ExecBatch batch({scalar}, 16385);
+  // Each batch encodes 16,385 * (64 KiB + 9) bytes, below the signed 32-bit
+  // offset limit. The second append takes the persistent row buffer over 2 GiB.
+  // Scalar input avoids allocating another expanded copy of those strings.
+  const auto scalar = std::make_shared<LargeStringScalar>(std::string(kValueLength, 'x'));
+  const ExecBatch batch({scalar}, kBatchLength);
   ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(batch)));
   ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(batch)));
-  ASSERT_EQ(encoder.num_rows(), 32770);
+  ASSERT_EQ(encoder.num_rows(), kNumRows);
 
   // Read rows on both sides of the signed 32-bit offset boundary, including
   // the special all-null row, without decoding the entire large buffer.
-  const int32_t row_ids[] = {0, 16384, 32768, 32769, RowEncoder::kRowIdForNulls()};
-  ASSERT_OK_AND_ASSIGN(auto decoded, encoder.Decode(5, row_ids));
-  ASSERT_OK_AND_ASSIGN(auto expected, MakeArrayFromScalar(*scalar, 4));
-  ASSERT_OK_AND_ASSIGN(auto nulls, MakeArrayOfNull(large_utf8(), 1));
-  AssertArraysEqual(*expected, *decoded[0].make_array()->Slice(0, 4));
-  AssertArraysEqual(*nulls, *decoded[0].make_array()->Slice(4));
-  ASSERT_EQ(encoder.encoded_row(0), encoder.encoded_row(32769));
+  const int32_t row_ids[] = {0, kBatchLength - 1, kNumRows - 2, kNumRows - 1,
+                             RowEncoder::kRowIdForNulls()};
+  ASSERT_OK_AND_ASSIGN(auto decoded, encoder.Decode(kNumDecodedValues + 1, row_ids));
+  ASSERT_OK_AND_ASSIGN(auto expected, MakeArrayFromScalar(*scalar, kNumDecodedValues));
+  ASSERT_OK_AND_ASSIGN(auto nulls, MakeArrayOfNull(large_utf8(), /*length=*/1));
+  AssertArraysEqual(*expected,
+                    *decoded[0].make_array()->Slice(/*offset=*/0, kNumDecodedValues));
+  AssertArraysEqual(*nulls, *decoded[0].make_array()->Slice(kNumDecodedValues));
+  ASSERT_EQ(encoder.encoded_row(0), encoder.encoded_row(kNumRows - 1));
 
+  // Clear must also reset the large offsets so that the encoder can be reused.
   encoder.Clear();
   ASSERT_EQ(encoder.num_rows(), 0);
-  ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(ExecBatch({scalar}, 1))));
+  ASSERT_OK(encoder.EncodeAndAppend(ExecSpan(ExecBatch({scalar}, /*length=*/1))));
   ASSERT_EQ(encoder.num_rows(), 1);
 }
 

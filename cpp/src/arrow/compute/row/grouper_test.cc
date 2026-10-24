@@ -930,35 +930,43 @@ TEST(Grouper, StringKey) {
 }
 
 TEST(Grouper, LARGE_MEMORY_TEST(BatchOver2GB)) {
-  // large_utf8 selects GrouperImpl. Repeated scalar keys keep the input and
-  // unique-key storage small, while the encoded batch exceeds 2GB.
+  constexpr int64_t kValueLength = 64 * 1024;
   constexpr int64_t kBatchLength = 32768;
-  const auto value = std::make_shared<LargeStringScalar>(std::string(65536, 'x'));
+  // large_utf8 selects GrouperImpl. Repeated scalar keys keep the input and
+  // unique-key storage small. 32,768 * 64 KiB is exactly 2 GiB of value bytes;
+  // adding the null byte and int64_t length per row takes the encoded batch
+  // beyond 2 GiB, even though there is only one distinct key.
+  const auto value = std::make_shared<LargeStringScalar>(std::string(kValueLength, 'x'));
   const ExecBatch batch({value}, kBatchLength);
   ASSERT_OK_AND_ASSIGN(auto grouper, Grouper::Make({large_utf8()}));
   ASSERT_OK_AND_ASSIGN(auto expected, MakeArrayFromScalar(UInt32Scalar{0}, kBatchLength));
 
+  // All rows must receive group 0, despite the large temporary batch encoding.
   ASSERT_OK_AND_ASSIGN(auto groups, grouper->Consume(ExecSpan(batch)));
   AssertArraysEqual(*expected, *groups.make_array());
   ASSERT_EQ(grouper->num_groups(), 1);
 
+  // Re-inserting the same key must not create more groups; Lookup must find it
+  // for every row, and GetUniques must decode just the one original value.
   ASSERT_OK(grouper->Populate(ExecSpan(batch)));
   ASSERT_OK_AND_ASSIGN(auto found, grouper->Lookup(ExecSpan(batch)));
   AssertArraysEqual(*expected, *found.make_array());
   ASSERT_EQ(grouper->num_groups(), 1);
 
   ASSERT_OK_AND_ASSIGN(auto uniques, grouper->GetUniques());
-  ASSERT_OK_AND_ASSIGN(auto expected_unique, MakeArrayFromScalar(*value, 1));
+  ASSERT_OK_AND_ASSIGN(auto expected_unique, MakeArrayFromScalar(*value, /*length=*/1));
   AssertArraysEqual(*expected_unique, *uniques[0].make_array());
 }
 
 TEST(Grouper, LARGE_MEMORY_TEST(UniqueKeysOver2GB)) {
-  // Each batch fits in 32-bit offsets, but distinct composite keys accumulate
-  // more than 2GB in GrouperImpl's persistent unique-key buffer.
   constexpr int32_t kBatchLength = 1024;
   constexpr int32_t kNumBatches = 32;
   constexpr int32_t kNumGroups = kBatchLength * kNumBatches;
-  constexpr int64_t kValueLength = 65536;
+  constexpr int64_t kValueLength = 64 * 1024;
+  // Each batch encodes about 64 MiB, but 32 * 1024 * 64 KiB is already 2 GiB
+  // of value bytes. The int32 key, null bytes and length prefixes take the
+  // persistent unique-key buffer beyond 2 GiB. Distinct integer ids prevent
+  // deduplication even though every row reuses the same large binary scalar.
   const auto value = std::make_shared<LargeBinaryScalar>(std::string(kValueLength, 'x'));
   ASSERT_OK_AND_ASSIGN(auto grouper, Grouper::Make({int32(), large_binary()}));
 
@@ -971,6 +979,8 @@ TEST(Grouper, LARGE_MEMORY_TEST(UniqueKeysOver2GB)) {
     }
     ASSERT_OK_AND_ASSIGN(auto ids, builder.Finish());
     const ExecBatch batch({ids, value}, kBatchLength);
+    // Exercise both insertion APIs on the same persistent buffer: Populate
+    // first, then Consume, whose returned group ids must follow insertion order.
     if (batch_index < kNumBatches / 2) {
       ASSERT_OK(grouper->Populate(ExecSpan(batch)));
     } else {
@@ -984,11 +994,15 @@ TEST(Grouper, LARGE_MEMORY_TEST(UniqueKeysOver2GB)) {
   }
   ASSERT_EQ(grouper->num_groups(), kNumGroups);
 
-  const ExecBatch query({ArrayFromJSON(int32(), "[32767, 0, -1]"), value}, 3);
+  // Look up the last key (32767), the first key and a missing key. Lookup must
+  // return null for the miss without inserting a new group.
+  const ExecBatch query({ArrayFromJSON(int32(), "[32767, 0, -1]"), value}, /*length=*/3);
   ASSERT_OK_AND_ASSIGN(auto found, grouper->Lookup(ExecSpan(query)));
   AssertArraysEqual(*ArrayFromJSON(uint32(), "[32767, 0, null]"), *found.make_array());
   ASSERT_EQ(grouper->num_groups(), kNumGroups);
 
+  // Decode all unique keys to validate the full offsets and value buffer, then
+  // check insertion order and sample large values at the beginning, middle and end.
   ASSERT_OK_AND_ASSIGN(auto uniques, grouper->GetUniques());
   ASSERT_EQ(uniques.length, kNumGroups);
   auto unique_ids = uniques[0].make_array();
