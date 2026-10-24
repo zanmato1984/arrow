@@ -204,7 +204,8 @@ struct InversePermutationImpl {
   Status AllocateValidityBuf() {
     DCHECK_EQ(validity_buf_, nullptr);
 
-    ARROW_ASSIGN_OR_RAISE(validity_buf_, ctx_->AllocateBitmap(output_length_));
+    ARROW_ASSIGN_OR_RAISE(validity_buf_,
+                          AllocateEmptyBitmap(output_length_, ctx_->memory_pool()));
 
     return Status::OK();
   }
