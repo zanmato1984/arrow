@@ -84,17 +84,14 @@ ARROW_NOINLINE Status InversePermutationValidity(KernelContext* ctx,
     return Status::OK();
   }
   const auto invalid = static_cast<OutputCType>(input_length);
-  int64_t offset = 0;
-  while (offset < output_length && data[offset] != invalid) {
-    ++offset;
-  }
+  const auto* first_invalid = std::find(data, data + output_length, invalid);
+  const int64_t offset = first_invalid - data;
   if (offset == output_length) {
     return Status::OK();
   }
   ARROW_ASSIGN_OR_RAISE(*validity_buf, ctx->AllocateBitmap(output_length));
   auto* validity = (*validity_buf)->mutable_data();
   bit_util::SetBitmap(validity, 0, offset);
-  const auto* first_invalid = data + offset;
   ::arrow::internal::GenerateBitsUnrolled(validity, offset, output_length - offset,
                                           [&]() { return *first_invalid++ != invalid; });
   return Status::OK();
