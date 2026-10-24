@@ -84,17 +84,14 @@ ARROW_NOINLINE Status InversePermutationValidity(KernelContext* ctx,
     return Status::OK();
   }
   const auto invalid = static_cast<OutputCType>(input_length);
-  int64_t offset = 0;
-  while (offset < output_length && data[offset] != invalid) {
-    ++offset;
-  }
-  if (offset == output_length) {
+  const auto* first_invalid = std::find(data, data + output_length, invalid);
+  if (first_invalid == data + output_length) {
     return Status::OK();
   }
-  ARROW_ASSIGN_OR_RAISE(*validity_buf, ctx->Allocate(output_length));
+  const int64_t offset = first_invalid - data;
+  ARROW_ASSIGN_OR_RAISE(*validity_buf, ctx->AllocateBitmap(output_length));
   auto* validity = (*validity_buf)->mutable_data();
-  std::memset(validity, 0xff, (*validity_buf)->capacity());
-  const auto* first_invalid = data + offset;
+  bit_util::SetBitmap(validity, 0, offset);
   ::arrow::internal::GenerateBitsUnrolled(validity, offset, output_length - offset,
                                           [&]() { return *first_invalid++ != invalid; });
   return Status::OK();
@@ -148,12 +145,12 @@ struct InversePermutationImpl {
     // contents - even if it is shadowed by the validity bit). The subsequent processing
     // will fill the valid values only.
     // - Otherwise (i.e. the output is "dense"), the validity buffer is lazily allocated
-    // and initialized all-true in the subsequent processing only when needed. The data
+    // and populated from the data in the subsequent processing only when needed. The data
     // buffer is preallocated and filled with "impossible" values (that is, input_length -
     // note that the range of inverse_permutation is [0, input_length)) for the subsequent
     // processing to detect validity.
     if (LikelyManyNulls()) {
-      RETURN_NOT_OK(AllocateValidityBufAndFill(false));
+      RETURN_NOT_OK(AllocateValidityBuf());
       RETURN_NOT_OK(AllocateDataBufAndZero(output_type));
       return Execute<Type, true>();
     } else {
@@ -204,12 +201,10 @@ struct InversePermutationImpl {
 
   bool LikelyManyNulls() { return output_length_ > 2 * input_length_; }
 
-  Status AllocateValidityBufAndFill(bool valid) {
+  Status AllocateValidityBuf() {
     DCHECK_EQ(validity_buf_, nullptr);
 
-    ARROW_ASSIGN_OR_RAISE(validity_buf_, ctx_->Allocate(output_length_));
-    auto validity = validity_buf_->mutable_data_as<uint8_t>();
-    std::memset(validity, valid ? 0xff : 0, validity_buf_->capacity());
+    ARROW_ASSIGN_OR_RAISE(validity_buf_, ctx_->AllocateBitmap(output_length_));
 
     return Status::OK();
   }
@@ -267,10 +262,9 @@ struct InversePermutationImpl {
                   output_length_,
                   uint64_t{std::numeric_limits<SignedIndexCType>::max()} + 1)
             : static_cast<uint64_t>(output_length_);
-    const bool indices_are_signed = indices_are_signed_;
     RETURN_NOT_OK(ExecType::VisitIndices(
         indices_,
-        [=, &inverse](IndexCType index) {
+        [=, &inverse, indices_are_signed = indices_are_signed_](IndexCType index) {
           if (ARROW_PREDICT_FALSE(static_cast<uint64_t>(index) >= index_limit)) {
             return InversePermutationIndexError(index, indices_are_signed);
           }
@@ -287,9 +281,9 @@ struct InversePermutationImpl {
           return Status::OK();
         }));
 
-    // If not many nulls, run another pass iterating over the data to set the validity
-    // to false if the value is "impossible". The validity buffer is on demand allocated
-    // and initialized all-true when the first "impossible" value is seen.
+    // If not many nulls, run another pass iterating over the data to determine validity
+    // from the "impossible" values. The validity buffer is allocated on demand
+    // only when an "impossible" value is seen.
     if constexpr (!likely_many_nulls) {
       using UnsignedOutputCType = std::make_unsigned_t<OutputCType>;
       RETURN_NOT_OK(
