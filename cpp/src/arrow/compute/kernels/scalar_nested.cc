@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 #include "arrow/array/array_base.h"
 #include "arrow/array/builder_nested.h"
 #include "arrow/compute/api_scalar.h"
@@ -615,6 +616,39 @@ Result<std::unique_ptr<KernelState>> InitListContains(KernelContext* ctx,
   return std::make_unique<ListContainsState>(std::move(types));
 }
 
+struct ListContainsQueries {
+  struct ComparisonTypes {
+    TypeHolder values;
+    TypeHolder queries;
+  };
+
+  Datum values;
+  bool is_scalar;
+  // Only genuinely all-null queries need no comparison types. Search paths never
+  // receive a failed type-resolution result or decide whether to suppress one.
+  std::optional<ComparisonTypes> comparison;
+};
+
+Result<ListContainsQueries> PrepareListContainsQueries(
+    KernelContext* ctx, const Result<std::vector<TypeHolder>>& types,
+    const ExecValue& query) {
+  ListContainsQueries prepared;
+  prepared.is_scalar = query.is_scalar();
+  if (prepared.is_scalar) {
+    ARROW_ASSIGN_OR_RAISE(prepared.values,
+                          MakeArrayFromScalar(*query.scalar, 1, ctx->memory_pool()));
+  } else {
+    prepared.values = query.array.ToArrayData();
+  }
+  // Classify the original queries before any null-parent masking. Dictionary
+  // entries and other encoded values may be logically null without null slots.
+  if (prepared.values.array()->ComputeLogicalNullCount() != prepared.values.length()) {
+    RETURN_NOT_OK(types.status());
+    prepared.comparison = ListContainsQueries::ComparisonTypes{(*types)[0], (*types)[1]};
+  }
+  return prepared;
+}
+
 Status CastTo(KernelContext* ctx, const TypeHolder& type, Datum* datum) {
   if (!datum->type()->Equals(*type)) {
     ARROW_ASSIGN_OR_RAISE(*datum,
@@ -841,18 +875,8 @@ void SearchLists(ListRanges list_range, int64_t num_lists, int64_t values_start,
 }
 
 // Look up each query in the values of a single list
-Status ScalarListContains(KernelContext* ctx,
-                          const Result<std::vector<TypeHolder>>& types,
-                          const BaseListScalar& list, const ArraySpan& query_span,
-                          ArraySpan* out_arr) {
-  Datum queries = query_span.ToArrayData();
-  // Nulls in a dictionary of queries count too
-  const bool null_queries =
-      queries.array()->ComputeLogicalNullCount() == queries.length();
-  if (!null_queries) {
-    // Types that don't compare raise even for a null list, like for list arrays
-    RETURN_NOT_OK(types.status());
-  }
+Status ScalarListContains(KernelContext* ctx, const BaseListScalar& list,
+                          const ListContainsQueries& prepared, ArraySpan* out_arr) {
   bit_util::SetBitsTo(out_arr->buffers[0].data, out_arr->offset, out_arr->length,
                       list.is_valid);
   out_arr->null_count = list.is_valid ? 0 : out_arr->length;
@@ -861,13 +885,15 @@ Status ScalarListContains(KernelContext* ctx,
     return Status::OK();
   }
   Datum values = list.value;
-  if (null_queries) {
+  if (!prepared.comparison) {
     bit_util::SetBitsTo(out_arr->buffers[1].data, out_arr->offset, out_arr->length,
                         values.array()->ComputeLogicalNullCount() > 0);
     return Status::OK();
   }
-  RETURN_NOT_OK(CastTo(ctx, (*types)[0], &values));
-  RETURN_NOT_OK(CastTo(ctx, (*types)[1], &queries));
+  Datum queries = prepared.values;
+  const auto& types = *prepared.comparison;
+  RETURN_NOT_OK(CastTo(ctx, types.values, &values));
+  RETURN_NOT_OK(CastTo(ctx, types.queries, &queries));
   ExecContext* exec_ctx = ctx->exec_context();
   if (is_floating(values.type()->id())) {
     // "is_in" tells -0.0 from 0.0 and NaNs with different payloads apart, so turn
@@ -898,11 +924,12 @@ Status ListContains(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
     return Status::OK();
   }
   const auto& state_types = checked_cast<const ListContainsState&>(*ctx->state()).types;
+  ARROW_ASSIGN_OR_RAISE(auto prepared,
+                        PrepareListContainsQueries(ctx, state_types, batch[1]));
   if (batch[0].is_scalar()) {
     // A scalar list is only paired with an array of queries here
-    return ScalarListContains(ctx, state_types,
-                              checked_cast<const BaseListScalar&>(*batch[0].scalar),
-                              batch[1].array, out_arr);
+    return ScalarListContains(ctx, checked_cast<const BaseListScalar&>(*batch[0].scalar),
+                              prepared, out_arr);
   }
   const ArraySpan& list = batch[0].array;
 
@@ -931,26 +958,19 @@ Status ListContains(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
   };
 
   // A scalar query is a single query for all lists
-  const bool scalar_query = batch[1].is_scalar();
-  Datum queries;
-  if (scalar_query) {
-    ARROW_ASSIGN_OR_RAISE(queries,
-                          MakeArrayFromScalar(*batch[1].scalar, 1, ctx->memory_pool()));
-  } else {
-    queries = batch[1].array.ToArrayData();
-  }
+  const bool scalar_query = prepared.is_scalar;
+  Datum queries = prepared.values;
   const int64_t query_step = scalar_query ? 0 : 1;
 
-  if (queries.array()->ComputeLogicalNullCount() == queries.length()) {
+  if (!prepared.comparison) {
     // Values are also null where their dictionary is
     RETURN_NOT_OK(CastTo(ctx, Decoded(values.type()), &values));
     const ArraySpan v(*values.array());
     search([&](int64_t j, int64_t) { return v.IsNull(j); });
     return Status::OK();
   }
-  RETURN_NOT_OK(state_types.status());
-  const auto& types = *state_types;
-  if (!values.type()->Equals(*types[0])) {
+  const auto& types = *prepared.comparison;
+  if (!values.type()->Equals(*types.values)) {
     if constexpr (is_list_view_type<Type>::value) {
       // Only cast the span of values that views reference
       values_start = std::numeric_limits<int64_t>::max();
@@ -966,13 +986,13 @@ Status ListContains(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
       values = list.child_data[0].ToArrayData()->Slice(values_start,
                                                        values_end - values_start);
     }
-    RETURN_NOT_OK(CastListValues<Type>(ctx, list, values_start, types[0], &values));
+    RETURN_NOT_OK(CastListValues<Type>(ctx, list, values_start, types.values, &values));
   }
-  Status status = CastTo(ctx, types[1], &queries);
+  Status status = CastTo(ctx, types.queries, &queries);
   if (status.IsInvalid()) {
     // Queries that don't convert may be those of null lists, which don't matter
     RETURN_NOT_OK(MaskQueries(ctx, list, scalar_query, &queries));
-    status = CastTo(ctx, types[1], &queries);
+    status = CastTo(ctx, types.queries, &queries);
   }
   RETURN_NOT_OK(status);
   const ArraySpan v(*values.array());
