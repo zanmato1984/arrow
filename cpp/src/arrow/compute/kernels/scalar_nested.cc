@@ -622,29 +622,28 @@ struct ListContainsQueries {
     TypeHolder queries;
   };
 
-  Datum values;
-  bool is_scalar;
+  Datum queries;
   // Only genuinely all-null queries need no comparison types. Search paths never
   // receive a failed type-resolution result or decide whether to suppress one.
-  std::optional<ComparisonTypes> comparison;
+  std::optional<ComparisonTypes> validated_comparison_types;
 };
 
 Result<ListContainsQueries> PrepareListContainsQueries(
     KernelContext* ctx, const Result<std::vector<TypeHolder>>& types,
     const ExecValue& query) {
   ListContainsQueries prepared;
-  prepared.is_scalar = query.is_scalar();
-  if (prepared.is_scalar) {
-    ARROW_ASSIGN_OR_RAISE(prepared.values,
+  if (query.is_scalar()) {
+    ARROW_ASSIGN_OR_RAISE(prepared.queries,
                           MakeArrayFromScalar(*query.scalar, 1, ctx->memory_pool()));
   } else {
-    prepared.values = query.array.ToArrayData();
+    prepared.queries = query.array.ToArrayData();
   }
   // Classify the original queries before any null-parent masking. Dictionary
   // entries and other encoded values may be logically null without null slots.
-  if (prepared.values.array()->ComputeLogicalNullCount() != prepared.values.length()) {
+  if (prepared.queries.array()->ComputeLogicalNullCount() != prepared.queries.length()) {
     RETURN_NOT_OK(types.status());
-    prepared.comparison = ListContainsQueries::ComparisonTypes{(*types)[0], (*types)[1]};
+    prepared.validated_comparison_types =
+        ListContainsQueries::ComparisonTypes{(*types)[0], (*types)[1]};
   }
   return prepared;
 }
@@ -885,13 +884,13 @@ Status ScalarListContains(KernelContext* ctx, const BaseListScalar& list,
     return Status::OK();
   }
   Datum values = list.value;
-  if (!prepared.comparison) {
+  if (!prepared.validated_comparison_types) {
     bit_util::SetBitsTo(out_arr->buffers[1].data, out_arr->offset, out_arr->length,
                         values.array()->ComputeLogicalNullCount() > 0);
     return Status::OK();
   }
-  Datum queries = prepared.values;
-  const auto& types = *prepared.comparison;
+  Datum queries = prepared.queries;
+  const auto& types = *prepared.validated_comparison_types;
   RETURN_NOT_OK(CastTo(ctx, types.values, &values));
   RETURN_NOT_OK(CastTo(ctx, types.queries, &queries));
   ExecContext* exec_ctx = ctx->exec_context();
@@ -958,18 +957,18 @@ Status ListContains(KernelContext* ctx, const ExecSpan& batch, ExecResult* out) 
   };
 
   // A scalar query is a single query for all lists
-  const bool scalar_query = prepared.is_scalar;
-  Datum queries = prepared.values;
+  const bool scalar_query = batch[1].is_scalar();
+  Datum queries = prepared.queries;
   const int64_t query_step = scalar_query ? 0 : 1;
 
-  if (!prepared.comparison) {
+  if (!prepared.validated_comparison_types) {
     // Values are also null where their dictionary is
     RETURN_NOT_OK(CastTo(ctx, Decoded(values.type()), &values));
     const ArraySpan v(*values.array());
     search([&](int64_t j, int64_t) { return v.IsNull(j); });
     return Status::OK();
   }
-  const auto& types = *prepared.comparison;
+  const auto& types = *prepared.validated_comparison_types;
   if (!values.type()->Equals(*types.values)) {
     if constexpr (is_list_view_type<Type>::value) {
       // Only cast the span of values that views reference
