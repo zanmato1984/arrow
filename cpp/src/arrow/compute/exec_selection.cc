@@ -30,18 +30,9 @@ namespace arrow::compute::detail {
 
 namespace {
 
-bool CheckIfAllScalar(const ExecBatch& batch) {
-  for (const Datum& value : batch.values) {
-    if (!value.is_scalar()) {
-      return false;
-    }
-  }
-  return batch.num_values() > 0;
-}
-
-class DenseSelectionExecutor : public KernelExecutor {
+class DenseSelectionScalarExecutor : public KernelExecutor {
  public:
-  explicit DenseSelectionExecutor(std::unique_ptr<KernelExecutor> executor)
+  explicit DenseSelectionScalarExecutor(std::unique_ptr<KernelExecutor> executor)
       : executor_(std::move(executor)) {
     DCHECK_NE(executor_, nullptr);
   }
@@ -69,9 +60,17 @@ class DenseSelectionExecutor : public KernelExecutor {
       return executor_->Execute(input, listener);
     }
 
-    ARROW_ASSIGN_OR_RAISE(
-        std::vector<Datum> values,
-        batch.selection_vector->MakeDenseValues(batch.values, exec_context_));
+    const auto& selection = SelectionBackend::Get(*batch.selection_vector);
+    std::vector<Datum> values;
+    values.reserve(batch.values.size());
+    for (const auto& value : batch.values) {
+      if (value.is_scalar()) {
+        values.push_back(value);
+      } else {
+        ARROW_ASSIGN_OR_RAISE(auto dense, selection.Gather(value, exec_context_));
+        values.push_back(std::move(dense));
+      }
+    }
     ARROW_ASSIGN_OR_RAISE(
         ExecBatch input,
         ExecBatch::Make(std::move(values), batch.selection_vector->length()));
@@ -80,10 +79,8 @@ class DenseSelectionExecutor : public KernelExecutor {
     RETURN_NOT_OK(executor_->Execute(input, &dense_listener));
     Datum dense_result = executor_->WrapResults(input.values, dense_listener.values());
 
-    ARROW_ASSIGN_OR_RAISE(
-        Datum result,
-        batch.selection_vector->ScatterDenseResult(dense_result, batch.length,
-                                                   exec_context_));
+    ARROW_ASSIGN_OR_RAISE(Datum result,
+                          selection.Scatter(dense_result, batch.length, exec_context_));
     return listener->OnResult(std::move(result));
   }
 
@@ -104,9 +101,9 @@ class DenseSelectionExecutor : public KernelExecutor {
 
 }  // namespace
 
-std::unique_ptr<KernelExecutor> MakeDenseSelectionExecutor(
+std::unique_ptr<KernelExecutor> MakeDenseSelectionScalarExecutor(
     std::unique_ptr<KernelExecutor> executor) {
-  return std::make_unique<DenseSelectionExecutor>(std::move(executor));
+  return std::make_unique<DenseSelectionScalarExecutor>(std::move(executor));
 }
 
 }  // namespace arrow::compute::detail

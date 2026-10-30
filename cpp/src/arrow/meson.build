@@ -59,6 +59,7 @@ arrow_components = {
             'compute/kernel.cc',
             'compute/ordering.cc',
             'compute/registry.cc',
+            'compute/selection.cc',
             'compute/kernels/chunked_internal.cc',
             'compute/kernels/codegen_internal.cc',
             'compute/kernels/ree_util_internal.cc',

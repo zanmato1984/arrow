@@ -29,6 +29,7 @@
 #include "arrow/array/data.h"
 #include "arrow/buffer.h"
 #include "arrow/chunked_array.h"
+#include "arrow/compute/api_vector.h"
 #include "arrow/compute/exec.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression.h"
@@ -148,15 +149,18 @@ TEST(ExecContext, BasicWorkings) {
   ASSERT_FALSE(ctx.use_threads());
 }
 
+SelectionSpan GetSelectionSpan(const SelectionVector& selection, int64_t length) {
+  return detail::SelectionBackend::Get(selection).MakeCursor()->Next(0, length);
+}
+
 TEST(SelectionVector, Basics) {
   auto sel_vector = SelectionVectorFromJSON("[0, 42]");
 
   ASSERT_EQ(sel_vector->length(), 2);
-  ASSERT_OK_AND_ASSIGN(auto indices_data, sel_vector->ToIndicesArrayData());
-  const int32_t* indices = indices_data->GetValues<int32_t>(1);
-  ASSERT_NE(indices, nullptr);
-  ASSERT_EQ(indices[0], 0);
-  ASSERT_EQ(indices[1], 42);
+  std::vector<int64_t> indices;
+  detail::VisitSelectionSpanInline(GetSelectionSpan(*sel_vector, 43),
+                                   [&](int64_t i) { indices.push_back(i); });
+  ASSERT_EQ(indices, (std::vector<int64_t>{0, 42}));
 }
 
 TEST(SelectionVector, Validate) {
@@ -195,15 +199,13 @@ TEST(SelectionVector, Validate) {
 }
 
 TEST(SelectionVector, GetSpanForChunkAtInt32Limit) {
-  auto selection =
-      SelectionVectorFromJSON("[" + std::to_string(std::numeric_limits<int32_t>::max()) +
-                              "]");
+  auto selection = SelectionVectorFromJSON(
+      "[" + std::to_string(std::numeric_limits<int32_t>::max()) + "]");
   SelectionSpan span;
-  const int64_t chunk_end =
-      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  const int64_t chunk_end = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
 
-  ASSERT_EQ(1, selection->GetSpanForChunk(/*chunk_start=*/0, chunk_end,
-                                          /*selection_position=*/0, &span));
+  span = GetSelectionSpan(*selection, chunk_end);
+  ASSERT_EQ(1, detail::SelectedCount(span));
   const auto* contiguous = std::get_if<ContiguousSpan>(&span);
   ASSERT_NE(contiguous, nullptr);
   ASSERT_EQ(std::numeric_limits<int32_t>::max(), contiguous->start_offset);
@@ -814,12 +816,11 @@ class TestExecSpanIterator : public TestComputeInternals {
                       const std::vector<int>& ex_batch_sizes,
                       const std::vector<int>& ex_selection_sizes) {
     SetupIterator(input, chunksize);
-    std::shared_ptr<ArrayData> selection_indices;
-    const int32_t* selection_indices_values = nullptr;
+    std::vector<int64_t> selection_indices_values;
     if (input.selection_vector) {
-      ASSERT_OK_AND_ASSIGN(selection_indices, input.selection_vector->ToIndicesArrayData());
-      selection_indices_values = selection_indices->GetValues<int32_t>(1);
-      ASSERT_NE(selection_indices_values, nullptr);
+      detail::VisitSelectionSpanInline(
+          GetSelectionSpan(*input.selection_vector, input.length),
+          [&](int64_t i) { selection_indices_values.push_back(i); });
     }
     ExecSpan batch;
     SelectionSpan selection;
@@ -835,8 +836,8 @@ class TestExecSpanIterator : public TestComputeInternals {
       ASSERT_EQ(ex_batch_sizes[i], batch.length);
       std::vector<int64_t> visited_indices;
       if (selection_ptr) {
-        detail::VisitSelectionSpanInline(selection,
-                                         [&](int64_t i) { visited_indices.push_back(i); });
+        detail::VisitSelectionSpanInline(
+            selection, [&](int64_t i) { visited_indices.push_back(i); });
       }
       const int64_t selection_length = static_cast<int64_t>(visited_indices.size());
       ASSERT_EQ(ex_selection_sizes[i], selection_length);
@@ -867,10 +868,10 @@ class TestExecSpanIterator : public TestComputeInternals {
       }
       if (iterator_.have_selection_vector()) {
         for (int64_t j = 0; j < selection_length; ++j) {
-          ASSERT_EQ(static_cast<int64_t>(
-                        selection_indices_values[selection_position + j]) -
-                        position,
-                    visited_indices[static_cast<size_t>(j)]);
+          ASSERT_EQ(
+              static_cast<int64_t>(selection_indices_values[selection_position + j]) -
+                  position,
+              visited_indices[static_cast<size_t>(j)]);
           ASSERT_GE(visited_indices[static_cast<size_t>(j)], 0);
           ASSERT_LT(visited_indices[static_cast<size_t>(j)], batch.length);
         }
@@ -1045,6 +1046,7 @@ constexpr uint8_t kNonSelectedByte = 0xFE;
 void AssertArraysEqualSparseWithSelection(const Array& src,
                                           const SelectionSpan& selection,
                                           const Array& dst) {
+  ASSERT_OK(dst.ValidateFull());
   ASSERT_EQ(src.length(), dst.length());
   ASSERT_EQ(src.type()->id(), dst.type()->id());
 
@@ -1074,9 +1076,9 @@ void AssertArraysEqualSparseWithSelection(const Array& src,
       });
 }
 
-void AssertArraysEqualDenseWithSelection(const Array& src,
-                                         const SelectionSpan& selection,
+void AssertArraysEqualDenseWithSelection(const Array& src, const SelectionSpan& selection,
                                          const Array& dst) {
+  ASSERT_OK(dst.ValidateFull());
   ASSERT_EQ(src.length(), dst.length());
   ASSERT_EQ(src.type()->id(), dst.type()->id());
 
@@ -1112,12 +1114,7 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
                                                       const Datum& result) {
   ARROW_UNUSED(exec_chunksize);
   if (result.kind() == Datum::ARRAY) {
-    SelectionSpan selection_span;
-    const uint64_t chunk_end = static_cast<uint64_t>(input.length());
-    const int64_t consumed = selection->GetSpanForChunk(/*chunk_start=*/0, chunk_end,
-                                                        /*selection_position=*/0,
-                                                        &selection_span);
-    ASSERT_EQ(consumed, selection->length());
+    SelectionSpan selection_span = GetSelectionSpan(*selection, input.length());
     AssertArraysEqualSparseWithSelection(input, selection_span, *result.make_array());
     return;
   }
@@ -1125,33 +1122,26 @@ void AssertChunkedExecResultsEqualSparseWithSelection(int64_t exec_chunksize,
   ASSERT_EQ(Datum::CHUNKED_ARRAY, result.kind());
   const ChunkedArray& carr = *result.chunked_array();
   ASSERT_EQ(input.length(), carr.length());
-  int64_t selection_position = 0;
+  auto cursor = detail::SelectionBackend::Get(*selection).MakeCursor();
   int64_t input_offset = 0;
   for (int i = 0; i < carr.num_chunks(); ++i) {
     const int64_t chunk_len = carr.chunk(i)->length();
     const uint64_t chunk_start = static_cast<uint64_t>(input_offset);
     const uint64_t chunk_end = static_cast<uint64_t>(input_offset + chunk_len);
-    SelectionSpan selection_span;
-    selection_position += selection->GetSpanForChunk(chunk_start, chunk_end, selection_position,
-                                                     &selection_span);
-    AssertArraysEqualSparseWithSelection(*input.Slice(input_offset, chunk_len), selection_span,
-                                         *carr.chunk(i));
+    SelectionSpan selection_span = cursor->Next(chunk_start, chunk_end);
+    AssertArraysEqualSparseWithSelection(*input.Slice(input_offset, chunk_len),
+                                         selection_span, *carr.chunk(i));
     input_offset += chunk_len;
   }
   ASSERT_EQ(input_offset, input.length());
-  ASSERT_EQ(selection_position, selection->length());
+  ASSERT_EQ(cursor->position(), selection->length());
 }
 
 void AssertChunkedExecResultsEqualDenseWithSelection(int64_t exec_chunksize,
                                                      const Array& input,
                                                      const SelectionVector* selection,
                                                      const Datum& result) {
-  SelectionSpan selection_span;
-  const uint64_t chunk_end = static_cast<uint64_t>(input.length());
-  const int64_t consumed = selection->GetSpanForChunk(/*chunk_start=*/0, chunk_end,
-                                                      /*selection_position=*/0,
-                                                      &selection_span);
-  ASSERT_EQ(consumed, selection->length());
+  SelectionSpan selection_span = GetSelectionSpan(*selection, input.length());
   if (selection->length() <= exec_chunksize) {
     ASSERT_EQ(Datum::ARRAY, result.kind());
     AssertArraysEqualDenseWithSelection(input, selection_span, *result.make_array());
@@ -1270,8 +1260,7 @@ Status ExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch, ExecResult*
 }
 
 Status SelectiveExecComputedBitmap(KernelContext* ctx, const ExecSpan& batch,
-                                   const SelectionSpan& selection,
-                                   ExecResult* out) {
+                                   const SelectionSpan& selection, ExecResult* out) {
   // Propagate nulls not used. Check that the out bitmap isn't the same already
   // as the input bitmap
   const ArraySpan& arg0 = batch[0].array;
@@ -1299,8 +1288,7 @@ Status ExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
 }
 
 Status SelectiveExecNoPreallocatedData(KernelContext* ctx, const ExecSpan& batch,
-                                       const SelectionSpan& selection,
-                                       ExecResult* out) {
+                                       const SelectionSpan& selection, ExecResult* out) {
   // Validity preallocated, but not the data
   ArrayData* out_arr = out->array_data().get();
   DCHECK_EQ(0, out_arr->offset);
@@ -1525,9 +1513,9 @@ class TestCallScalarFunction : public TestComputeInternals {
     ASSERT_OK(func2->AddKernel(kernel));
     ASSERT_OK(registry->AddFunction(func2));
 
-    auto func3 =
-        std::make_shared<ScalarFunction>("test_copy_output_not_null_selective", Arity::Unary(),
-                                         /*doc=*/FunctionDoc::Empty());
+    auto func3 = std::make_shared<ScalarFunction>("test_copy_output_not_null_selective",
+                                                  Arity::Unary(),
+                                                  /*doc=*/FunctionDoc::Empty());
     ScalarKernel kernel3({uint8()}, uint8(), ExecCopyArraySpan,
                          SelectiveExecCopyOutputNotNullArraySpan);
     kernel3.null_handling = NullHandling::OUTPUT_NOT_NULL;
@@ -1908,11 +1896,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
@@ -1944,15 +1928,11 @@ TEST_F(TestCallScalarFunctionPreallocationCases, OutputNotNullSelectiveSparse) {
   std::stringstream selection_json;
   selection_json << "[" << idx0 << ", " << idx1 << ", " << idx2 << "]";
   auto selection = SelectionVectorFromJSON(selection_json.str());
-  SelectionSpan selection_span;
-  const int64_t consumed = selection->GetSpanForChunk(
-      /*chunk_start=*/0, static_cast<uint64_t>(arr->length()), /*selection_position=*/0,
-      &selection_span);
-  ASSERT_EQ(consumed, selection->length());
+  SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
 
-  ASSERT_OK_AND_ASSIGN(auto test_copy,
-                       ExpressionFunctionCaller::Maker("test_copy_output_not_null_selective",
-                                                       {uint8()}));
+  ASSERT_OK_AND_ASSIGN(
+      auto test_copy,
+      ExpressionFunctionCaller::Maker("test_copy_output_not_null_selective", {uint8()}));
   ResetContexts();
   DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
     ASSERT_EQ(Datum::ARRAY, result.kind());
@@ -1968,11 +1948,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, BasicSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestBasic(test_copy.get(), *arr, selection, [&](const Datum& result) {
@@ -2018,11 +1994,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
@@ -2045,11 +2017,7 @@ TEST_F(TestCallScalarFunctionPreallocationCases, ChunkedSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_copy,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestChunked(test_copy.get(), *carr, selection, [&](const Datum& result) {
@@ -2195,11 +2163,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, BasicSelectiveSparse) {
     ASSERT_OK_AND_ASSIGN(auto test_nopre,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestBasic(test_nopre.get(), *arr, selection, [&](const Datum& result) {
@@ -2218,11 +2182,7 @@ TEST_F(TestCallScalarFunctionBasicNonStandardCases, BasicSelectiveDense) {
     ASSERT_OK_AND_ASSIGN(auto test_nopre,
                          ExpressionFunctionCaller::Maker(name, {uint8()}));
     for (const auto& selection : selections) {
-      SelectionSpan selection_span;
-      const int64_t consumed = selection->GetSpanForChunk(
-          /*chunk_start=*/0, static_cast<uint64_t>(arr->length()),
-          /*selection_position=*/0, &selection_span);
-      ASSERT_EQ(consumed, selection->length());
+      SelectionSpan selection_span = GetSelectionSpan(*selection, arr->length());
       ResetContexts();
 
       DoTestBasic(test_nopre.get(), *arr, selection, [&](const Datum& result) {
@@ -2351,11 +2311,7 @@ TEST_F(TestCallScalarFunctionStatefulKernel, BasicSelectiveSparse) {
   ASSERT_OK_AND_ASSIGN(
       auto caller, ExpressionFunctionCaller::Maker("test_stateful_selective", {int32()}));
   for (const auto& selection : selections) {
-    SelectionSpan selection_span;
-    const int64_t consumed = selection->GetSpanForChunk(
-        /*chunk_start=*/0, static_cast<uint64_t>(input->length()),
-        /*selection_position=*/0, &selection_span);
-    ASSERT_EQ(consumed, selection->length());
+    SelectionSpan selection_span = GetSelectionSpan(*selection, input->length());
     ResetContexts();
 
     DoTestBasic(caller.get(), *input, multiplier, selection, [&](const Datum& result) {
@@ -2374,11 +2330,7 @@ TEST_F(TestCallScalarFunctionStatefulKernel, BasicSelectiveDense) {
   ASSERT_OK_AND_ASSIGN(auto caller,
                        ExpressionFunctionCaller::Maker("test_stateful", {int32()}));
   for (const auto& selection : selections) {
-    SelectionSpan selection_span;
-    const int64_t consumed = selection->GetSpanForChunk(
-        /*chunk_start=*/0, static_cast<uint64_t>(input->length()),
-        /*selection_position=*/0, &selection_span);
-    ASSERT_EQ(consumed, selection->length());
+    SelectionSpan selection_span = GetSelectionSpan(*selection, input->length());
     ResetContexts();
 
     DoTestBasic(caller.get(), *input, multiplier, selection, [&](const Datum& result) {
@@ -2481,6 +2433,158 @@ TEST(Ordering, IsSuborderOf) {
   CheckOrdering(d, {false, false, false, true, false, false});
   CheckOrdering(imp, {false, false, false, false, false, false});
   CheckOrdering(unordered, {true, true, true, true, true, true});
+}
+
+// This backend deliberately has no indices accessor. It proves that native execution
+// consumes spans and that the dense adapter delegates array operations to the backend.
+class BitmapTestSelection : public SelectionBackend {
+ public:
+  BitmapTestSelection() : bitmap_(Buffer::FromString(std::string(1, '\x0a'))) {}
+  int64_t length() const override { return 2; }
+  Status Validate(int64_t values_length) const override {
+    return values_length == -1 || values_length == 5
+               ? Status::OK()
+               : Status::Invalid("Expected five rows");
+  }
+  std::unique_ptr<SelectionCursor> MakeCursor() const override {
+    class Cursor : public SelectionCursor {
+     public:
+      explicit Cursor(std::shared_ptr<Buffer> bitmap) : bitmap_(std::move(bitmap)) {}
+      SelectionSpan Next(int64_t start, int64_t end) override {
+        position_ += ::arrow::internal::CountSetBits(bitmap_->data(), start, end - start);
+        return FilteredSpan{0, end - start, bitmap_->data(), start};
+      }
+      int64_t position() const override { return position_; }
+
+     private:
+      std::shared_ptr<Buffer> bitmap_;
+      int64_t position_ = 0;
+    };
+    return std::make_unique<Cursor>(bitmap_);
+  }
+  Result<Datum> Gather(const Datum& values, ExecContext* ctx) const override {
+    ++gathers;
+    return Filter(values, Datum(std::make_shared<BooleanArray>(5, bitmap_)),
+                  FilterOptions::Defaults(), ctx);
+  }
+  Result<Datum> Scatter(const Datum& values, int64_t output_length,
+                        ExecContext* ctx) const override {
+    ++scatters;
+    auto indices = ArrayFromJSON(int32(), "[1, 3]");
+    return compute::Scatter(values, Datum(indices), ScatterOptions{output_length - 1},
+                            ctx);
+  }
+  mutable int gathers = 0;
+  mutable int scatters = 0;
+
+ private:
+  std::shared_ptr<Buffer> bitmap_;
+};
+
+TEST(SelectionCursor, IndependentExecutions) {
+  auto selection = SelectionVectorFromJSON("[0, 1, 4]");
+  auto first = SelectionBackend::Get(*selection).MakeCursor();
+  auto second = SelectionBackend::Get(*selection).MakeCursor();
+  ASSERT_EQ(2, SelectedCount(first->Next(0, 3)));
+  ASSERT_EQ(2, first->position());
+  ASSERT_EQ(0, second->position());
+  ASSERT_EQ(3, SelectedCount(second->Next(0, 5)));
+  auto last = first->Next(3, 5);
+  ASSERT_EQ(1, SelectedCount(last));
+  ASSERT_EQ(1, std::get<ContiguousSpan>(last).start_offset);
+  ASSERT_EQ(3, first->position());
+}
+
+TEST_F(TestCallScalarFunctionPreallocationCases, BackendIndependentExecution) {
+  auto backend = std::make_shared<BitmapTestSelection>();
+  auto selection = SelectionBackend::Make(backend);
+  auto input = ArrayFromJSON(uint8(), "[10, 20, null, 40, 50]");
+  auto expected = ArrayFromJSON(uint8(), "[null, 20, null, 40, null]");
+  for (auto name : {"test_copy_selective", "test_copy"}) {
+    ASSERT_OK_AND_ASSIGN(auto caller, ExpressionFunctionCaller::Maker(name, {uint8()}));
+    exec_ctx_->set_exec_chunksize(2);
+    ASSERT_OK_AND_ASSIGN(
+        auto result, caller->Call({Datum(input)}, selection, nullptr, exec_ctx_.get()));
+    auto array =
+        result.is_array() ? result.make_array() : result.chunked_array()->chunk(0);
+    // Preallocated scalar output is contiguous even when input execution is chunked.
+    ASSERT_EQ(5, array->length());
+    ASSERT_OK(array->ValidateFull());
+    AssertArraysEqual(*expected, *array);
+  }
+  ASSERT_EQ(1, backend->gathers);
+  ASSERT_EQ(1, backend->scatters);
+}
+
+TEST(SelectionSpan, BitmapOffsetsAndEarlyExit) {
+  auto backend = std::make_shared<BitmapTestSelection>();
+  auto cursor = backend->MakeCursor();
+  cursor->Next(0, 2);
+  auto selection = cursor->Next(2, 5);
+  std::vector<int64_t> visited;
+  VisitSelectionSpanInline(selection, [&](int64_t i) { visited.push_back(i); });
+  ASSERT_EQ(visited, (std::vector<int64_t>{1}));
+  int calls = 0;
+  auto all = backend->MakeCursor()->Next(0, 5);
+  ASSERT_RAISES(Invalid, VisitSelectionSpanInline(all, [&](int64_t) {
+                  ++calls;
+                  return Status::Invalid("Stop");
+                }));
+  ASSERT_EQ(1, calls);
+}
+
+TEST(SelectionOutput, SharedMetadataAndReadOnlyBitmap) {
+  auto input = ArrayFromJSON(uint8(), "[10, 20, null, 40, 50]");
+  // An immutable bitmap also exercises the writability boundary, not just refcounts.
+  auto bitmap = Buffer::FromString(std::string(1, '\x1b'));
+  input->data()->buffers[0] = bitmap;
+  for (bool shallow_copy : {false, true}) {
+    ExecResult result;
+    result.value = shallow_copy ? input->data()->Copy() : input->data();
+    ASSERT_OK(ApplySelectionMask(ContiguousSpan{1, 3}, &result, default_memory_pool()));
+    auto output = MakeArray(result.array_data());
+    ASSERT_OK(output->ValidateFull());
+    AssertArraysEqual(*ArrayFromJSON(uint8(), "[null, 20, null, 40, null]"), *output);
+    ASSERT_OK(input->ValidateFull());
+    AssertArraysEqual(*ArrayFromJSON(uint8(), "[10, 20, null, 40, 50]"), *input);
+    ASSERT_EQ(bitmap, input->data()->buffers[0]);
+  }
+}
+
+TEST(SelectionOutput, KernelCanReplaceResult) {
+  auto input = ArrayFromJSON(uint8(), "[10, 20, null, 40, 50]");
+  ScalarKernel kernel(
+      {uint8()}, uint8(), ExecCopyArraySpan,
+      [](KernelContext*, const ExecSpan& batch, const SelectionSpan&, ExecResult* out) {
+        out->value = batch[0].array.ToArrayData();
+        return Status::OK();
+      });
+  kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+  kernel.mem_allocation = MemAllocation::NO_PREALLOCATE;
+  ExecContext ctx;
+  KernelContext kernel_ctx(&ctx, &kernel);
+  auto executor = KernelExecutor::MakeScalar();
+  std::vector<TypeHolder> types{uint8()};
+  ASSERT_OK(executor->Init(&kernel_ctx, {&kernel, types, nullptr}));
+  ExecBatch batch({Datum(input)}, 5, SelectionVectorFromJSON("[1, 3]"));
+  DatumAccumulator listener;
+  ASSERT_OK(executor->Execute(batch, &listener));
+  auto result = executor->WrapResults(batch.values, listener.values()).make_array();
+  ASSERT_OK(result->ValidateFull());
+  AssertArraysEqual(*ArrayFromJSON(uint8(), "[null, 20, null, 40, null]"), *result);
+  ASSERT_OK(input->ValidateFull());
+}
+
+TEST(SelectionBackend, DenseScatterUsesExecutionContext) {
+  auto selection = SelectionVectorFromJSON("[1, 3]");
+  ProxyMemoryPool pool(default_memory_pool());
+  ExecContext ctx(&pool);
+  auto input = ArrayFromJSON(uint8(), "[20, 40]");
+  ASSERT_OK_AND_ASSIGN(auto result,
+                       SelectionBackend::Get(*selection).Scatter(Datum(input), 5, &ctx));
+  ASSERT_GT(pool.num_allocations(), 0);
+  AssertArraysEqual(*ArrayFromJSON(uint8(), "[null, 20, null, 40, null]"),
+                    *result.make_array());
 }
 
 }  // namespace detail

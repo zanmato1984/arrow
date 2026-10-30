@@ -120,8 +120,9 @@ class ARROW_EXPORT ExecContext {
   bool use_threads_ = true;
 };
 
-// TODO: Consider standardizing on uint16 selection vectors and only use them
-// when we can ensure that each value is 64K length or smaller
+namespace detail {
+class SelectionBackend;
+}  // namespace detail
 
 /// \brief A selection span representing a contiguous run of selected rows.
 ///
@@ -182,51 +183,20 @@ using SelectionSpan = std::variant<ContiguousSpan, FilteredSpan, DiscreteSpan>;
 /// [1]: http://cidrdb.org/cidr2005/papers/P19.pdf
 class ARROW_EXPORT SelectionVector {
  public:
-  virtual ~SelectionVector() = default;
-
   /// \brief Create an index-backed selection vector from Int32 ArrayData.
   static std::shared_ptr<SelectionVector> MakeIndices(std::shared_ptr<ArrayData> data);
-
   /// \brief Create an index-backed selection vector from an Int32 Array.
   static std::shared_ptr<SelectionVector> MakeIndices(const Array& arr);
-
-  /// \brief Number of selected row indices.
-  virtual int64_t length() const = 0;
-
+  /// \brief Number of selected rows.
+  int64_t length() const;
   /// \brief Validate selection (e.g. increasing, non-null, in-bounds).
-  virtual Status Validate(int64_t values_length = -1) const = 0;
+  Status Validate(int64_t values_length = -1) const;
 
-  /// \brief Materialize selection as an Int32 indices ArrayData.
-  ///
-  /// For index-backed selections this is a cheap accessor. Other future
-  /// representations may need to allocate or compute the indices.
-  virtual Result<std::shared_ptr<ArrayData>> ToIndicesArrayData(
-      MemoryPool* pool = default_memory_pool()) const = 0;
-
-  /// \brief Gather selected input values into a dense argument list.
-  ///
-  /// This is used as the dense fallback for kernels that don't support
-  /// selective execution. Different selection backends can choose different
-  /// compute APIs to produce the dense values.
-  virtual Result<std::vector<Datum>> MakeDenseValues(const std::vector<Datum>& values,
-                                                     ExecContext* ctx) const = 0;
-
-  /// \brief Scatter a dense fallback result back to the original value length.
-  virtual Result<Datum> ScatterDenseResult(const Datum& dense_result,
-                                           int64_t output_length,
-                                           ExecContext* ctx) const = 0;
-
-  /// \brief Slice selection for a given contiguous chunk [chunk_start, chunk_end).
-  ///
-  /// \param[in] chunk_start Absolute row start (inclusive).
-  /// \param[in] chunk_end Absolute row end (exclusive).
-  /// \param[in] selection_position Number of selected indices already consumed
-  /// in earlier chunks (rank).
-  /// \param[out] out Selection span relative to chunk_start.
-  /// \return Number of selected indices consumed from this chunk.
-  virtual int64_t GetSpanForChunk(int64_t chunk_start, int64_t chunk_end,
-                                  int64_t selection_position,
-                                  SelectionSpan* out) const = 0;
+ private:
+  friend class detail::SelectionBackend;
+  explicit SelectionVector(std::shared_ptr<detail::SelectionBackend> backend)
+      : backend_(std::move(backend)) {}
+  std::shared_ptr<detail::SelectionBackend> backend_;
 };
 
 /// An index to represent that a batch does not belong to an ordered stream
