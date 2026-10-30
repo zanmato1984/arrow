@@ -177,6 +177,10 @@ TEST(SelectionVector, Validate) {
     ASSERT_RAISES(Invalid, sel_vector->Validate());
   }
   {
+    auto sel_vector = SelectionVectorFromJSON("[0, 0, 2]");
+    ASSERT_RAISES(Invalid, sel_vector->Validate());
+  }
+  {
     auto sel_vector = SelectionVectorFromJSON("[-42, 0]");
     ASSERT_RAISES(Invalid, sel_vector->Validate());
   }
