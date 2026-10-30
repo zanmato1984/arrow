@@ -23,13 +23,13 @@
 #include <string>
 #include <vector>
 
+#include "arrow/array/builder_primitive.h"
+#include "arrow/chunked_array.h"
 #include "arrow/compute/exec_internal.h"
 #include "arrow/compute/expression.h"
 #include "arrow/compute/function_internal.h"
 #include "arrow/compute/kernels/codegen_internal.h"
 #include "arrow/compute/registry.h"
-#include "arrow/array/builder_primitive.h"
-#include "arrow/chunked_array.h"
 #include "arrow/datum.h"
 #include "arrow/testing/generator.h"
 #include "arrow/util/logging.h"
@@ -202,7 +202,6 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorOnePerChunk(const ChunkedArr
 
   // Choose (up to) one index per distinct chunk, spreading chunk ids across the full
   // range. We then sort indices to satisfy SelectionVector's strict-increasing contract.
-  const uint64_t stride = 1315423911ULL;  // odd constant, deterministic
   std::vector<int64_t> chunk_offsets(static_cast<size_t>(num_chunks));
   std::vector<int> eligible_chunk_ids;
   eligible_chunk_ids.reserve(static_cast<size_t>(num_chunks));
@@ -220,31 +219,16 @@ std::shared_ptr<SelectionVector> MakeSelectionVectorOnePerChunk(const ChunkedArr
     return MakeSelectionVectorFromIndices(indices);
   }
 
-  std::vector<uint8_t> chunk_used(eligible_chunk_ids.size(), 0);
-  uint64_t k = 0;
-  while (static_cast<int64_t>(indices.size()) < selected_length) {
-    const size_t idx =
-        static_cast<size_t>((k * stride) % static_cast<uint64_t>(eligible_chunk_ids.size()));
-    const int chunk_id = eligible_chunk_ids[idx];
-    ++k;
-    auto& used = chunk_used[idx];
-    if (used) {
-      continue;
-    }
-    used = 1;
+  std::mt19937_64 chunk_rng(0x9e3779b97f4a7c15ULL);
+  std::shuffle(eligible_chunk_ids.begin(), eligible_chunk_ids.end(), chunk_rng);
+  for (int chunk_id : eligible_chunk_ids) {
+    if (static_cast<int64_t>(indices.size()) == selected_length) break;
     const int64_t chunk_start = chunk_offsets[static_cast<size_t>(chunk_id)];
     const int64_t chunk_len = input.chunk(chunk_id)->length();
     // Pick a deterministic position within the chunk (not always 0), to avoid
     // accidentally creating large contiguous runs across chunks when chunk_size is big.
     const int64_t local = static_cast<int64_t>(chunk_id % chunk_len);
     indices.push_back(static_cast<int32_t>(chunk_start + local));
-
-    // If we exhausted all chunks, fall back to random fill (still sorted/unique)
-    // to reach selected_length.
-    if (static_cast<int>(indices.size()) ==
-        static_cast<int>(eligible_chunk_ids.size())) {
-      break;
-    }
   }
 
   if (static_cast<int64_t>(indices.size()) < selected_length) {
@@ -305,7 +289,8 @@ void BenchmarkExec(benchmark::State& state, std::string spin_function,
       call(std::move(spin_function), {field_ref(0)}, SpinOptions(kernel_intensity));
   auto bound = expr.Bind(*schema({field("", input.type())})).ValueOrDie();
   auto length = input.length();
-  auto batch = ExecBatch(std::vector<Datum>{std::move(input)}, length, std::move(selection));
+  auto batch =
+      ExecBatch(std::vector<Datum>{std::move(input)}, length, std::move(selection));
 
   for (auto _ : state) {
     ARROW_CHECK_OK(ExecuteScalarExpression(bound, batch).status());
@@ -334,8 +319,8 @@ static void BM_ExecSelective(benchmark::State& state, std::string spin_function)
   auto input = ConstantArrayGenerator::Int32(num_rows, 0);
   auto selection =
       MakeSelectionVectorPrefix(static_cast<int64_t>(num_rows * selectivity / 100));
-  BenchmarkExec(state, std::move(spin_function), kernel_intensity, Datum(std::move(input)),
-                std::move(selection));
+  BenchmarkExec(state, std::move(spin_function), kernel_intensity,
+                Datum(std::move(input)), std::move(selection));
 }
 
 static void BM_ExecBaselineChunked(benchmark::State& state) {
@@ -348,7 +333,7 @@ static void BM_ExecBaselineChunked(benchmark::State& state) {
 }
 
 static void BM_ExecSelectiveChunked(benchmark::State& state, std::string spin_function,
-                                   SelectionPattern pattern) {
+                                    SelectionPattern pattern) {
   const int64_t selectivity = state.range(0);
   ARROW_CHECK(selectivity >= 0 && selectivity <= 100);
   const int64_t kernel_intensity = state.range(1);
@@ -392,43 +377,44 @@ BENCHMARK(BM_ExecBaselineChunked)
 
 BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, sparse_prefix, "spin_selective",
                   SelectionPattern::kPrefix)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
 BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, sparse_one_per_chunk, "spin_selective",
                   SelectionPattern::kOnePerChunk)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
 BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, sparse_random, "spin_selective",
                   SelectionPattern::kRandomSortedUnique)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
-BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, dense_prefix, "spin", SelectionPattern::kPrefix)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, dense_prefix, "spin",
+                  SelectionPattern::kPrefix)
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
 BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, dense_one_per_chunk, "spin",
                   SelectionPattern::kOnePerChunk)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
 BENCHMARK_CAPTURE(BM_ExecSelectiveChunked, dense_random, "spin",
                   SelectionPattern::kRandomSortedUnique)
-    ->ArgNames(
-        {kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName, kChunkSizeArgName})
-    ->ArgsProduct(
-        {kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg, kChunkSizeArg});
+    ->ArgNames({kSelectivityArgName, kKernelIntensityArgName, kNumRowsArgName,
+                kChunkSizeArgName})
+    ->ArgsProduct({kSelectivityChunkedArg, kKernelIntensityChunkedArg, kNumRowsArg,
+                   kChunkSizeArg});
 
 }  // namespace arrow::compute

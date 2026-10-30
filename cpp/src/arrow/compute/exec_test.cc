@@ -2587,6 +2587,64 @@ TEST(SelectionBackend, DenseScatterUsesExecutionContext) {
                     *result.make_array());
 }
 
+Status SelectiveCopyWithOwnedBitmap(KernelContext* ctx, const ExecSpan& batch,
+                                    const SelectionSpan& selection, ExecResult* out) {
+  if (!out->is_array_data()) {
+    return Status::Invalid("COMPUTED_NO_PREALLOCATE requires ArrayData output");
+  }
+  auto* data = out->array_data_mutable();
+  ARROW_ASSIGN_OR_RAISE(data->buffers[0], ctx->AllocateBitmap(batch.length));
+  const auto& input = batch[0].array;
+  CopyBitmap(input.buffers[0].data, input.offset, batch.length,
+             data->buffers[0]->mutable_data(), 0);
+  return SelectiveExecCopyArrayData(ctx, batch, selection, out);
+}
+
+TEST(SelectionOutput, PreserveKernelAllocationContract) {
+  auto input = ArrayFromJSON(uint8(), "[10, 20, null, 40, 50]");
+  auto partial = ArrayFromJSON(uint8(), "[null, 20, null, 40, null]");
+  ScalarKernel kernel(
+      {uint8()}, uint8(),
+      [](KernelContext* ctx, const ExecSpan& batch, ExecResult* out) {
+        return SelectiveCopyWithOwnedBitmap(ctx, batch, ContiguousSpan{0, batch.length},
+                                            out);
+      },
+      SelectiveCopyWithOwnedBitmap);
+  kernel.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+  // Only the bitmap belongs to the kernel. Data must still be preallocated.
+  kernel.mem_allocation = MemAllocation::PREALLOCATE;
+  std::vector<std::shared_ptr<SelectionVector>> selections{
+      nullptr, SelectionVectorFromJSON("[0, 1, 2, 3, 4]"),
+      SelectionVectorFromJSON("[1, 3]")};
+  for (bool chunked : {false, true}) {
+    Datum argument = chunked ? Datum(std::make_shared<ChunkedArray>(
+                                   ArrayVector{input->Slice(0, 2), input->Slice(2)}))
+                             : Datum(input);
+    for (const auto& selection : selections) {
+      ExecContext ctx;
+      ctx.set_exec_chunksize(2);
+      KernelContext kernel_ctx(&ctx, &kernel);
+      auto executor = KernelExecutor::MakeScalar();
+      std::vector<TypeHolder> types{uint8()};
+      ASSERT_OK(executor->Init(&kernel_ctx, {&kernel, types, nullptr}));
+      ExecBatch batch({argument}, 5, selection);
+      DatumAccumulator listener;
+      ASSERT_OK(executor->Execute(batch, &listener));
+      auto result = executor->WrapResults(batch.values, listener.values());
+      ArrayVector chunks = result.is_array() ? ArrayVector{result.make_array()}
+                                             : result.chunked_array()->chunks();
+      auto expected = selection && selection->length() == 2 ? partial : input;
+      int64_t offset = 0;
+      for (const auto& chunk : chunks) {
+        ASSERT_OK(chunk->ValidateFull());
+        AssertArraysEqual(*expected->Slice(offset, chunk->length()), *chunk);
+        offset += chunk->length();
+      }
+      ASSERT_EQ(5, offset);
+    }
+  }
+}
+
 }  // namespace detail
 }  // namespace compute
 }  // namespace arrow

@@ -223,13 +223,13 @@ Status ApplySelectionMask(const SelectionSpan& selection, ExecResult* out,
   if (!HasValidityBitmap(*data->type)) {
     return Status::NotImplemented("Selection masking for ", data->type->ToString());
   }
-  if (!data.unique()) data = data->Copy();
+  if (data.use_count() != 1) data = data->Copy();
   const int64_t bit_length = data->offset + data->length;
   auto& bitmap = data->buffers[0];
   if (!bitmap) {
     ARROW_ASSIGN_OR_RAISE(bitmap, AllocateEmptyBitmap(bit_length, pool));
     bit_util::SetBitsTo(bitmap->mutable_data(), 0, bit_length, true);
-  } else if (!bitmap.unique() || !bitmap->is_mutable() || bitmap->parent()) {
+  } else if (bitmap.use_count() != 1 || !bitmap->is_mutable() || bitmap->parent()) {
     ARROW_ASSIGN_OR_RAISE(auto writable, AllocateEmptyBitmap(bit_length, pool));
     CopyBitmap(bitmap->data(), 0, bit_length, writable->mutable_data(), 0);
     bitmap = std::move(writable);

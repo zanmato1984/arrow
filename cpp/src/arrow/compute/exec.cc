@@ -1029,7 +1029,11 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         HasValidityBitmap(*output_type_.type);
     if (selection_may_introduce_nulls) {
       elide_validity_bitmap_ = false;
-      validity_preallocated_ = true;
+      // Do not change the result container expected by a kernel that allocates its
+      // own bitmap. Such kernels receive ArrayData and are masked after execution.
+      if (kernel_->null_handling != NullHandling::COMPUTED_NO_PREALLOCATE) {
+        validity_preallocated_ = true;
+      }
     }
     if (kernel_->mem_allocation == MemAllocation::PREALLOCATE) {
       data_preallocated_.clear();
