@@ -122,14 +122,14 @@ void ValidateOutput(const Datum& output) {
 }
 
 std::shared_ptr<SelectionVector> SelectionVectorFromJSON(const std::string& json) {
-  return std::make_shared<SelectionVector>(*ArrayFromJSON(int32(), json));
+  return SelectionVector::MakeIndices(*ArrayFromJSON(int32(), json));
 }
 
 std::shared_ptr<SelectionVector> MakeSelectionVectorTo(int64_t length) {
   auto res = gen::Step<int32_t>()->Generate(length);
   DCHECK_OK(res.status());
   auto arr = res.ValueUnsafe();
-  return std::make_shared<SelectionVector>(*arr);
+  return SelectionVector::MakeIndices(*arr);
 }
 
 }  // namespace arrow::compute

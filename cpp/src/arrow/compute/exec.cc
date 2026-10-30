@@ -330,16 +330,6 @@ void PromoteExecSpanScalars(ExecSpan* span) {
   }
 }
 
-bool CheckIfAllScalar(const ExecBatch& batch) {
-  for (const Datum& value : batch.values) {
-    if (!value.is_scalar()) {
-      DCHECK(value.is_arraylike());
-      return false;
-    }
-  }
-  return batch.num_values() > 0;
-}
-
 }  // namespace
 
 Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
@@ -360,7 +350,6 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   have_all_scalars_ = CheckIfAllScalar(batch);
   promote_if_all_scalars_ = promote_if_all_scalars;
   position_ = 0;
-  selection_position_ = 0;
   length_ = batch.length;
   chunk_indexes_.clear();
   chunk_indexes_.resize(args_->size(), 0);
@@ -369,12 +358,10 @@ Status ExecSpanIterator::Init(const ExecBatch& batch, int64_t max_chunksize,
   value_offsets_.clear();
   value_offsets_.resize(args_->size(), 0);
   max_chunksize_ = std::min(length_, max_chunksize);
-  selection_vector_ = batch.selection_vector.get();
-  if (selection_vector_) {
-    selection_length_ = selection_vector_->length();
-  } else {
-    selection_length_ = 0;
-  }
+  selection_cursor_ = batch.selection_vector
+                          ? SelectionBackend::Get(*batch.selection_vector).MakeCursor()
+                          : nullptr;
+  selection_length_ = batch.selection_vector ? batch.selection_vector->length() : 0;
   return Status::OK();
 }
 
@@ -411,7 +398,7 @@ int64_t ExecSpanIterator::GetNextChunkSpan(int64_t iteration_size, ExecSpan* spa
   return iteration_size;
 }
 
-bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span) {
+bool ExecSpanIterator::Next(ExecSpan* span, SelectionSpan* selection_span) {
   if (!initialized_) {
     span->length = 0;
 
@@ -450,13 +437,6 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
       PromoteExecSpanScalars(span);
     }
 
-    if (!have_all_scalars_ || promote_if_all_scalars_) {
-      if (selection_vector_) {
-        DCHECK_NE(selection_span, nullptr);
-        *selection_span = SelectionVectorSpan(selection_vector_->indices());
-      }
-    }
-
     initialized_ = true;
   } else if (position_ == length_) {
     // We've emitted at least one span and we're at the end so we are done
@@ -481,17 +461,10 @@ bool ExecSpanIterator::Next(ExecSpan* span, SelectionVectorSpan* selection_span)
   }
 
   // Then the selection span
-  if (selection_vector_) {
-    DCHECK_NE(selection_span, nullptr);
-    auto indices_begin = selection_vector_->indices() + selection_position_;
-    auto indices_end = selection_vector_->indices() + selection_vector_->length();
-    DCHECK_LE(indices_begin, indices_end);
-    auto indices_limit = std::lower_bound(
-        indices_begin, indices_end, static_cast<int32_t>(position_ + iteration_size));
-    int64_t num_indices = indices_limit - indices_begin;
-    selection_span->SetSlice(selection_position_, num_indices,
-                             static_cast<int32_t>(position_));
-    selection_position_ += num_indices;
+  if (selection_cursor_) {
+    SelectionSpan selection =
+        selection_cursor_->Next(position_, position_ + iteration_size);
+    if (selection_span) *selection_span = std::move(selection);
   }
 
   position_ += iteration_size;
@@ -771,6 +744,11 @@ class KernelExecutorImpl : public KernelExecutor {
     }
     if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
       out->null_count = 0;
+      if (out->buffers[0]) {
+        bit_util::SetBitsTo(out->buffers[0]->mutable_data(), 0, length, true);
+        // ArraySpan kernels may subsequently mask slices of this owning ArrayData.
+        out->null_count = kUnknownNullCount;
+      }
     }
     for (size_t i = 0; i < data_preallocated_.size(); ++i) {
       const auto& prealloc = data_preallocated_[i];
@@ -827,12 +805,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       return EmitResult(result->data(), listener);
     }
 
-    if (batch.selection_vector && !kernel_->selective_exec) {
-      // If the batch contains a selection vector but the kernel does not support
-      // selective execution, we need to execute the batch in a "dense" manner.
-      return ExecuteSelectiveDense(batch, listener);
-    }
-
     return ExecuteBatch(batch, listener);
   }
 
@@ -875,46 +847,6 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  // Execute a single batch with a selection vector "densely" for a kernel that doesn't
-  // support selective execution. "Densely" here means that we first gather the rows
-  // indicated by the selection vector into a contiguous ExecBatch, execute that, and
-  // then scatter the result back to the original row positions in the output.
-  Status ExecuteSelectiveDense(const ExecBatch& batch, ExecListener* listener) {
-    DCHECK(batch.selection_vector && !kernel_->selective_exec);
-
-    if (CheckIfAllScalar(batch)) {
-      // For all-scalar batch, we can skip the gather/scatter steps as if there is no
-      // selection vector - the result is a scalar anyway.
-      ExecBatch input = batch;
-      input.selection_vector = nullptr;
-      return ExecuteBatch(input, listener);
-    }
-
-    std::vector<Datum> values(batch.num_values());
-    for (int i = 0; i < batch.num_values(); ++i) {
-      if (batch[i].is_scalar()) {
-        // XXX: Skip gather for scalars since it is not currently supported by Take.
-        values[i] = batch[i];
-      } else {
-        ARROW_ASSIGN_OR_RAISE(values[i],
-                              Take(batch[i], *batch.selection_vector->data(),
-                                   TakeOptions{/*boundcheck=*/false}, exec_context()));
-      }
-    }
-    ARROW_ASSIGN_OR_RAISE(
-        ExecBatch input,
-        ExecBatch::Make(std::move(values), batch.selection_vector->length()));
-
-    DatumAccumulator dense_listener;
-    RETURN_NOT_OK(ExecuteBatch(input, &dense_listener));
-    Datum dense_result = WrapResults(input.values, dense_listener.values());
-
-    ARROW_ASSIGN_OR_RAISE(auto result,
-                          Scatter(dense_result, *batch.selection_vector->data(),
-                                  ScatterOptions{/*max_index=*/batch.length - 1}));
-    return listener->OnResult(std::move(result));
-  }
-
   Status EmitResult(std::shared_ptr<ArrayData> out, ExecListener* listener) {
     if (span_iterator_.have_all_scalars()) {
       // ARROW-16757 We boxed scalar inputs as ArraySpan, so now we have to
@@ -933,8 +865,8 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // eventually skip the creation of ArrayData altogether
     std::shared_ptr<ArrayData> preallocation;
     ExecSpan input;
-    SelectionVectorSpan selection;
-    SelectionVectorSpan* selection_ptr = nullptr;
+    SelectionSpan selection;
+    SelectionSpan* selection_ptr = nullptr;
     if (span_iterator_.have_selection_vector()) {
       selection_ptr = &selection;
     }
@@ -973,9 +905,13 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     }
   }
 
-  Status ExecuteSingleSpan(const ExecSpan& input, const SelectionVectorSpan* selection,
+  Status ExecuteSingleSpan(const ExecSpan& input, const SelectionSpan* selection,
                            ExecResult* out) {
     ArraySpan* result_span = out->array_span_mutable();
+    if (IsEmptySelection(selection)) {
+      SetSpanAllNull(result_span);
+      return Status::OK();
+    }
     if (output_type_.type->id() == Type::NA) {
       result_span->null_count = result_span->length;
     } else if (kernel_->null_handling == NullHandling::INTERSECTION) {
@@ -986,6 +922,9 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       result_span->null_count = 0;
     }
     RETURN_NOT_OK(ExecuteKernel(input, selection, out));
+    if (selection != nullptr) {
+      RETURN_NOT_OK(ApplySelectionMask(*selection, out, exec_context()->memory_pool()));
+    }
     // Output type didn't change
     DCHECK(out->is_array_span());
     return Status::OK();
@@ -1000,13 +939,33 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
     // We will eventually delete the Scalar output path per
     // ARROW-16757.
     ExecSpan input;
-    SelectionVectorSpan selection;
-    SelectionVectorSpan* selection_ptr = nullptr;
+    SelectionSpan selection;
+    SelectionSpan* selection_ptr = nullptr;
     if (span_iterator_.have_selection_vector()) {
       selection_ptr = &selection;
     }
     ExecResult output;
+    int64_t pending_empty_length = 0;
+
+    auto flush_pending_empty = [&]() -> Status {
+      if (pending_empty_length == 0) {
+        return Status::OK();
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          std::shared_ptr<Array> all_null,
+          MakeArrayOfNull(output_type_.GetSharedPtr(), pending_empty_length,
+                          exec_context()->memory_pool()));
+      pending_empty_length = 0;
+      return EmitResult(all_null->data(), listener);
+    };
     while (span_iterator_.Next(&input, selection_ptr)) {
+      if (IsEmptySelection(selection_ptr)) {
+        // No rows are selected in this span; skip kernel execution entirely.
+        // Coalesce consecutive empty spans to reduce output chunk overhead.
+        pending_empty_length += input.length;
+        continue;
+      }
+      RETURN_NOT_OK(flush_pending_empty());
       ARROW_ASSIGN_OR_RAISE(output.value, PrepareOutput(input.length));
       DCHECK(output.is_array_data());
 
@@ -1024,9 +983,15 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
       // Output type didn't change
       DCHECK(output.is_array_data());
 
+      if (selection_ptr != nullptr) {
+        RETURN_NOT_OK(
+            ApplySelectionMask(*selection_ptr, &output, exec_context()->memory_pool()));
+      }
+
       // Emit a result for each chunk
       RETURN_NOT_OK(EmitResult(output.array_data(), listener));
     }
+    RETURN_NOT_OK(flush_pending_empty());
     return Status::OK();
   }
 
@@ -1053,6 +1018,21 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
         validity_preallocated_ = !elide_validity_bitmap_;
       } else if (kernel_->null_handling == NullHandling::OUTPUT_NOT_NULL) {
         elide_validity_bitmap_ = true;
+      }
+    }
+
+    // A selection may introduce nulls even if the kernel itself does not.
+    // When a batch has a selection vector, rows outside the selection must be null.
+    const bool selection_may_introduce_nulls =
+        span_iterator_.have_selection_vector() &&
+        span_iterator_.selection_length() != span_iterator_.length() &&
+        HasValidityBitmap(*output_type_.type);
+    if (selection_may_introduce_nulls) {
+      elide_validity_bitmap_ = false;
+      // Do not change the result container expected by a kernel that allocates its
+      // own bitmap. Such kernels receive ArrayData and are masked after execution.
+      if (kernel_->null_handling != NullHandling::COMPUTED_NO_PREALLOCATE) {
+        validity_preallocated_ = true;
       }
     }
     if (kernel_->mem_allocation == MemAllocation::PREALLOCATE) {
@@ -1087,7 +1067,7 @@ class ScalarExecutor : public KernelExecutorImpl<ScalarKernel> {
 
   // Actually invoke the kernel on the given input span, either selectively if there is a
   // selection or non-selectively otherwise.
-  Status ExecuteKernel(const ExecSpan& input, const SelectionVectorSpan* selection,
+  Status ExecuteKernel(const ExecSpan& input, const SelectionSpan* selection,
                        ExecResult* out) {
     if (selection) {
       DCHECK_NE(kernel_->selective_exec, nullptr);
@@ -1394,7 +1374,7 @@ void PropagateNullsSpans(const ExecSpan& batch, ArraySpan* out) {
 }
 
 std::unique_ptr<KernelExecutor> KernelExecutor::MakeScalar() {
-  return std::make_unique<detail::ScalarExecutor>();
+  return MakeDenseSelectionScalarExecutor(std::make_unique<detail::ScalarExecutor>());
 }
 
 std::unique_ptr<KernelExecutor> KernelExecutor::MakeVector() {
@@ -1452,60 +1432,6 @@ ExecContext::ExecContext(MemoryPool* pool, ::arrow::internal::Executor* executor
 }
 
 const CpuInfo* ExecContext::cpu_info() const { return CpuInfo::GetInstance(); }
-
-// ----------------------------------------------------------------------
-// SelectionVector
-
-SelectionVector::SelectionVector(std::shared_ptr<ArrayData> data)
-    : data_(std::move(data)) {
-  DCHECK_NE(data_, nullptr);
-  DCHECK_EQ(data_->type->id(), Type::INT32);
-  indices_ = data_->GetValues<int32_t>(1);
-}
-
-SelectionVector::SelectionVector(const Array& arr) : SelectionVector(arr.data()) {}
-
-int64_t SelectionVector::length() const { return data_->length; }
-
-Status SelectionVector::Validate(int64_t values_length) const {
-  if (data_ == nullptr) {
-    return Status::Invalid("SelectionVector not initialized");
-  }
-  ARROW_CHECK_NE(indices_, nullptr);
-  if (data_->type->id() != Type::INT32) {
-    return Status::Invalid("SelectionVector must be of type int32");
-  }
-  if (data_->GetNullCount() != 0) {
-    return Status::Invalid("SelectionVector cannot contain nulls");
-  }
-  for (int64_t i = 1; i < length(); ++i) {
-    if (indices_[i - 1] > indices_[i]) {
-      return Status::Invalid("SelectionVector indices must be sorted");
-    }
-  }
-  for (int64_t i = 0; i < length(); ++i) {
-    if (indices_[i] < 0) {
-      return Status::Invalid("SelectionVector indices must be non-negative");
-    }
-  }
-  if (values_length >= 0) {
-    for (int64_t i = 0; i < length(); ++i) {
-      if (indices_[i] >= values_length) {
-        return Status::Invalid("SelectionVector index ", indices_[i],
-                               " >= values length ", values_length);
-      }
-    }
-  }
-  return Status::OK();
-}
-
-void SelectionVectorSpan::SetSlice(int64_t offset, int64_t length,
-                                   int32_t index_back_shift) {
-  DCHECK_NE(indices_, nullptr);
-  offset_ = offset;
-  length_ = length;
-  index_back_shift_ = index_back_shift;
-}
 
 Result<Datum> CallFunction(const std::string& func_name, const std::vector<Datum>& args,
                            const FunctionOptions* options, ExecContext* ctx) {

@@ -722,12 +722,14 @@ set(ARROW_COMPUTE_SRCS
     compute/api_vector.cc
     compute/cast.cc
     compute/exec.cc
+    compute/exec_selection.cc
     compute/expression.cc
     compute/function.cc
     compute/function_internal.cc
     compute/kernel.cc
     compute/ordering.cc
     compute/registry.cc
+    compute/selection.cc
     compute/kernels/chunked_internal.cc
     compute/kernels/codegen_internal.cc
     compute/kernels/scalar_cast_boolean.cc

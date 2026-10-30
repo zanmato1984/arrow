@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -27,8 +28,9 @@
 #include "arrow/buffer.h"
 #include "arrow/compute/exec.h"
 #include "arrow/compute/kernel.h"
+#include "arrow/compute/selection_internal.h"
 #include "arrow/status.h"
-#include "arrow/util/functional.h"
+#include "arrow/util/logging_internal.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
@@ -39,6 +41,12 @@ class Function;
 static constexpr int64_t kDefaultMaxChunksize = std::numeric_limits<int64_t>::max();
 
 namespace detail {
+
+inline bool CheckIfAllScalar(const ExecBatch& batch) {
+  return !batch.values.empty() &&
+         std::all_of(batch.values.begin(), batch.values.end(),
+                     [](const Datum& value) { return value.is_scalar(); });
+}
 
 /// \brief Break std::vector<Datum> into a sequence of non-owning
 /// ExecSpan for kernel execution. The lifetime of the Datum vector
@@ -65,15 +73,17 @@ class ARROW_EXPORT ExecSpanIterator {
   /// This function always populates at least one span. If you call this function with a
   /// blank ExecSpan after the first iteration, it will not work correctly (maybe we will
   /// change this later). Return false if the iteration is exhausted
-  bool Next(ExecSpan* span, SelectionVectorSpan* selection_span = NULLPTR);
+  bool Next(ExecSpan* span, SelectionSpan* selection_span = NULLPTR);
 
   int64_t length() const { return length_; }
   int64_t selection_length() const { return selection_length_; }
   int64_t position() const { return position_; }
-  int64_t selection_position() const { return selection_position_; }
+  int64_t selection_position() const {
+    return selection_cursor_ ? selection_cursor_->position() : 0;
+  }
 
   bool have_all_scalars() const { return have_all_scalars_; }
-  bool have_selection_vector() const { return selection_vector_ != NULLPTR; }
+  bool have_selection_vector() const { return selection_cursor_ != nullptr; }
 
  private:
   ExecSpanIterator(const std::vector<Datum>& args, int64_t length, int64_t max_chunksize);
@@ -85,7 +95,7 @@ class ARROW_EXPORT ExecSpanIterator {
   bool have_all_scalars_ = false;
   bool promote_if_all_scalars_ = true;
   const std::vector<Datum>* args_;
-  SelectionVector* selection_vector_ = NULLPTR;
+  std::unique_ptr<SelectionCursor> selection_cursor_;
   std::vector<int> chunk_indexes_;
   std::vector<int64_t> value_positions_;
 
@@ -97,7 +107,6 @@ class ARROW_EXPORT ExecSpanIterator {
   int64_t position_ = 0;
   int64_t length_ = 0;
   int64_t selection_length_ = 0;
-  int64_t selection_position_ = 0;
   int64_t max_chunksize_;
 };
 
@@ -153,6 +162,14 @@ class ARROW_EXPORT KernelExecutor {
   static std::unique_ptr<KernelExecutor> MakeScalarAggregate();
 };
 
+/// \brief Wrap a scalar kernel executor with dense selection fallback.
+///
+/// Batches without a selection, and selections handled natively by the kernel, are
+/// delegated unchanged. For kernels without selective execution, selected inputs are
+/// gathered before delegation and the dense result is scattered back afterwards.
+std::unique_ptr<KernelExecutor> MakeDenseSelectionScalarExecutor(
+    std::unique_ptr<KernelExecutor> executor);
+
 ARROW_EXPORT
 int64_t InferBatchLength(const std::vector<Datum>& values, bool* all_same);
 
@@ -170,25 +187,6 @@ Status PropagateNulls(KernelContext* ctx, const ExecSpan& batch, ArrayData* out)
 
 ARROW_EXPORT
 void PropagateNullsSpans(const ExecSpan& batch, ArraySpan* out);
-
-template <typename OnSelectionFn>
-typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, Status>::type
-VisitSelectionVectorSpanInline(const SelectionVectorSpan& selection,
-                               OnSelectionFn&& on_selection) {
-  for (int64_t i = 0; i < selection.length(); ++i) {
-    RETURN_NOT_OK(on_selection(selection[i]));
-  }
-  return Status::OK();
-}
-
-template <typename OnSelectionFn>
-typename ::arrow::internal::call_traits::enable_if_return<OnSelectionFn, void>::type
-VisitSelectionVectorSpanInline(const SelectionVectorSpan& selection,
-                               OnSelectionFn&& on_selection) {
-  for (int64_t i = 0; i < selection.length(); ++i) {
-    on_selection(selection[i]);
-  }
-}
 
 }  // namespace detail
 }  // namespace compute
