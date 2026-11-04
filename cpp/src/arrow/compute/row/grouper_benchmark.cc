@@ -17,10 +17,15 @@
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
+#include <numeric>
+
+#include "arrow/array/builder_primitive.h"
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/string.h"
 
 #include "arrow/compute/cast.h"
+#include "arrow/compute/key_hash_internal.h"
 #include "arrow/compute/row/grouper.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
@@ -116,6 +121,50 @@ static void GrouperWithMultiTypes(benchmark::State& state, const DataTypeVector&
 void SetArgs(benchmark::internal::Benchmark* bench) {
   BenchmarkSetArgsWithSizes(bench, {1 << 10, 1 << 12});
 }
+
+static void GrouperHashPartitionedInput(benchmark::State& state) {
+  const int64_t num_rows = state.range(0);
+  const int prefix_bits = static_cast<int>(state.range(1));
+  std::vector<int64_t> keys(num_rows);
+  std::iota(keys.begin(), keys.end(), 0);
+  Int64Builder builder;
+  ABORT_NOT_OK(builder.AppendValues(keys));
+  ASSIGN_OR_ABORT(auto input, builder.Finish());
+  ExecBatch batch({input}, num_rows);
+  if (prefix_bits != 0) {
+    std::vector<uint32_t> hashes(num_rows);
+    std::vector<KeyColumnArray> columns;
+    util::TempVectorStack stack;
+    ABORT_NOT_OK(stack.Init(default_memory_pool(), Hashing32::kHashBatchTempStackUsage));
+    for (int64_t offset = 0; offset < num_rows; offset += 1024) {
+      ABORT_NOT_OK(Hashing32::HashBatch(batch, hashes.data() + offset, columns,
+                                        /*hardware_flags=*/0, &stack, offset,
+                                        std::min<int64_t>(1024, num_rows - offset)));
+    }
+    // Simulate an upstream hash partitioning its output, without timing a join
+    // or the input preparation. prefix_bits=0 is the natural-order control.
+    std::stable_sort(keys.begin(), keys.end(), [&](int64_t left, int64_t right) {
+      return (hashes[left] >> (32 - prefix_bits)) < (hashes[right] >> (32 - prefix_bits));
+    });
+    ABORT_NOT_OK(builder.AppendValues(keys));
+    ASSIGN_OR_ABORT(input, builder.Finish());
+    batch = ExecBatch({input}, num_rows);
+  }
+  for (auto _ : state) {
+    ASSIGN_OR_ABORT(auto grouper, Grouper::Make({int64()}));
+    for (int64_t offset = 0; offset < num_rows; offset += 32768) {
+      ASSIGN_OR_ABORT(auto ids,
+                      grouper->Consume(ExecSpan(batch), offset,
+                                       std::min<int64_t>(32768, num_rows - offset)));
+      benchmark::DoNotOptimize(ids);
+    }
+    benchmark::DoNotOptimize(grouper->num_groups());
+  }
+  state.SetItemsProcessed(state.iterations() * num_rows);
+}
+
+BENCHMARK(GrouperHashPartitionedInput)
+    ->ArgsProduct({{1 << 16, 1 << 18, 1 << 19}, {0, 3, 5}});
 
 // This benchmark is mainly to ensure that the construction of our underlying
 // RowTable and the performance of the comparison operations in the lower-level

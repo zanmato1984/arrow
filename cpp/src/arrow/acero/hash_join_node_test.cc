@@ -23,6 +23,7 @@
 #include <unordered_set>
 
 #include "arrow/acero/options.h"
+#include "arrow/acero/swiss_join_internal.h"
 #include "arrow/acero/test_util_internal.h"
 #include "arrow/acero/util.h"
 #include "arrow/api.h"
@@ -58,6 +59,20 @@ using compute::Take;
 using compute::internal::RowEncoder;
 
 namespace acero {
+
+TEST(HashJoin, RejectSeededPartitionMerge) {
+  SwissTable source, target;
+  auto* pool = default_memory_pool();
+  for (uint32_t seed : {0U, 1U, 0xffffffffU}) {
+    ASSERT_OK(source.init(/*hardware_flags=*/0, pool, /*log_blocks=*/0,
+                          /*no_hash_array=*/false, seed));
+    ASSERT_RAISES(Invalid,
+                  SwissTableMerge::PrepareForMerge(&target, {&source}, nullptr, pool));
+    source.cleanup();
+  }
+  ASSERT_OK(source.init(/*hardware_flags=*/0, pool));
+  ASSERT_OK(SwissTableMerge::PrepareForMerge(&target, {&source}, nullptr, pool));
+}
 
 BatchesWithSchema GenerateBatchesFromString(
     const std::shared_ptr<Schema>& schema,

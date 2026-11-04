@@ -1190,6 +1190,38 @@ TEST(Grouper, RandomStringInt64DoubleInt32Keys) {
   TestRandomLookup(TestGrouper({utf8(), int64(), float64(), int32()}));
 }
 
+TEST(Grouper, ReuseAfterReset) {
+  // Exercise the same placement hash through growing, repeated Consume calls,
+  // Populate and Lookup, for both fixed-width and variable-length keys.
+  for (const std::vector<TypeHolder>& types :
+       {std::vector<TypeHolder>{int64()}, {utf8()}, {utf8(), int64()}}) {
+    TestGrouper g(types);
+    random::RandomArrayGenerator rng(42);
+    std::vector<Datum> values;
+    for (const auto& type : types) {
+      values.emplace_back(rng.ArrayOf(*field("", type.GetSharedPtr()), 1 << 15));
+    }
+    ExecBatch batch(std::move(values), 1 << 15);
+    for (int round = 0; round < 3; ++round) {
+      SCOPED_TRACE(round);
+      auto first = batch.Slice(0, batch.length / 2);
+      g.ConsumeAndValidate(first);
+      g.ExpectPopulate(batch.Slice(first.length, batch.length - first.length));
+      Datum ids;
+      g.LookupAndValidate(batch, &ids);
+      ASSERT_EQ(ids.null_count(), 0);
+      Datum repeated;
+      g.ConsumeAndValidate(batch, &repeated);
+      AssertDatumsEqual(ids, repeated);
+      ASSERT_OK(g.grouper_->Reset());
+      g.uniques_ = ExecBatch({}, -1);
+      ASSERT_EQ(g.grouper_->num_groups(), 0);
+      ASSERT_OK_AND_ASSIGN(auto missing, g.grouper_->Lookup(ExecSpan(batch)));
+      ASSERT_EQ(missing.null_count(), batch.length);
+    }
+  }
+}
+
 TEST(Grouper, RandomStringViewKeys) {
   for (auto ty : {utf8_view(), binary_view()}) {
     ARROW_SCOPED_TRACE("key type = ", *ty);
